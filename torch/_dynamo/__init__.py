@@ -1,4 +1,12 @@
-from . import allowed_functions, convert_frame, eval_frame, resume_execution
+import sys
+
+from . import (
+    allowed_functions,
+    config as _config_module,
+    convert_frame,
+    eval_frame,
+    resume_execution,
+)
 from .backends.registry import list_backends, register_backend
 from .convert_frame import replay
 from .eval_frame import (
@@ -20,6 +28,7 @@ from .utils import compilation_metrics, guard_failures, orig_code_map, reset_fra
 __all__ = [
     "allow_in_graph",
     "assume_constant_result",
+    "config",
     "disallow_in_graph",
     "forbid_in_graph",
     "graph_break",
@@ -38,6 +47,15 @@ __all__ = [
     "register_backend",
     "list_backends",
 ]
+
+
+# Class type of config
+# torch._dynamo.config is really an object of this type instead of a module.
+import torch.config_utils
+
+DynamoConfig = torch.config_utils.make_config_dataclass("DynamoConfig", _config_module)
+config = DynamoConfig()
+sys.modules[f"{__name__}.config"] = config
 
 
 def reset():
