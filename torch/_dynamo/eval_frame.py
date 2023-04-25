@@ -46,9 +46,10 @@ else:
             continue
         globals()[name] = getattr(torch._C._dynamo.eval_frame, name)
 
-from . import config, convert_frame, external_utils, skipfiles, utils
+from . import config, convert_frame, external_utils, utils
 from .exc import CondOpArgsMismatchError, ResetRequired, UserError, UserErrorType
 from .mutation_guard import install_generation_tagging_init
+from .skipfiles import check
 from .types import DynamoCallback
 from .utils import compile_times
 
@@ -98,7 +99,7 @@ class OptimizedModule(torch.nn.Module):
 
     def _initialize(self):
         # Do this stuff in constructor to lower overhead slightly
-        if isinstance(self._orig_mod.forward, types.MethodType) and skipfiles.check(
+        if isinstance(self._orig_mod.forward, types.MethodType) and check(
             inspect.getsourcefile(self._orig_mod.forward)
         ):
             # This may be a torch.nn.* instance in skipfiles.py which
@@ -243,7 +244,7 @@ class _TorchDynamoContext:
         except TypeError:
             filename = None
         if (
-            (filename is None or skipfiles.check(filename))
+            (filename is None or check(filename))
             and (getattr(fn, "__name__", "") != "_call_impl")
             and filename not in DONT_WRAP_FILES
         ):
@@ -403,7 +404,7 @@ def catch_errors_wrapper(callback, hooks: Hooks):
         if (
             # TODO: the first condition is not covered by any test
             frame.f_lasti >= first_real_inst_idx(frame.f_code)
-            or skipfiles.check(frame.f_code.co_filename)
+            or check(frame.f_code.co_filename)
             or config.disable
         ):
             log.debug("skipping %s %s", frame.f_code.co_name, frame.f_code.co_filename)
