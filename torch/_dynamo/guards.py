@@ -26,6 +26,8 @@ from torch._guards import (
 )
 from torch.fx.experimental.symbolic_shapes import is_concrete_int, SYMPY_INTERP
 
+from torch.utils.weak import WeakIdRef
+
 from . import config, convert_frame, mutation_guard
 from .eval_frame import set_guard_error_hook, set_guard_fail_hook
 from .exc import unimplemented
@@ -753,21 +755,11 @@ class CheckFunctionManager:
                     return converted
 
                 dynamic_dims_sizes = [
-                    convert(
-                        self.output_graph.tracing_context.fake_mode.from_tensor(
-                            t,
-                            memoized_only=True,
-                        ).size()
-                    )
+                    convert(self.output_graph.tensor_weakref_to_sizes_strides[WeakIdRef(t)]["size"])
                     for t in tensor_check_examples
                 ]
                 dynamic_dims_strides = [
-                    convert(
-                        self.output_graph.tracing_context.fake_mode.from_tensor(
-                            t,
-                            memoized_only=True,
-                        ).stride()
-                    )
+                    convert(self.output_graph.tensor_weakref_to_sizes_strides[WeakIdRef(t)]["stride"])
                     for t in tensor_check_examples
                 ]
 
