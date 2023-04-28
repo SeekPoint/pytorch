@@ -204,6 +204,9 @@
 #        USE_SYSTEM_CPUINFO=ON USE_SYSTEM_SLEEF=ON BUILD_CUSTOM_PROTOBUF=OFF
 
 # This future is needed to print Python2 EOL message
+
+from andy_common import printLineFileFunc
+
 from __future__ import print_function
 import sys
 if sys.version_info < (3,):
@@ -256,6 +259,7 @@ RERUN_CMAKE = False
 CMAKE_ONLY = False
 filtered_args = []
 for i, arg in enumerate(sys.argv):
+    print("the {1} arg is {0}".format(i, arg))
     if arg == '--cmake':
         RERUN_CMAKE = True
         continue

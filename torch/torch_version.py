@@ -17,6 +17,7 @@ class _LazyImport:
     do not happen until v is called
     """
     def __init__(self, cls_name: str) -> None:
+        print("_LazyImport init")
         self._cls_name = cls_name
 
     def get_cls(self):
