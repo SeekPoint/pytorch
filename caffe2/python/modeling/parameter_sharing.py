@@ -18,6 +18,7 @@ class ParameterSharingContext:
     """
 
     def __init__(self):
+        print('%s __init__ called', self.__classs__.__name__)
         self._scope_overrides = {}
         self._contexts = []
 

@@ -30,6 +30,7 @@ class TimerRequest:
     __slots__ = ["worker_id", "scope_id", "expiration_time"]
 
     def __init__(self, worker_id: Any, scope_id: str, expiration_time: float):
+        print('%s __init__ called', self.__classs__.__name__)
         self.worker_id = worker_id
         self.scope_id = scope_id
         self.expiration_time = expiration_time
@@ -120,6 +121,7 @@ class TimerServer(abc.ABC):
                              for an item in the request_queue
         :param daemon: whether to run the watchdog thread as a daemon
         """
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__()
         self._request_queue = request_queue
         self._max_interval = max_interval

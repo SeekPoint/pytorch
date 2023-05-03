@@ -1741,6 +1741,7 @@ def cudnn_LSTM(model, input_blob, initial_states, dim_in, dim_out,
         recurrent_bias_size = dim_out
 
         def init(layer, pname, input_type):
+            print('%s init called', self.__classs__.__name__)
             input_weight_size_for_layer = input_weight_size if layer == 0 else \
                 upper_layer_input_weight_size
             if pname in weight_params:

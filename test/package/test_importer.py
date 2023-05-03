@@ -95,6 +95,7 @@ class TestImporter(PackageTestCase):
 
         class DummyImporter(Importer):
             def __init__(self, whichmodule_return):
+                print('%s __init__ called', self.__classs__.__name__)
                 self._whichmodule_return = whichmodule_return
 
             def import_module(self, module_name):

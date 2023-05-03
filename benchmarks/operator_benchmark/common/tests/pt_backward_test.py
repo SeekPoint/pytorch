@@ -13,6 +13,7 @@ add_configs = op_bench.cross_product_configs(
 # for both inputs. The test name can also be used for filtering.
 class AddBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K):
+        print('%s init called', self.__classs__.__name__)
         self.input_one = torch.rand(M, N, K, requires_grad=self.auto_set())
         self.input_two = torch.rand(M, N, K, requires_grad=self.auto_set())
         self.set_module_name("add")

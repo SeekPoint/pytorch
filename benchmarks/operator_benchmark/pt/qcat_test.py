@@ -35,6 +35,7 @@ qcat_configs_long = op_bench.cross_product_configs(
 
 class QCatBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, L, dim, contig, dtype):
+        print('%s init called', self.__classs__.__name__)
         f_input = (torch.rand(M, N, K) - 0.5) * 256
         self.qf = nnq.QFunctional()
         scale = 1.0

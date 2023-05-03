@@ -27,6 +27,7 @@ linear_prepack_fp16_short_configs = op_bench.config_list(
 
 class LinearPrepackFP16Benchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(M, N, K, device=device, requires_grad=False, dtype=torch.float32)
         }

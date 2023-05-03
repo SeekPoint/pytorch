@@ -158,6 +158,7 @@ class TestMemoryEfficientOpAuthoring(TestCase):
                 """
                 Construct a layernorm module in the T5 style No bias and no subtraction of mean.
                 """
+                print('%s __init__ called', self.__classs__.__name__)
                 super().__init__()
                 self.weight = nn.Parameter(torch.ones(hidden_size))
                 self.variance_epsilon = eps

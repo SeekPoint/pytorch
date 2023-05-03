@@ -30,6 +30,7 @@ split_configs_long = op_bench.cross_product_configs(
 
 class SplitBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, parts, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(M, N, device=device),
             "split_size": int(M * N / parts)

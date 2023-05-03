@@ -42,6 +42,7 @@ class ContinuousBernoulli(ExponentialFamily):
     has_rsample = True
 
     def __init__(self, probs=None, logits=None, lims=(0.499, 0.501), validate_args=None):
+        print('%s __init__ called', self.__classs__.__name__)
         if (probs is None) == (logits is None):
             raise ValueError("Either `probs` or `logits` must be specified, but not both.")
         if probs is not None:

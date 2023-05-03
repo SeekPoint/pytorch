@@ -28,6 +28,7 @@ sparse_configs_long = op_bench.cross_product_configs(
 
 class WeightNormSparsifierBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, SL, SBS, ZPB):
+        print('%s init called', self.__classs__.__name__)
         weight = torch.ones(M)
         model = nn.Module()
         model.register_buffer("weight", weight)

@@ -47,6 +47,7 @@ class GradientClipping(NetModifier):
             to none, all param 's gradient in grad_map will be clipped.
         blobs_to_exclude: names of blobs whose gradient is not to be clipped.
         """
+        print('%s __init__ called', self.__classs__.__name__)
 
         assert grad_clip_method in self.GRAD_CLIP_METHODS, (
             "This method of clipping, {}, has not been implemented.".format(

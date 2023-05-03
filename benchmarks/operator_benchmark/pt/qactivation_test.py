@@ -76,6 +76,7 @@ class QActivationBenchmarkBase(op_bench.TorchBenchmarkBase):
         }
 
     def init(self, dims, contig, inplace, dtype, op_func):
+        print('%s init called', self.__classs__.__name__)
         self._setup(dims, contig, dtype)
         self.qop = op_func
 

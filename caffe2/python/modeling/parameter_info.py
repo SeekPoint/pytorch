@@ -19,6 +19,7 @@ class ParameterInfo:
     def __init__(
             self, param_id, param, key=None, shape=None, length=None,
             grad=None, blob_copy=None):
+        print('%s __init__ called', self.__classs__.__name__)
         assert isinstance(param, core.BlobReference)
         self.param_id = param_id
         self.name = str(param)

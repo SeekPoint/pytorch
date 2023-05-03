@@ -27,6 +27,7 @@ class LocalTimerClient(TimerClient):
     """
 
     def __init__(self, mp_queue):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__()
         self._mp_queue = mp_queue
 
@@ -47,6 +48,7 @@ class MultiprocessingRequestQueue(RequestQueue):
     """
 
     def __init__(self, mp_queue: mp.Queue):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__()
         self._mp_queue = mp_queue
 
@@ -84,6 +86,7 @@ class LocalTimerServer(TimerServer):
     def __init__(
         self, mp_queue: mp.Queue, max_interval: float = 60, daemon: bool = True
     ):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__(MultiprocessingRequestQueue(mp_queue), max_interval, daemon)
         self._timers: Dict[Tuple[Any, str], TimerRequest] = {}
 

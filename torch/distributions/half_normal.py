@@ -31,6 +31,7 @@ class HalfNormal(TransformedDistribution):
     has_rsample = True
 
     def __init__(self, scale, validate_args=None):
+        print('%s __init__ called', self.__classs__.__name__)
         base_dist = Normal(0, scale, validate_args=False)
         super().__init__(base_dist, AbsTransform(), validate_args=validate_args)
 

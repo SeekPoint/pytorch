@@ -104,6 +104,7 @@ q_hist_observer_list = op_bench.op_list(
 
 class QObserverBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, C, M, N, dtype, qscheme, op_func, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "f_input": torch.rand(C, M, N, device=device)
         }
@@ -116,6 +117,7 @@ class QObserverBenchmark(op_bench.TorchBenchmarkBase):
 
 class QObserverBenchmarkCalculateQparams(op_bench.TorchBenchmarkBase):
     def init(self, C, M, N, dtype, qscheme, op_func, device):
+        print('%s init called', self.__classs__.__name__)
         self.f_input = torch.rand(C, M, N, device=device)
         self.q_observer = op_func(dtype=dtype, qscheme=qscheme).to(device)
         self.q_observer(self.f_input)

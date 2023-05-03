@@ -20,6 +20,7 @@ configs = op_bench.random_sample_configs(
 
 class AddBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K):
+        print('%s init called', self.__classs__.__name__)
         self.input_one = torch.rand(M, N, K)
         self.input_two = torch.rand(M, N, K)
         self.set_module_name("add")

@@ -34,6 +34,7 @@ class CSEPass(PassBase):
         If your dialect contains stateful operators, please customized the banned_ops.
 
         """
+        print('%s __init__ called', self.__classs__.__name__)
         if banned_ops is None:
             banned_ops = set()
         self.banned_ops = banned_ops

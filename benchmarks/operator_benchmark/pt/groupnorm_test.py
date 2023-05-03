@@ -18,6 +18,7 @@ groupnorm_configs_short = op_bench.cross_product_configs(
 
 class GroupNormBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, dims, num_groups):
+        print('%s init called', self.__classs__.__name__)
         num_channels = dims[1]
         self.inputs = {
             "input": (torch.rand(*dims) - 0.5) * 256,

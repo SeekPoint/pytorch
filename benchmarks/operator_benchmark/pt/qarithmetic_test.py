@@ -46,6 +46,7 @@ class _QFunctionalBinaryArithmeticBenchmarkBase(op_bench.TorchBenchmarkBase):
 
 class QFunctionalBenchmark(_QFunctionalBinaryArithmeticBenchmarkBase):
     def init(self, N, dtype, contig, op_func):
+        print('%s init called', self.__classs__.__name__)
         super().setup(N, dtype, contig)
         self.inputs = {
             "q_input_a": self.q_input_a,
@@ -66,6 +67,7 @@ op_bench.generate_pt_tests_from_op_list(qarithmetic_binary_ops,
 
 class QFunctionalScalarBenchmark(_QFunctionalBinaryArithmeticBenchmarkBase):
     def init(self, N, dtype, contig, op_func):
+        print('%s init called', self.__classs__.__name__)
         super().setup(N, dtype, contig)
         self.inputs = {
             "q_input": self.q_input_a,

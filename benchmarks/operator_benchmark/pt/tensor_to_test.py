@@ -17,6 +17,7 @@ tensor_conversion_long_configs = op_bench.cross_product_configs(
 
 class FloatToHalfTensorConversionBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(M, N, device=device, requires_grad=False, dtype=torch.float)
         }
@@ -26,6 +27,7 @@ class FloatToHalfTensorConversionBenchmark(op_bench.TorchBenchmarkBase):
 
 class HalfToFloatTensorConversionBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(M, N, device=device, requires_grad=False, dtype=torch.half)
         }

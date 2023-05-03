@@ -23,6 +23,7 @@ class CyclingIterator:
     """
 
     def __init__(self, n: int, generator_fn, start_epoch=0):
+        print('%s __init__ called', self.__classs__.__name__)
         self._n = n
         self._epoch = start_epoch
         self._generator_fn = generator_fn

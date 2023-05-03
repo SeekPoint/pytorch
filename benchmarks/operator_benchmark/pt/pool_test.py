@@ -41,6 +41,7 @@ pool_1d_ops_list = op_bench.op_list(
 
 class Pool1dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, kernel, stride, N, C, L, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, C, L, device=device)
         }
@@ -98,6 +99,7 @@ pool_2d_ops_list = op_bench.op_list(
 
 class Pool2dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, kernel, stride, N, C, H, W, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, C, H, W, device=device)
         }
@@ -158,6 +160,7 @@ pool_3d_ops_list = op_bench.op_list(
 
 class Pool3dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, kernel, stride, N, C, D, H, W, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, C, D, H, W, device=device)
         }

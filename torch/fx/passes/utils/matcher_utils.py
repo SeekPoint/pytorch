@@ -63,7 +63,7 @@ class SubgraphMatcher:
             remove_overlapping_matches: If True, in the case of overlapping matches, only the first match
                 will be returned.
         """
-
+        print('%s __init__ called', self.__classs__.__name__)
         self.pattern = pattern
         self.match_output = match_output
         self.match_placeholder = match_placeholder

@@ -40,6 +40,7 @@ batch_mm_op_list = op_bench.op_list(
 
 class BatchMatrixMultBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, B, M, N, K, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(B, M, N, device=device),
             "input_two": torch.rand(B, N, K, device=device)
@@ -89,6 +90,7 @@ batch_elementwise_op_list = op_bench.op_list(
 
 class BatchElementWiseBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, B, M, N, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(B, M, N, device=device),
             "input_two": torch.rand(B, M, N, device=device)

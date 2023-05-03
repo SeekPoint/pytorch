@@ -5,6 +5,7 @@ import torch
 
 class BmmBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, B, M, N, K, device, op):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "batch1": torch.rand((B, M, K), device=device, requires_grad=self.auto_set()),
             "batch2": torch.rand((B, K, N,), device=device, requires_grad=self.auto_set())

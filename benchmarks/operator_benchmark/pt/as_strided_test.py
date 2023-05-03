@@ -33,6 +33,7 @@ as_strided_configs_long = op_bench.cross_product_configs(
 
 class As_stridedBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, size, stride, storage_offset, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(M, N, device=device),
             "size": size,

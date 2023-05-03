@@ -27,6 +27,7 @@ unary_ops_configs_long = op_bench.cross_product_configs(
 
 class UnaryOpBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(M, N, device=device)
         }

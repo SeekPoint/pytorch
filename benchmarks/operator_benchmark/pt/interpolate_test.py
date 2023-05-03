@@ -6,7 +6,7 @@ import torch
 
 class InterpolateBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, input_size, output_size, channels_last=False, mode='linear', dtype=torch.float):
-
+        print('%s init called', self.__classs__.__name__)
         input_image = torch.randint(0, 256, size=input_size, dtype=dtype, device='cpu',
                                     requires_grad=self.auto_set())
         if channels_last:

@@ -38,6 +38,7 @@ class Independent(Distribution):
     arg_constraints: Dict[str, constraints.Constraint] = {}
 
     def __init__(self, base_distribution, reinterpreted_batch_ndims, validate_args=None):
+        print('%s __init__ called', self.__classs__.__name__)
         if reinterpreted_batch_ndims > len(base_distribution.batch_shape):
             raise ValueError("Expected reinterpreted_batch_ndims <= len(base_distribution.batch_shape), "
                              "actual {} vs {}".format(reinterpreted_batch_ndims,

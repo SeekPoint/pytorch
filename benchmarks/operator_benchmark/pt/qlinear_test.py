@@ -13,6 +13,7 @@ Microbenchmarks for Quantized Linear operators.
 
 class _QLinearBenchmarkBase(op_bench.TorchBenchmarkBase):
     def init(self, N, IN, OUT, linear_under_test):
+        print('%s init called', self.__classs__.__name__)
         scale = torch.tensor(1.0 / 255)
         zero_point = torch.tensor(0)
         self.X = torch.randn(N, IN, dtype=torch.float32)
@@ -32,6 +33,7 @@ class _QLinearBenchmarkBase(op_bench.TorchBenchmarkBase):
 
 class QLinearBenchmark(_QLinearBenchmarkBase):
     def init(self, N, IN, OUT, device):
+        print('%s init called', self.__classs__.__name__)
         super().init(N, IN, OUT, nnq.Linear(IN, OUT))
         self.inputs = {
             "input": self.qX
@@ -41,6 +43,7 @@ class QLinearBenchmark(_QLinearBenchmarkBase):
 
 class QDynamicLinearBenchmark(_QLinearBenchmarkBase):
     def init(self, N, IN, OUT, device):
+        print('%s init called', self.__classs__.__name__)
         super().init(N, IN, OUT, nnqd.Linear(IN, OUT))
         self.inputs = {
             "input": self.X

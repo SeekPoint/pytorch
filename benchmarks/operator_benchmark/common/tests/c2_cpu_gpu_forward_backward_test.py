@@ -12,6 +12,7 @@ add_configs = op_bench.cross_product_configs(
 
 class AddBenchmark(op_bench.Caffe2BenchmarkBase):
     def init(self, M, N, K, device):
+        print('%s init called', self.__classs__.__name__)
         self.set_module_name("add")
         self.input_one = self.tensor([M, N, K], device=device)
         self.input_two = self.tensor([M, N, K], device=device)

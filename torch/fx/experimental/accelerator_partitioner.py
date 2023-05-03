@@ -32,6 +32,7 @@ class DAGNode:
         logical_device_ids: List[int],
         size_bytes: int,
     ) -> None:
+        print('%s __init__ called', self.__classs__.__name__)
         self.submodule_node: Node = submodule_node
         self.input_nodes: List[Node] = input_nodes
         self.output_nodes: List[Node] = output_nodes
@@ -46,6 +47,7 @@ class DAG:
     """DAG class contains all the DAG nodes"""
 
     def __init__(self) -> None:
+        print('%s __init__ called', self.__classs__.__name__)
         self.nodes: List[DAGNode] = []
 
     def create_node(
@@ -300,6 +302,7 @@ class Partitioner:
     """
 
     def __init__(self) -> None:
+        print('%s __init__ called', self.__classs__.__name__)
         self.partitions: List[Partition] = []
         self.node_to_partition: Dict[Node, int] = {}
         self.devices: List[Device] = []

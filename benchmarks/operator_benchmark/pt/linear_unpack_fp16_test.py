@@ -27,6 +27,7 @@ linear_unpack_fp16_short_configs = op_bench.config_list(
 
 class LinearUnpackFP16Benchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, device):
+        print('%s init called', self.__classs__.__name__)
         # input to unpack operator must be what the output is for prepack operator
         self.inputs = {
             "input_one": torch.ops.quantized.linear_prepack_fp16(torch.rand(M, N, K, device=device,

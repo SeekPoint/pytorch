@@ -6,6 +6,7 @@ from .unification_tools import groupby, first  # type: ignore[import]
 
 class Dispatcher:
     def __init__(self, name):
+        print('%s __init__ called', self.__classs__.__name__)
         self.name = name
         self.funcs = {}
         self.ordering = []

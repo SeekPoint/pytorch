@@ -29,6 +29,7 @@ binary_configs_broadcast = op_bench.config_list(
 
 class BinaryOpBcastBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, in_one, in_two, dtype, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "in_one": torch.randn(in_one, device=device).to(dtype=dtype),
             "in_two": torch.randn(in_two, device=device).to(dtype=dtype)
@@ -84,6 +85,7 @@ binary_long_configs = op_bench.cross_product_configs(
 
 class BinaryOpBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, device, dtype_one, dtype_two, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.randn(M, N, K, device=device).to(dtype=dtype_one),
             "input_two": torch.randn(M, N, K, device=device).to(dtype=dtype_two)

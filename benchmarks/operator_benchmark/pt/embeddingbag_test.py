@@ -7,6 +7,7 @@ from pt import configs
 
 class EmbeddingBagBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, embeddingbags, dim, mode, input_size, offset, sparse, include_last_offset, device):
+        print('%s init called', self.__classs__.__name__)
         self.embedding = torch.nn.EmbeddingBag(
             num_embeddings=embeddingbags,
             embedding_dim=dim,
@@ -30,6 +31,7 @@ op_bench.generate_pt_gradient_test(configs.embeddingbag_short_configs, Embedding
 
 class EmbeddingBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, num_embeddings, embedding_dim, input_size, device):
+        print('%s init called', self.__classs__.__name__)
         self.embedding = torch.nn.Embedding(
             num_embeddings=num_embeddings,
             embedding_dim=embedding_dim).to(device=device)

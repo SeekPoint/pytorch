@@ -36,6 +36,7 @@ channel_shuffle_short_configs = op_bench.config_list(
 
 class ChannelSHuffleBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, batch_size, channels_per_group, height, width, groups, channel_last):
+        print('%s init called', self.__classs__.__name__)
         channels = channels_per_group * groups
         data_shape = (batch_size, channels, height, width)
         input_data = torch.rand(data_shape)

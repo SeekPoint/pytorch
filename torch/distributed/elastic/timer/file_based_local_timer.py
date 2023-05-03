@@ -34,6 +34,7 @@ class FileTimerRequest(TimerRequest):
     __slots__ = ["version", "worker_pid", "scope_id", "expiration_time", "signal"]
 
     def __init__(self, worker_pid: int, scope_id: str, expiration_time: float, signal: int = 0) -> None:
+        print('%s __init__ called', self.__classs__.__name__)
         self.version = 1
         self.worker_pid = worker_pid
         self.scope_id = scope_id
@@ -83,6 +84,7 @@ class FileTimerClient(TimerClient):
     """
     def __init__(self, file_path: str, signal=(signal.SIGKILL if sys.platform != "win32" else
                                                signal.CTRL_C_EVENT)) -> None:  # type: ignore[attr-defined]
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__()
         self._file_path = file_path
         self.signal = signal
@@ -160,6 +162,7 @@ class FileTimerServer:
         daemon: bool = True,
         log_event: Callable[[str, Optional[FileTimerRequest]], None] = None
     ) -> None:
+        print('%s __init__ called', self.__classs__.__name__)
         self._file_path = file_path
         self._max_interval = max_interval
         self._daemon = daemon

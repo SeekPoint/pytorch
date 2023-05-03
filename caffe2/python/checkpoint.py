@@ -74,6 +74,7 @@ class Job(context.Managed):
                  init_group=None, epoch_group=None,
                  download_group=None, exit_group=None,
                  stop_conditions=None, nodes_to_checkpoint=None):
+        print('%s __init__ called', self.__classs__.__name__)
         self.init_group = init_group or TaskGroup(
             workspace_type=WorkspaceType.GLOBAL)
         self.epoch_group = epoch_group or TaskGroup()
@@ -164,6 +165,7 @@ class CheckpointManager:
     BLOB_NAMES = "blob_names"
 
     def __init__(self, db_prefix, node_name, db_type, metadata_handler=None):
+        print('%s __init__ called', self.__classs__.__name__)
         self._db_prefix = db_prefix
         self._node_name = node_name
         self._db_type = db_type
@@ -443,6 +445,7 @@ class MultiNodeCheckpointManager:
             checkpoint info in storage of choice.
     """
     def __init__(self, db_prefix, db_type, metadata_handler=None):
+        print('%s __init__ called', self.__classs__.__name__)
         self._node_managers = None
         self._db_prefix = db_prefix
         self._db_type = db_type
@@ -681,6 +684,7 @@ class JobRunner:
                 UploadTaskGroupBuilder. Creates a task group to upload
                 checkpoints.
         """
+        print('%s __init__ called', self.__classs__.__name__)
         self.resume_from_epoch = resume_from_epoch
         self.checkpoint_manager = checkpoint_manager
         self.job = job

@@ -19,6 +19,7 @@ gelu_configs_long = op_bench.cross_product_configs(
 
 class GeluBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, N, C, H, W, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, C, H, W, device=device)
         }

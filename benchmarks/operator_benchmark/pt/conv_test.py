@@ -11,6 +11,7 @@ Microbenchmarks for Conv1d and ConvTranspose1d operators.
 
 class Conv1dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, IC, OC, kernel, stride, N, L, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, IC, L, device=device, requires_grad=self.auto_set())
         }
@@ -23,6 +24,7 @@ class Conv1dBenchmark(op_bench.TorchBenchmarkBase):
 
 class ConvTranspose1dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, IC, OC, kernel, stride, N, L, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, IC, L, device=device)
         }
@@ -46,6 +48,7 @@ Microbenchmarks for Conv2d, ConvTranspose2d, and Conv2dPointwise operators.
 
 class Conv2dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, IC, OC, kernel, stride, N, H, W, G, pad, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, IC, H, W, device=device)
         }
@@ -59,6 +62,7 @@ class Conv2dBenchmark(op_bench.TorchBenchmarkBase):
 
 class ConvTranspose2dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, IC, OC, kernel, stride, N, H, W, G, pad, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, IC, H, W, device=device)
         }
@@ -72,6 +76,7 @@ class ConvTranspose2dBenchmark(op_bench.TorchBenchmarkBase):
 
 class Conv2dPointwiseBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, IC, OC, stride, N, H, W, G, pad, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, IC, H, W, device=device)
         }
@@ -98,6 +103,7 @@ Microbenchmarks for Conv3d and ConvTranspose3d operators.
 
 class Conv3dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, IC, OC, kernel, stride, N, D, H, W, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, IC, D, H, W, device=device)
         }
@@ -110,6 +116,7 @@ class Conv3dBenchmark(op_bench.TorchBenchmarkBase):
 
 class ConvTranspose3dBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, IC, OC, kernel, stride, N, D, H, W, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, IC, D, H, W, device=device)
         }

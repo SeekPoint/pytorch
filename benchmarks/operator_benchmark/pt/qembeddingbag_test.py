@@ -11,6 +11,7 @@ Microbenchmarks for qEmbeddingBag operators.
 
 class QEmbeddingBagBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, embeddingbags, dim, mode, input_size, offset, sparse, include_last_offset, device):
+        print('%s init called', self.__classs__.__name__)
         self.embedding = nnq.EmbeddingBag(
             num_embeddings=embeddingbags,
             embedding_dim=dim,

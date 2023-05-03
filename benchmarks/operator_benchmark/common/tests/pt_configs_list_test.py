@@ -20,6 +20,7 @@ add_short_configs = op_bench.config_list(
 
 class AddBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, device, dtype):
+        print('%s init called', self.__classs__.__name__)
         self.input_one = torch.rand(M, N, K, device=device, dtype=dtype, requires_grad=True)
         self.input_two = torch.rand(M, N, K, device=device, dtype=dtype)
         self.set_module_name('add')

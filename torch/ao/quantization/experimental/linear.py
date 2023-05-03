@@ -25,6 +25,7 @@ class LinearAPoT(WeightedQuantizedModule):
     """
 
     def __init__(self, weight2quantize: torch.Tensor, b: int, k: int):
+        print('%s __init__ called', self.__classs__.__name__)
         assert weight2quantize.dim() == 2
         assert b % k == 0
 

@@ -16,6 +16,7 @@ class HolderModule(Module):
     """
 
     def __init__(self, d):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__()
         for k, v in d.items():
             self.add_module(k, v)

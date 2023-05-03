@@ -10,6 +10,7 @@ class TestGraphRewritePasses(JitTestCase):
     def test_fuse_linear(self):
         class FunctionalLinear(torch.nn.Module):
             def __init__(self, weight, bias):
+                print('%s __init__ called', self.__classs__.__name__)
                 super().__init__()
                 self.weight = weight
                 self.bias = bias

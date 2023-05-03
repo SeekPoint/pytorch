@@ -27,6 +27,7 @@ def str2func(str):
 
 class Autotuner:
     def __init__(self):
+        print('%s __init__ called', self.__classs__.__name__)
         self.cache = dict()
 
     def _bench(self, kernel, *args, **kwargs):

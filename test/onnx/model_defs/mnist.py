@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 class MNIST(nn.Module):
     def __init__(self):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__()
         self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
         self.conv2 = nn.Conv2d(10, 20, kernel_size=5)

@@ -37,6 +37,7 @@ def CreateNetOnce(net, created_names=set()): # noqa
 
 class CharRNN:
     def __init__(self, args):
+        print('%s __init__ called', self.__classs__.__name__)
         self.seq_length = args.seq_length
         self.batch_size = args.batch_size
         self.iters_to_report = args.iters_to_report

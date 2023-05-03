@@ -21,6 +21,7 @@ def torch_sumall(a, iterations):
 
 class TorchSumBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N):
+        print('%s init called', self.__classs__.__name__)
         self.input_one = torch.rand(M, N)
         self.set_module_name("sum")
 

@@ -10,6 +10,7 @@ Microbenchmarks for QAT Embedding + EmbeddingBag operators.
 
 class QATEmbeddingBagBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, embeddingbags, dim, mode, input_size, offset, sparse, include_last_offset, device):
+        print('%s init called', self.__classs__.__name__)
         qconfig = default_embedding_qat_qconfig
         self.embedding = nnqat.EmbeddingBag(
             num_embeddings=embeddingbags,
@@ -38,6 +39,7 @@ op_bench.generate_pt_gradient_test(embeddingbag_short_dense_configs, QATEmbeddin
 
 class QATEmbeddingBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, num_embeddings, embedding_dim, input_size, device):
+        print('%s init called', self.__classs__.__name__)
         qconfig = default_embedding_qat_qconfig
         self.embedding = nnqat.Embedding(
             num_embeddings=num_embeddings,

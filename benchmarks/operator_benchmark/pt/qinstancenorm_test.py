@@ -18,6 +18,7 @@ instancenorm_configs_short = op_bench.cross_product_configs(
 class QInstanceNormBenchmark(op_bench.TorchBenchmarkBase):
 
     def init(self, dims, dtype):
+        print('%s init called', self.__classs__.__name__)
         X = (torch.rand(*dims) - 0.5) * 256
         num_channels = dims[1]
         scale = 1.0

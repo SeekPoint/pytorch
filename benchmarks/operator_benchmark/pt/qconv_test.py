@@ -12,6 +12,7 @@ Microbenchmarks for qConv operators.
 class QConv1dBenchmark(op_bench.TorchBenchmarkBase):
     # def init(self, N, IC, OC, L, G, kernel, stride, pad):
     def init(self, IC, OC, kernel, stride, N, L, device):
+        print('%s init called', self.__classs__.__name__)
         G = 1
         pad = 0
         self.scale = 1.0 / 255
@@ -41,6 +42,7 @@ class QConv1dBenchmark(op_bench.TorchBenchmarkBase):
 class QConv2dBenchmark(op_bench.TorchBenchmarkBase):
     # def init(self, N, IC, OC, H, W, G, kernel, stride, pad):
     def init(self, IC, OC, kernel, stride, N, H, W, G, pad, device):
+        print('%s init called', self.__classs__.__name__)
         # super().init(N, IC, OC, (H, W), G, (kernel, kernel), stride, pad)
 
         self.scale = 1.0 / 255

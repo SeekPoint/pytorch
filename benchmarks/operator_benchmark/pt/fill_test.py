@@ -30,6 +30,7 @@ fill_long_configs = op_bench.cross_product_configs(
 
 class Fill_Benchmark(op_bench.TorchBenchmarkBase):
     def init(self, N, device, dtype):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.zeros(N, device=device).type(dtype)
         }

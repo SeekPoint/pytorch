@@ -187,6 +187,7 @@ scale_min_lower_bound=None, scale_max_upper_bound=None)
         bias_dtype: Optional[torch.dtype] = None,
         is_dynamic: Optional[bool] = None,
     ):
+        print('%s __init__ called', self.__classs__.__name__)
         if isinstance(input_dtype, DTypeWithConstraints):
             self.input_dtype_with_constraints = input_dtype
         else:
@@ -326,6 +327,7 @@ class BackendConfig:
 
     """
     def __init__(self, name: str = ""):
+        print('%s __init__ called name is %s', self.__classs__.__name__ , name)
         self.name = name
         # Store all BackendPatternConfigs in a map to handle duplicates
         # Note: the key in this map uses the complex reversed tuple format.
@@ -407,6 +409,7 @@ class BackendPatternConfig:
     For a detailed example usage, see :class:`~torch.ao.quantization.backend_config.BackendConfig`.
     """
     def __init__(self, pattern: Optional[Pattern] = None):
+        print('%s __init__ called', self.__classs__.__name__)
         self.pattern: Optional[Pattern] = pattern
         self.observation_type = ObservationType.OUTPUT_USE_DIFFERENT_OBSERVER_AS_INPUT
         self.dtype_configs: List[DTypeConfig] = []

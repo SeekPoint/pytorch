@@ -35,6 +35,7 @@ class CPPTimer:
         timer: Callable[[], float],
         globals: Dict[str, Any],
     ) -> None:
+        print('%s __init__ called', self.__classs__.__name__)
         if timer is not timeit.default_timer:
             raise NotImplementedError(
                 "PyTorch was built with CUDA and a GPU is present; however "
@@ -188,6 +189,7 @@ class Timer:
         num_threads: int = 1,
         language: Union[Language, str] = Language.PYTHON,
     ):
+        print('%s __init__ called', self.__classs__.__name__)
         if not isinstance(stmt, str):
             raise ValueError("Currently only a `str` stmt is supported.")
 

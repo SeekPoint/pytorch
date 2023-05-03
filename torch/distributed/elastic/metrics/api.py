@@ -24,6 +24,7 @@ class MetricsConfig:
     __slots__ = ["params"]
 
     def __init__(self, params: Optional[Dict[str, str]] = None):
+        print('%s __init__ called', self.__classs__.__name__)
         self.params = params
         if self.params is None:
             self.params = {}
@@ -54,6 +55,7 @@ class NullMetricHandler(MetricHandler):
 
 class MetricStream:
     def __init__(self, group_name: str, handler: MetricHandler):
+        print('%s __init__ called', self.__classs__.__name__)
         self.group_name = group_name
         self.handler = handler
 

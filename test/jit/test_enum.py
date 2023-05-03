@@ -244,6 +244,7 @@ class TestEnum(JitTestCase):
 
         class TestModule(torch.nn.Module):
             def __init__(self, e: Color):
+                print('%s __init__ called', self.__classs__.__name__)
                 super().__init__()
                 self.e = e
 
@@ -270,6 +271,7 @@ class TestEnum(JitTestCase):
 
         class TestModule(torch.nn.Module):
             def __init__(self, e: Color):
+                print('%s __init__ called', self.__classs__.__name__)
                 super().__init__()
                 self.e = e
 
@@ -306,6 +308,7 @@ class TestEnum(JitTestCase):
 
         class TestModule(torch.nn.Module):
             def __init__(self, e: Color):
+                print('%s __init__ called', self.__classs__.__name__)
                 super().__init__()
                 self.e = e
 

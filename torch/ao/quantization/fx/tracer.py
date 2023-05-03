@@ -15,6 +15,7 @@ class ScopeContextManager(torch.fx.proxy.ScopeContextManager):
         current_module: torch.nn.Module,
         current_module_path: str
     ):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__(scope, Scope(current_module_path, type(current_module)))
 
 
@@ -22,6 +23,7 @@ class QuantizationTracer(Tracer):
     def __init__(
         self, skipped_module_names: List[str], skipped_module_classes: List[Callable]
     ):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__()
         self.skipped_module_names = skipped_module_names
         self.skipped_module_classes = skipped_module_classes

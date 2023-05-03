@@ -23,6 +23,7 @@ sum_configs = op_bench.cross_product_configs(
 
 class SumBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, R, V, dim, contiguous, device):
+        print('%s init called', self.__classs__.__name__)
         shape = (R, V) if dim == 0 else (V, R)
         tensor = torch.rand(shape, device=device)
 

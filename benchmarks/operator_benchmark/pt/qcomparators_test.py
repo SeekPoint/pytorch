@@ -26,6 +26,7 @@ qcomparators_ops = op_bench.op_list(
 
 class QComparatorBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, N, dtype, contig, other_scalar, out_variant, op_func):
+        print('%s init called', self.__classs__.__name__)
         # TODO: Consider more diverse shapes
         f_input = (torch.rand(N, N) - 0.5) * 256
         scale = 1.0

@@ -11,6 +11,7 @@ from pt import configs
 
 class LinearBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, N, IN, OUT, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(N, IN, device=device)
         }

@@ -41,6 +41,7 @@ class _SplitterSettingBase:
         skip_fusion=DEFAULT_SKIP_FUSION,
         allow_non_tensor=DEFAULT_ALLOW_NON_TENSOR
     ):
+        print('%s __init__ called', self.__classs__.__name__)
         parser = argparse.ArgumentParser()
         parser.add_argument(
             "--min-acc-module-size",
@@ -99,6 +100,7 @@ class FxNetAccNodesFinder:
         operator_support: OperatorSupportBase,
         allow_non_tensor: bool,
     ):
+        print('%s __init__ called', self.__classs__.__name__)
         self.module = module
         self.operator_support = operator_support
         self.allow_non_tensor = allow_non_tensor
@@ -315,6 +317,7 @@ class _SplitterBase:
         - builds a map of fused nodes to their fusions.
         As a result we get self.acc_nodes, self.deps and self.fusions.
         """
+        print('%s __init__ called', self.__classs__.__name__)
         assert isinstance(module, torch.fx.GraphModule)
 
         self.module = module

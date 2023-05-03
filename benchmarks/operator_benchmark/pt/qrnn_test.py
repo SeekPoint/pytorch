@@ -24,6 +24,7 @@ qrnn_configs = op_bench.config_list(
 
 class LSTMBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, I, H, NL, B, D, dtype):
+        print('%s init called', self.__classs__.__name__)
         sequence_len = 128
         batch_size = 16
 

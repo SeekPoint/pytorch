@@ -35,6 +35,7 @@ nan_to_num_short_configs = op_bench.cross_product_configs(
 
 class ReplaceNaNBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, dtype, replace_inf, op_func):
+        print('%s init called', self.__classs__.__name__)
         input = torch.randn(M, N, dtype=dtype)
         input[0][0] = float("nan")
         self.inputs = {

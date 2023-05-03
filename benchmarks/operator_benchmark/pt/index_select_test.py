@@ -35,6 +35,7 @@ index_select_configs_long = op_bench.cross_product_configs(
 
 class IndexSelectBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, dim, device):
+        print('%s init called', self.__classs__.__name__)
         max_val = N
         numpy.random.seed((1 << 32) - 1)
         index_dim = numpy.random.randint(0, N)

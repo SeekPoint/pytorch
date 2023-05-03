@@ -20,6 +20,7 @@ batchnorm_configs_short = op_bench.config_list(
 
 class QBatchNormBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, device, dtype):
+        print('%s init called', self.__classs__.__name__)
         self._init(M, N, K, device)
         x_scale = 0.1
         x_zero_point = 0

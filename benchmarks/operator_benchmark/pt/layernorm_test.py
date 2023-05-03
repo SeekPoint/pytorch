@@ -19,6 +19,7 @@ layernorm_configs_short = op_bench.cross_product_configs(
 
 class LayerNormBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, dims):
+        print('%s init called', self.__classs__.__name__)
         input = (torch.rand(*dims) - 0.5) * 256
         self.inputs = {
             "input": input,

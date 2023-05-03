@@ -29,6 +29,7 @@ add_short_configs = op_bench.config_list(
 
 class AddBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(M, N, K, device=device, requires_grad=self.auto_set()),
             "input_two": torch.rand(M, N, K, device=device, requires_grad=self.auto_set())
@@ -55,6 +56,7 @@ op_bench.generate_pt_gradient_test(add_long_configs + add_short_configs, AddBenc
 
 class AddmmBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(M, K, device=device, requires_grad=self.auto_set()),
             "mat1": torch.rand(M, N, device=device, requires_grad=self.auto_set()),
@@ -74,6 +76,7 @@ op_bench.generate_pt_gradient_test(add_long_configs + add_short_configs, AddmmBe
 
 class AddrBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, device, dtype):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand((M, N), device=device, requires_grad=self.auto_set(), dtype=dtype),
             "vec1": torch.rand((M,), device=device, requires_grad=self.auto_set(), dtype=dtype),
@@ -101,6 +104,7 @@ op_bench.generate_pt_gradient_test(addr_configs, AddrBenchmark)
 
 class AddbmmBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, B, M, N, K, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand((M, N), device=device, requires_grad=self.auto_set()),
             "batch1": torch.rand((B, M, K), device=device, requires_grad=self.auto_set()),

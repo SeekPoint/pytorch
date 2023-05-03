@@ -75,6 +75,7 @@ class EmbedddingBag4BitRowwiseOffsetsTest(op_bench.TorchBenchmarkBase):
              use_32bit_indices: bool,
              use_32bit_offsets: bool,
              op_func):
+        print('%s init called', self.__classs__.__name__)
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.num_offsets = num_offsets
@@ -161,6 +162,7 @@ class EmbedddingBagByteRowwiseOffsetsTest(op_bench.TorchBenchmarkBase):
              use_32bit_indices: bool,
              use_32bit_offsets: bool,
              op_func):
+        print('%s init called', self.__classs__.__name__)
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.num_offsets = num_offsets

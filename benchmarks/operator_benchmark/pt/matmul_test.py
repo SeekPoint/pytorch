@@ -31,6 +31,7 @@ mm_long_configs = op_bench.cross_product_configs(
 
 class MatMulBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, trans_a, trans_b, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(M, N, device=device)
             if trans_a

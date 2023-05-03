@@ -27,6 +27,7 @@ qunary_ops_configs_long = op_bench.cross_product_configs(
 
 class QUnaryOpBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, dtype, op_func):
+        print('%s init called', self.__classs__.__name__)
         f_input = torch.rand(M, N)
         scale = 1.0
         zero_point = 0
@@ -155,6 +156,7 @@ qunary_ops_topk_configs_long = op_bench.cross_product_configs(
 
 class QTopkOpBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, dtype, k):
+        print('%s init called', self.__classs__.__name__)
         f_input = torch.rand(M, N)
         scale = 1.0
         zero_point = 0

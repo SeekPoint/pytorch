@@ -25,6 +25,7 @@ class ComputeHistogramForBlobs(NetModifier):
 
     def __init__(self, blobs, logging_frequency, num_buckets=30,
             lower_bound=0.0, upper_bound=1.0, accumulate=False):
+        print('%s __init__ called', self.__classs__.__name__)
         self._blobs = blobs
         self._logging_frequency = logging_frequency
         self._accumulate = accumulate

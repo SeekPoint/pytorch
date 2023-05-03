@@ -38,6 +38,7 @@ class GetEntryFromBlobs(NetModifier):
     """
 
     def __init__(self, blobs, logging_frequency, i1=0, i2=0):
+        print('%s __init__ called', self.__classs__.__name__)
         self._blobs = blobs
         self._logging_frequency = logging_frequency
         self._i1 = i1

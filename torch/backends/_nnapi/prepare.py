@@ -44,6 +44,7 @@ class NnapiModule(torch.nn.Module):
 
     @torch.jit.export
     def init(self, args: List[torch.Tensor]):
+        print('%s init called', self.__classs__.__name__)
         assert self.comp is None
         self.out_templates = self.shape_compute_module.prepare(self.ser_model, args)  # type: ignore[operator]
         self.weights = [w.contiguous() for w in self.weights]

@@ -47,6 +47,7 @@ class CachingAutotuner(KernelInterface):
     """
 
     def __init__(self, fn, meta, configs, save_cache_hook, mutated_arg_names):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__()
         self.fn = fn
         self.meta = meta

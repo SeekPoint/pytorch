@@ -1,5 +1,6 @@
 class Equality:
     def __init__(self, lhs, rhs):
+        print('%s __init__ called', self.__classs__.__name__)
         self.lhs = lhs
         self.rhs = rhs
 

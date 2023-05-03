@@ -122,6 +122,7 @@ def _get_valid_constant(attr, v, owner_type):
 
 class SourceContext(torch._C._jit_tree_views.SourceRangeFactory):
     def __init__(self, source, filename, file_lineno, leading_whitespace_len):
+        print('%s __init__ called', self.__classs__.__name__)
         super().__init__(source, filename, file_lineno, leading_whitespace_len)
 
 
@@ -356,6 +357,7 @@ class ConcreteTypeStore:
     methods_compiled: Set[torch._C.ConcreteModuleType]
 
     def __init__(self):
+        print('%s __init__ called', self.__classs__.__name__)
         # Python module type => List[ConcreteModuleType)]
         self.type_store = {}
         # ConcreteTypes that have had their methods already compiled

@@ -45,6 +45,7 @@ hardsigmoid_ops_list = op_bench.op_list(
 
 class HardsigmoidBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, N, C, H, W, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input_one": torch.rand(N, C, H, W, device=device)
         }

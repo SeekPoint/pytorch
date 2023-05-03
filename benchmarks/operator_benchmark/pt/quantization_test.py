@@ -41,6 +41,7 @@ quantize_per_tensor_configs_long = op_bench.cross_product_configs(
 class QuantizePerTensorBenchmark(op_bench.TorchBenchmarkBase):
     r"""Benchmarks both quantization and dequantization."""
     def init(self, C, M, N, dtype, mode):
+        print('%s init called', self.__classs__.__name__)
         assert(mode in ('Q', 'D'))
         self.input = torch.rand(C, M, N)
         self.dtype = dtype
@@ -81,6 +82,7 @@ quantize_per_channel_configs_long = op_bench.cross_product_configs(
 class QuantizePerChannelBenchmark(op_bench.TorchBenchmarkBase):
     r"""Benchmarks both quantization and dequantization."""
     def init(self, C, M, N, dtype, axis, mode):
+        print('%s init called', self.__classs__.__name__)
         assert(mode in ('Q', 'D'))
         self.input = torch.rand(C, M, N)
         self.op = torch.quantize_per_channel
@@ -157,6 +159,7 @@ fake_quantize_configs_long = op_bench.cross_product_configs(
 class FakeQuantizeBenchmark(op_bench.TorchBenchmarkBase):
     r"""Benchmarks fake quantization with default parameters."""
     def init(self, N, C, H, W, zero_point_dtype, device):
+        print('%s init called', self.__classs__.__name__)
         self.inputs = {
             "input": torch.rand(N, C, H, W).to(device)
         }
@@ -226,6 +229,7 @@ fake_quantize_operator_configs_long_float_zero_point = op_bench.cross_product_co
 class FakeQuantizePerTensorBaseOpBenchmark(op_bench.TorchBenchmarkBase):
     r"""Benchmarks 3 different fake quantize per tensor operators."""
     def init(self, N, C, H, W, zero_point_dtype, nbits, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.quant_min = 0
         self.quant_max = 2 ** nbits - 1
         self.quant_range = 2 ** nbits
@@ -293,6 +297,7 @@ fake_quantize_per_channel_float_zero_point_ops = op_bench.op_list(
 class FakeQuantizePerChannelOpBenchmark(op_bench.TorchBenchmarkBase):
     r"""Benchmarks 3 different fake quantize per channel operators."""
     def init(self, N, C, H, W, zero_point_dtype, nbits, device, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.quant_min = 0
         self.quant_max = 2 ** nbits - 1
         self.quant_range = 2 ** nbits

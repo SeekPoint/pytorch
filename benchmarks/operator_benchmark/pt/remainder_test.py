@@ -40,6 +40,7 @@ remainder_long_configs = op_bench.cross_product_configs(
 
 class RemainderOpBenchmark(op_bench.TorchBenchmarkBase):
     def init(self, M, N, K, device, dtype, op_func):
+        print('%s init called', self.__classs__.__name__)
         self.dividend = torch.rand(M, N, K, device=device)
         self.dividend = (self.dividend * 1000 - 500).to(dtype=dtype)
 

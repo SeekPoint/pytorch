@@ -25,6 +25,7 @@ qmethods_configs_long = op_bench.cross_product_configs(
 
 class _QMethodBenchmarkBase(op_bench.TorchBenchmarkBase):
     def init(self, M, N, dtype, contig):
+        print('%s init called', self.__classs__.__name__)
         f_input = torch.rand(M, N)
         scale = 1.0
         zero_point = 0
