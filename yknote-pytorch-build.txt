@@ -1,0 +1,162 @@
+
+windows下
+安装anaconda后
+执行admin的anaconda命令行窗口，可以看到（base）==一定要admin！！！
+
+然后按照readme上执行
+
+conda install cmake ninja
+# Run this command from the PyTorch directory after cloning the source code using the “Get the PyTorch Source“ section below
+pip install -r requirements.txt
+
+
+conda install mkl mkl-include
+# Add these packages if torch.distributed is needed.
+# Distributed package support on Windows is a prototype feature and is subject to changes.
+conda install -c conda-forge libuv=1.39
+
+
+git clone --recursive https://github.com/pytorch/pytorch
+cd pytorch
+# if you are updating an existing checkout
+git submodule sync
+git submodule update --init --recursive
+上面两部可能需要反复！
+切换分支后要重新做！！！！
+明白经常遇到看似已经成功clone，但是实际是空的目录，所以需要删除后，继续。。。
+rm -rf /home/amd00/yk_fork/pytorch/third_party/XXXXX
+git submodule update --init --recursive
+python setup.py develop
+可能需要反复多次！！！！！
+
+C:\yk_repo\pytorch>
+开始之前最好python setup.py clean，否则编译难以成功！！！
+最后python setup.py develop
+
+似乎tag2.0.0的编译有问题！！
+
+这是仅仅编译cpu版本的
+cuda版本的需要设置一堆的变量，TBD
+
+====
+pitfall
+返回FileNotFoundError: [WinError 2] 系统找不到指定的文件
+可以加一下源码的输出看看那个文件安装不上
+很可能是没有在admin上执行上面的命令，按照实际没有安装！
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+找不到NVCC
+
+https://anaconda.org/nvidia/cuda-toolkit
+conda install -c "nvidia/label/cuda-11.7.0" cuda-toolkit
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+NCCL链接失败
+Archiving  objects                             > /home/amd00/yk_fork/pytorch/build/nccl/obj/collectives/device/colldevice.a
+make[2]: Leaving directory '/home/amd00/yk_fork/pytorch/third_party/nccl/nccl/src/collectives/device'
+Linking    libnccl.so.2.14.3                   > /home/amd00/yk_fork/pytorch/build/nccl/lib/libnccl.so.2.14.3
+Archiving  libnccl_static.a                    > /home/amd00/yk_fork/pytorch/build/nccl/lib/libnccl_static.a
+/usr/bin/ld: cannot find -lcudart_static
+collect2: error: ld returned 1 exit status
+首先
+conda install -c conda-forge nccl
+不管用！！！
+参考
+https://askubuntu.com/questions/510176/usr-bin-ld-cannot-find-lcudart 
+和
+https://stackoverflow.com/questions/72329888/linker-error-usr-bin-ld-cannot-find-lcudart-static-while-trying-to-compile-c
+解决方案是：不能直接复制上面的办法！！！！！
+具体做法
+(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$  find /usr/ -name libcudart_static*
+/usr/local/cuda-11.7/targets/x86_64-linux/lib/libcudart_static.a
+用上面的返回执行！！
+(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$ sudo ln -s /usr/local/cuda-11.7/targets/x86_64-linux/lib/libcudart_static.a /usr/lib/libcudart_static.a
+还是遇到错误，
+
+collect2: error: ld returned 1 exit status
+[6831/6895] Linking CXX executable bin/test_cpp_rpc
+FAILED: bin/test_cpp_rpc 
+ref===https://stackoverflow.com/questions/27272525/what-does-collect2-error-ld-returned-1-exit-status-mean
+The ld returned 1 exit status error is the consequence of previous errors. 
+In your example, there is an earlier error—undefined reference to 'clrscr'—and this is the real one. 
+The exit status error just signals that the linking step in the build process encountered some errors. 
+Normally, exit status 0 means success, and exit status > 0 means errors.
+When you build your program, multiple tools may be run as separate steps to create the final executable. 
+In your case, one of those tools is ld, which first reports the error it found (clrscr reference missing), and then it returns the exit status. 
+Since the exit status is > 0, it means an error and is reported.
+In many cases, tools return the number of errors they encountered as the exit status. 
+So if the ld tool finds two errors, its exit status would be 2.
+实际是
+hidden symbol `cudaMallocAsync' in /home/amd00/anaconda3/envs/yk_py39/lib/libcudart_static.a
+
+测试
+sudo ln -s  /home/amd00/anaconda3/envs/yk_py39/lib/libcudart_static.a /usr/lib/libcudart_static.a
+还是不行！
+
+设置这些后：上面的链接错误都消失了
+export PATH=/usr/local/cuda-11.7/bin:${PATH:+:${PATH}}
+export CUDA_HOME=/usr/local/cuda-11.7
+export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${CUDNN_HOME}/lib64:$LD_LIBRARY_PATH
+export CPLUS_INCLUDE_PATH=${CUDA_HOME}/include:${CUDNN_HOME}/include:$CPLUS_INCLUDE_PATH
+结论，官方文档可能不全，还是要参考网友的笔记！！！
+https://codle.net/install-pytorch-from-source/  ===很好！
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$ 
+(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$ 
+(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$ python
+Python 3.9.17 (main, Jul  5 2023, 21:05:34) 
+[GCC 11.2.0] :: Anaconda, Inc. on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import torch
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/home/amd00/yk_fork/pytorch/torch/__init__.py", line 443, in <module>
+    raise ImportError(textwrap.dedent('''
+ImportError: Failed to load PyTorch C extensions:
+    It appears that PyTorch has loaded the `torch/_C` folder
+    of the PyTorch repository rather than the C extensions which
+    are expected in the `torch._C` namespace. This can occur when
+    using the `install` workflow. e.g.
+        $ python setup.py install && python -c "import torch"
+
+    This error can generally be solved using the `develop` workflow
+        $ python setup.py develop && python -c "import torch"  # This should succeed
+    or by running Python from a different directory.
+>>> quit()
+不能用！！！！python setup.py install  2>&1 | tee torch2.0.0+cuda117_CUDA-1+NCCL-1-build-log.txt
+而应该用python setup.py develop  2>&1 | tee torch2.0.0+cuda117_CUDA-1+NCCL-1-build-log.txt
+(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$ python
+Python 3.9.17 (main, Jul  5 2023, 21:05:34) 
+[GCC 11.2.0] :: Anaconda, Inc. on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import torch
+>>> torch.__version__
+'2.0.0a0+gitc263bd4'
+>>> 
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+可以增量编译
+所以需要完整日志首先clean
+(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$ python setup.py clean
+Building wheel torch-1.13.0a0+git49444c3
+running clean
+然后按照readme上执行(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$ 
+(yk_py39) amd00@MZ32-00:~/yk_fork/pytorch$ python setup.py develop  2>&1 | tee pt1.13.1+cuda117-build-log.txt
+python setup.py develop 命令会把当前的 Python 包安装为一个可编辑的包（editable package），
+也就是说，源码仍存在于项目中，并且在修改源码后，安装的包会自动更新。
+这个命令在开发时经常被使用。yk：所以不要纠结能不能用pip install -e .
+同时top显示，
+-----ub中自动启用多核编译！！
+----pytorch编译的特点是开始快，后来慢！
+
