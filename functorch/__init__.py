@@ -25,5 +25,5 @@ from torch._functorch.make_functional import (
     FunctionalModule,
     FunctionalModuleWithBuffers,
 )
-
+print('yk==build')
 __version__ = torch.__version__

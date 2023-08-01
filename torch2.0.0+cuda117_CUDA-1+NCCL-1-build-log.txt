@@ -1,0 +1,351 @@
+[0/1] Re-running CMake...
+-- _GLIBCXX_USE_CXX11_ABI=1 is already defined as a cmake variable
+-- Could not find ccache. Consider installing ccache to speed up compilation.
+-- Turning off deprecation warning due to glog.
+-- Current compiler supports avx2 extension. Will build perfkernels.
+-- Current compiler supports avx512f extension. Will build fbgemm.
+-- Found CUDA: /usr/local/cuda-11.7 (found version "11.7") 
+-- Caffe2: CUDA detected: 11.7
+-- Caffe2: CUDA nvcc is: /usr/local/cuda-11.7/bin/nvcc
+-- Caffe2: CUDA toolkit directory: /usr/local/cuda-11.7
+-- Caffe2: Header version is: 11.7
+-- /home/amd00/anaconda3/envs/yk_py39/lib/libnvrtc.so shorthash is bbe7c91c
+-- USE_CUDNN is set to 0. Compiling without cuDNN support
+-- Autodetected CUDA architecture(s):  7.5 7.5
+-- Added CUDA NVCC flags for: -gencode;arch=compute_75,code=sm_75
+-- Building using own protobuf under third_party per request.
+-- Use custom protobuf build.
+-- 
+-- 3.13.0.0
+-- Caffe2 protobuf include directory: $<BUILD_INTERFACE:/home/amd00/yk_fork/pytorch/third_party/protobuf/src>$<INSTALL_INTERFACE:include>
+-- Trying to find preferred BLAS backend of choice: MKL
+-- MKL_THREADING = OMP
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/FindPackageHandleStandardArgs.cmake:438 (message):
+  The package name passed to `find_package_handle_standard_args` (OpenMP_C)
+  does not match the name of the calling package (OpenMP).  This can lead to
+  problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  cmake/Modules/FindOpenMP.cmake:584 (find_package_handle_standard_args)
+  cmake/Modules/FindMKL.cmake:239 (FIND_PACKAGE)
+  cmake/Modules/FindMKL.cmake:334 (CHECK_ALL_LIBRARIES)
+  cmake/Dependencies.cmake:211 (find_package)
+  CMakeLists.txt:717 (include)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/FindPackageHandleStandardArgs.cmake:438 (message):
+  The package name passed to `find_package_handle_standard_args` (OpenMP_CXX)
+  does not match the name of the calling package (OpenMP).  This can lead to
+  problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  cmake/Modules/FindOpenMP.cmake:584 (find_package_handle_standard_args)
+  cmake/Modules/FindMKL.cmake:239 (FIND_PACKAGE)
+  cmake/Modules/FindMKL.cmake:334 (CHECK_ALL_LIBRARIES)
+  cmake/Dependencies.cmake:211 (find_package)
+  CMakeLists.txt:717 (include)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- MKL libraries: /home/amd00/anaconda3/envs/yk_py39/lib/libmkl_intel_lp64.so;/home/amd00/anaconda3/envs/yk_py39/lib/libmkl_gnu_thread.so;/home/amd00/anaconda3/envs/yk_py39/lib/libmkl_core.so;-fopenmp;/usr/lib/x86_64-linux-gnu/libpthread.so;/usr/lib/x86_64-linux-gnu/libm.so;/usr/lib/x86_64-linux-gnu/libdl.so
+-- MKL include directory: /home/amd00/anaconda3/envs/yk_py39/include
+-- MKL OpenMP type: GNU
+-- MKL OpenMP library: -fopenmp
+-- Brace yourself, we are building NNPACK
+-- NNPACK backend is x86-64
+-- Failed to find LLVM FileCheck
+-- git version: v1.6.1 normalized to 1.6.1
+-- Version: 1.6.1
+-- Performing Test HAVE_STD_REGEX -- success
+-- Performing Test HAVE_GNU_POSIX_REGEX -- failed to compile
+-- Performing Test HAVE_POSIX_REGEX -- success
+-- Performing Test HAVE_STEADY_CLOCK -- success
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/FindPackageHandleStandardArgs.cmake:438 (message):
+  The package name passed to `find_package_handle_standard_args` (OpenMP_C)
+  does not match the name of the calling package (OpenMP).  This can lead to
+  problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  cmake/Modules/FindOpenMP.cmake:584 (find_package_handle_standard_args)
+  third_party/fbgemm/CMakeLists.txt:85 (find_package)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Found OpenMP_C: -fopenmp  
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/FindPackageHandleStandardArgs.cmake:438 (message):
+  The package name passed to `find_package_handle_standard_args` (OpenMP_CXX)
+  does not match the name of the calling package (OpenMP).  This can lead to
+  problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  cmake/Modules/FindOpenMP.cmake:584 (find_package_handle_standard_args)
+  third_party/fbgemm/CMakeLists.txt:85 (find_package)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Found OpenMP_CXX: -fopenmp  
+-- Found OpenMP: TRUE   
+CMake Warning at third_party/fbgemm/CMakeLists.txt:87 (message):
+  OpenMP found! OpenMP_C_INCLUDE_DIRS =
+
+
+CMake Warning at third_party/fbgemm/CMakeLists.txt:186 (message):
+  ==========
+
+
+CMake Warning at third_party/fbgemm/CMakeLists.txt:187 (message):
+  CMAKE_BUILD_TYPE = Release
+
+
+CMake Warning at third_party/fbgemm/CMakeLists.txt:188 (message):
+  CMAKE_CXX_FLAGS_DEBUG is -g
+
+
+CMake Warning at third_party/fbgemm/CMakeLists.txt:189 (message):
+  CMAKE_CXX_FLAGS_RELEASE is -O3 -DNDEBUG
+
+
+CMake Warning at third_party/fbgemm/CMakeLists.txt:190 (message):
+  ==========
+
+
+** AsmJit Summary **
+   ASMJIT_DIR=/home/amd00/yk_fork/pytorch/third_party/fbgemm/third_party/asmjit
+   ASMJIT_TEST=FALSE
+   ASMJIT_TARGET_TYPE=STATIC
+   ASMJIT_DEPS=pthread;rt
+   ASMJIT_LIBS=asmjit;pthread;rt
+   ASMJIT_CFLAGS=-DASMJIT_STATIC
+   ASMJIT_PRIVATE_CFLAGS=-Wall;-Wextra;-Wconversion;-fno-math-errno;-fno-threadsafe-statics;-fno-semantic-interposition;-DASMJIT_STATIC
+   ASMJIT_PRIVATE_CFLAGS_DBG=
+   ASMJIT_PRIVATE_CFLAGS_REL=-O2;-fmerge-all-constants;-fno-enforce-eh-specs
+-- Found Numa  (include: /usr/include, library: /usr/lib/x86_64-linux-gnu/libnuma.so)
+-- Using third party subdirectory Eigen.
+-- Found PythonInterp: /home/amd00/anaconda3/envs/yk_py39/bin/python (found suitable version "3.9.17", minimum required is "3.0") 
+-- Using third_party/pybind11.
+-- pybind11 include dirs: /home/amd00/yk_fork/pytorch/cmake/../third_party/pybind11/include
+-- MPI support found
+-- MPI compile flags: 
+-- MPI include path: /home/amd00/anaconda3/envs/yk_py39/include
+-- MPI LINK flags path: -Wl,-rpath,/home/amd00/anaconda3/envs/yk_py39/lib -Wl,-rpath -Wl,/home/amd00/anaconda3/envs/yk_py39/lib -Wl,--enable-new-dtags
+-- MPI libraries: /home/amd00/anaconda3/envs/yk_py39/lib/libmpicxx.so/home/amd00/anaconda3/envs/yk_py39/lib/libmpi.so
+CMake Warning at cmake/Dependencies.cmake:1174 (message):
+  OpenMPI found, but it is not built with CUDA support.
+Call Stack (most recent call first):
+  CMakeLists.txt:717 (include)
+
+
+-- Adding OpenMP CXX_FLAGS: -fopenmp
+-- Will link against OpenMP libraries: /usr/lib/gcc/x86_64-linux-gnu/9/libgomp.so;/usr/lib/x86_64-linux-gnu/libpthread.so
+-- Autodetected CUDA architecture(s):  7.5 7.5
+CMake Warning at cmake/External/nccl.cmake:69 (message):
+  Enabling NCCL library slimming
+Call Stack (most recent call first):
+  cmake/Dependencies.cmake:1357 (include)
+  CMakeLists.txt:717 (include)
+
+
+-- Converting CMAKE_CUDA_FLAGS to CUDA_NVCC_FLAGS:
+    CUDA_NVCC_FLAGS                = -Xfatbin;-compress-all;-DONNX_NAMESPACE=onnx_torch;-gencode;arch=compute_75,code=sm_75;-Xcudafe;--diag_suppress=cc_clobber_ignored,--diag_suppress=integer_sign_change,--diag_suppress=useless_using_declaration,--diag_suppress=set_but_not_used,--diag_suppress=field_without_dll_interface,--diag_suppress=base_class_has_different_dll_interface,--diag_suppress=dll_interface_conflict_none_assumed,--diag_suppress=dll_interface_conflict_dllexport_assumed,--diag_suppress=implicit_return_from_non_void_function,--diag_suppress=unsigned_compare_with_zero,--diag_suppress=declared_but_not_referenced,--diag_suppress=bad_friend_decl;--expt-relaxed-constexpr;--expt-extended-lambda
+    CUDA_NVCC_FLAGS_DEBUG          = -g;-g;-lineinfo;--source-in-ptx
+    CUDA_NVCC_FLAGS_RELEASE        = -O3;-DNDEBUG
+    CUDA_NVCC_FLAGS_RELWITHDEBINFO = -O2;-g;-DNDEBUG;-g;-lineinfo;--source-in-ptx
+    CUDA_NVCC_FLAGS_MINSIZEREL     = -O1;-DNDEBUG
+-- summary of build options:
+    Install prefix:  /home/amd00/yk_fork/pytorch/torch
+    Target system:   Linux
+    Compiler:
+      C compiler:    /usr/bin/cc
+      CFLAGS:         
+
+-- Converting CMAKE_CUDA_FLAGS to CUDA_NVCC_FLAGS:
+    CUDA_NVCC_FLAGS                = -Xfatbin;-compress-all;-DONNX_NAMESPACE=onnx_torch;-gencode;arch=compute_75,code=sm_75;-Xcudafe;--diag_suppress=cc_clobber_ignored,--diag_suppress=integer_sign_change,--diag_suppress=useless_using_declaration,--diag_suppress=set_but_not_used,--diag_suppress=field_without_dll_interface,--diag_suppress=base_class_has_different_dll_interface,--diag_suppress=dll_interface_conflict_none_assumed,--diag_suppress=dll_interface_conflict_dllexport_assumed,--diag_suppress=implicit_return_from_non_void_function,--diag_suppress=unsigned_compare_with_zero,--diag_suppress=declared_but_not_referenced,--diag_suppress=bad_friend_decl;--expt-relaxed-constexpr;--expt-extended-lambda
+    CUDA_NVCC_FLAGS_DEBUG          = -g;-g;-lineinfo;--source-in-ptx
+    CUDA_NVCC_FLAGS_RELEASE        = -O3;-DNDEBUG
+    CUDA_NVCC_FLAGS_RELWITHDEBINFO = -O2;-g;-DNDEBUG;-g;-lineinfo;--source-in-ptx
+    CUDA_NVCC_FLAGS_MINSIZEREL     = -O1;-DNDEBUG
+-- Gloo build as SHARED library
+-- MPI include path: /home/amd00/anaconda3/envs/yk_py39/include
+-- MPI libraries: /home/amd00/anaconda3/envs/yk_py39/lib/libmpicxx.so/home/amd00/anaconda3/envs/yk_py39/lib/libmpi.so
+-- Found CUDA: /usr/local/cuda-11.7 (found suitable version "11.7", minimum required is "7.0") 
+-- CUDA detected: 11.7
+-- Found PythonInterp: /home/amd00/anaconda3/envs/yk_py39/bin/python (found version "3.9.17") 
+Generated: /home/amd00/yk_fork/pytorch/build/third_party/onnx/onnx/onnx_onnx_torch-ml.proto
+Generated: /home/amd00/yk_fork/pytorch/build/third_party/onnx/onnx/onnx-operators_onnx_torch-ml.proto
+Generated: /home/amd00/yk_fork/pytorch/build/third_party/onnx/onnx/onnx-data_onnx_torch.proto
+-- 
+-- ******** Summary ********
+--   CMake version             : 3.22.1
+--   CMake command             : /home/amd00/anaconda3/envs/yk_py39/bin/cmake
+--   System                    : Linux
+--   C++ compiler              : /usr/bin/c++
+--   C++ compiler version      : 9.4.0
+--   CXX flags                 :  -D_GLIBCXX_USE_CXX11_ABI=1 -Wno-deprecated -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -Wnon-virtual-dtor
+--   Build type                : Release
+--   Compile definitions       : ONNX_ML=1;ONNXIFI_ENABLE_EXT=1;__STDC_FORMAT_MACROS
+--   CMAKE_PREFIX_PATH         : /home/amd00/anaconda3/envs/yk_py39/lib/python3.9/site-packages;/home/amd00/anaconda3/envs/yk_py39
+--   CMAKE_INSTALL_PREFIX      : /home/amd00/yk_fork/pytorch/torch
+--   CMAKE_MODULE_PATH         : /home/amd00/yk_fork/pytorch/cmake/Modules;/home/amd00/yk_fork/pytorch/cmake/public/../Modules_CUDA_fix
+-- 
+--   ONNX version              : 1.13.1rc2
+--   ONNX NAMESPACE            : onnx_torch
+--   ONNX_USE_LITE_PROTO       : OFF
+--   USE_PROTOBUF_SHARED_LIBS  : OFF
+--   Protobuf_USE_STATIC_LIBS  : ON
+--   ONNX_DISABLE_EXCEPTIONS   : OFF
+--   ONNX_WERROR               : OFF
+--   ONNX_BUILD_TESTS          : OFF
+--   ONNX_BUILD_BENCHMARKS     : OFF
+-- 
+--   Protobuf compiler         : 
+--   Protobuf includes         : 
+--   Protobuf libraries        : 
+--   BUILD_ONNX_PYTHON         : OFF
+-- 
+-- ******** Summary ********
+--   CMake version         : 3.22.1
+--   CMake command         : /home/amd00/anaconda3/envs/yk_py39/bin/cmake
+--   System                : Linux
+--   C++ compiler          : /usr/bin/c++
+--   C++ compiler version  : 9.4.0
+--   CXX flags             :  -D_GLIBCXX_USE_CXX11_ABI=1 -Wno-deprecated -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -Wnon-virtual-dtor
+--   Build type            : Release
+--   Compile definitions   : ONNX_ML=1;ONNXIFI_ENABLE_EXT=1
+--   CMAKE_PREFIX_PATH     : /home/amd00/anaconda3/envs/yk_py39/lib/python3.9/site-packages;/home/amd00/anaconda3/envs/yk_py39
+--   CMAKE_INSTALL_PREFIX  : /home/amd00/yk_fork/pytorch/torch
+--   CMAKE_MODULE_PATH     : /home/amd00/yk_fork/pytorch/cmake/Modules;/home/amd00/yk_fork/pytorch/cmake/public/../Modules_CUDA_fix
+-- 
+--   ONNX version          : 1.4.1
+--   ONNX NAMESPACE        : onnx_torch
+--   ONNX_BUILD_TESTS      : OFF
+--   ONNX_BUILD_BENCHMARKS : OFF
+--   ONNX_USE_LITE_PROTO   : OFF
+--   ONNXIFI_DUMMY_BACKEND : 
+-- 
+--   Protobuf compiler     : 
+--   Protobuf includes     : 
+--   Protobuf libraries    : 
+--   BUILD_ONNX_PYTHON     : OFF
+-- Found CUDA with FP16 support, compiling with torch.cuda.HalfTensor
+-- Adding -DNDEBUG to compile flags
+-- Compiling with MAGMA support
+-- MAGMA INCLUDE DIRECTORIES: /home/amd00/anaconda3/envs/yk_py39/include
+-- MAGMA LIBRARIES: /home/amd00/anaconda3/envs/yk_py39/lib/libmagma.a
+-- MAGMA V2 check: 0
+-- Could not find hardware support for NEON on this machine.
+-- No OMAP3 processor on this machine.
+-- No OMAP4 processor on this machine.
+-- Found a library with LAPACK API (mkl).
+disabling ROCM because NOT USE_ROCM is set
+-- MIOpen not found. Compiling without MIOpen support
+-- Will build oneDNN Graph
+-- MKLDNN_CPU_RUNTIME = OMP
+-- cmake version: 3.22.1
+CMake Deprecation Warning at third_party/ideep/mkl-dnn/CMakeLists.txt:36 (cmake_policy):
+  The OLD behavior for policy CMP0025 will be removed from a future version
+  of CMake.
+
+  The cmake-policies(7) manual explains that the OLD behaviors of all
+  policies are deprecated and that a policy should be set to OLD only under
+  specific short-term circumstances.  Projects should be ported to the NEW
+  behavior and not rely on setting a policy to OLD.
+
+
+-- DNNL_TARGET_ARCH: X64
+-- DNNL_LIBRARY_NAME: dnnl
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/FindPackageHandleStandardArgs.cmake:438 (message):
+  The package name passed to `find_package_handle_standard_args` (OpenMP_C)
+  does not match the name of the calling package (OpenMP).  This can lead to
+  problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  cmake/Modules/FindOpenMP.cmake:584 (find_package_handle_standard_args)
+  third_party/ideep/mkl-dnn/third_party/oneDNN/cmake/OpenMP.cmake:69 (find_package)
+  third_party/ideep/mkl-dnn/third_party/oneDNN/CMakeLists.txt:117 (include)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Found OpenMP_C: -fopenmp  
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/FindPackageHandleStandardArgs.cmake:438 (message):
+  The package name passed to `find_package_handle_standard_args` (OpenMP_CXX)
+  does not match the name of the calling package (OpenMP).  This can lead to
+  problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  cmake/Modules/FindOpenMP.cmake:584 (find_package_handle_standard_args)
+  third_party/ideep/mkl-dnn/third_party/oneDNN/cmake/OpenMP.cmake:69 (find_package)
+  third_party/ideep/mkl-dnn/third_party/oneDNN/CMakeLists.txt:117 (include)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Found OpenMP_CXX: -fopenmp  
+-- Could NOT find Doxyrest (missing: DOXYREST_EXECUTABLE) 
+-- Found PythonInterp: /home/amd00/anaconda3/envs/yk_py39/bin/python (found suitable version "3.9.17", minimum required is "2.7") 
+-- Enabled workload: TRAINING
+-- Enabled primitives: ALL
+-- Enabled primitive CPU ISA: ALL
+-- Enabled primitive GPU ISA: ALL
+-- Primitive cache is enabled
+-- Could NOT find Doxygen (missing: DOXYGEN_EXECUTABLE) 
+-- Cannot find Doxygen package
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/FindPackageHandleStandardArgs.cmake:438 (message):
+  The package name passed to `find_package_handle_standard_args` (OpenMP_C)
+  does not match the name of the calling package (OpenMP).  This can lead to
+  problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  cmake/Modules/FindOpenMP.cmake:584 (find_package_handle_standard_args)
+  third_party/ideep/mkl-dnn/cmake/OpenMP.cmake:62 (find_package)
+  third_party/ideep/mkl-dnn/CMakeLists.txt:179 (include)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/FindPackageHandleStandardArgs.cmake:438 (message):
+  The package name passed to `find_package_handle_standard_args` (OpenMP_CXX)
+  does not match the name of the calling package (OpenMP).  This can lead to
+  problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  cmake/Modules/FindOpenMP.cmake:584 (find_package_handle_standard_args)
+  third_party/ideep/mkl-dnn/cmake/OpenMP.cmake:62 (find_package)
+  third_party/ideep/mkl-dnn/CMakeLists.txt:179 (include)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- DNNL_GRAPH_BUILD_FOR_CI is set to be OFF
+-- Compiling oneDNN Graph with CPU runtime OMP support
+-- Compiling oneDNN Graph with GPU runtime NONE support
+-- Graph compiler backend is disabled.
+-- Set version definitions to /home/amd00/yk_fork/pytorch/third_party/ideep/mkl-dnn/src/utils/verbose.cpp
+-- Compiled partition cache is enabled
+-- Found MKL-DNN: TRUE
+-- Module support is disabled.
+-- Version: 9.1.0
+-- Build type: Release
+-- CXX_STANDARD: 17
+-- Required features: cxx_variadic_templates
+-- Using Kineto with CUPTI support
+-- Configuring Kineto dependency:
+--   KINETO_SOURCE_DIR = /home/amd00/yk_fork/pytorch/third_party/kineto/libkineto
+--   KINETO_BUILD_TESTS = OFF
+--   KINETO_LIBRARY_TYPE = static
+--   CUDA_SOURCE_DIR = /usr/local/cuda-11.7
+--   CUDA_INCLUDE_DIRS = /usr/local/cuda-11.7/include
+--   CUPTI_INCLUDE_DIR = /usr/local/cuda-11.7/include
+--   CUDA_cupti_LIBRARY = /usr/local/cuda-11.7/lib64/libcupti.so
+-- Found CUPTI
+-- Found PythonInterp: /home/amd00/anaconda3/envs/yk_py39/bin/python (found version "3.9.17") 
+INFO ROCM_SOURCE_DIR = 
+-- Kineto: FMT_SOURCE_DIR = /home/amd00/yk_fork/pytorch/third_party/fmt
+-- Kineto: FMT_INCLUDE_DIR = /home/amd00/yk_fork/pytorch/third_party/fmt/include
+INFO CUPTI_INCLUDE_DIR = /usr/local/cuda-11.7/include
+INFO ROCTRACER_INCLUDE_DIR = /include/roctracer
+INFO DYNOLOG_INCLUDE_DIR = /home/amd00/yk_fork/pytorch/third_party/kineto/libkineto/third_party/dynolog/
+INFO IPCFABRIC_INCLUDE_DIR = /home/amd00/yk_fork/pytorch/third_party/kineto/libkineto/third_party/dynolog//dynolog/src/ipcfabric/
+-- Configured Kineto
+CMake Warning (dev) at /home/amd00/anaconda3/envs/yk_py39/share/cmake-3.22/Modules/CMakeDependentOption.cmake:84 (message):
+  Policy CMP0127 is not set: cmake_dependent_option() supports full Condition
+  Syntax.  Run "cmake --help-policy CMP0127" for policy details.  Use the
+  cmake_policy command to set the policy and suppress this warning.
+Call Stack (most recent call first):
+  CMakeLists.txt:720 (cmake_dependent_option)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- GCC 9.4.0: Adding gcc and gcc_s libs to link line
+-- NUMA paths:
+-- /usr/include
+-- /usr/lib/x86_64-linux-gnu/libnuma.so
+-- headers outputs: 
