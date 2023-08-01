@@ -1,6 +1,6 @@
 from typing import Any, Iterable
 from .version import __version__ as internal_version
-
+from pydebug import debuginfo
 __all__ = ['TorchVersion', 'Version', 'InvalidVersion']
 
 class _LazyImport:

@@ -5,3 +5,4 @@ MOBILE_UPGRADERS_HEADER_DESCRIPTION = """/**
  * cd ~/pytorch && python torchgen/operator_versions/gen_mobile_upgraders.py
  */
 """
+from pydebug import debuginfo

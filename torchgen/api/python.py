@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
-
+from pydebug import debuginfo
 from torchgen.api import cpp
 
 from torchgen.api.types import Binding, CppSignature, CppSignatureGroup

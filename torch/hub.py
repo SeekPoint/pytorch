@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen, Request
 from urllib.parse import urlparse  # noqa: F401
 from torch.serialization import MAP_LOCATION
-
+from pydebug import debuginfo
 class _Faketqdm:  # type: ignore[no-redef]
 
     def __init__(self, total=None, disable=False,

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Optional, Set
-
+from pydebug import debuginfo
 import torchgen.api.cpp as aten_cpp
 
 from torchgen.api.types import Binding, CType

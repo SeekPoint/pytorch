@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict
-
+from pydebug import debuginfo
 from torchgen.api.types import BaseCppType, boolT, CType, doubleT, longT
 from torchgen.model import BaseTy
 

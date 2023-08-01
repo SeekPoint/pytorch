@@ -2,7 +2,7 @@ import itertools
 import textwrap
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
-
+from pydebug import debuginfo
 from typing_extensions import Literal  # Python 3.8+
 
 import torchgen.api.cpp as cpp

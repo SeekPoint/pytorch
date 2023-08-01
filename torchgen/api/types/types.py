@@ -14,7 +14,7 @@ Add new types to `types_base.py` if they are basic and not attached to ATen/c10.
 """
 from dataclasses import dataclass
 from typing import Dict, TypeVar
-
+from pydebug import debuginfo
 from torchgen.model import BaseTy, ScalarType
 
 from .types_base import (

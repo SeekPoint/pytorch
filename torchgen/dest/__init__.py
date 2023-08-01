@@ -1,3 +1,4 @@
+from pydebug import debuginfo
 from .lazy_ir import (
     generate_non_native_lazy_ir_nodes as generate_non_native_lazy_ir_nodes,
     GenLazyIR as GenLazyIR,

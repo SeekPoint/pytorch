@@ -2,7 +2,7 @@ import argparse
 import itertools
 import os
 from typing import Sequence, TypeVar, Union
-
+from pydebug import debuginfo
 from libfb.py.log import set_simple_logging  # type: ignore[import]
 
 from torchgen import gen

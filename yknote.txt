@@ -4,3 +4,85 @@ not tracked by git!
 but can see the instant effect after change!
 
 其他的都在.gitignore里面有
+
+
+
+參考：
+
+
+基本完成:
+小白学习pytorch源码（一）：torch包函数如何实现？揭秘__init__.py
+https://blog.csdn.net/Sky_FULLl/article/details/125612951
+
+小白学习pytorch源码（二）：setup.py最详细解读
+https://blog.csdn.net/Sky_FULLl/article/details/125652654
+
+
+
+TBD
+
+罗西的思考 https://www.cnblogs.com/rossiXYZ/p/15421453.html 很多！！！
+
+PyTorch源码分析（1）- 整体预览
+https://zhuanlan.zhihu.com/p/598044604
+PyTorch源码分析（2）——动态图原理
+https://zhuanlan.zhihu.com/p/598291307
+
+
+
+如何有效地阅读PyTorch的源代码？
+https://www.zhihu.com/question/58253344/answer/241864966
+
+PyTorch ATen代码的动态生成
+https://zhuanlan.zhihu.com/p/55966063
+
+
+Python进阶笔记C语言拓展篇（二）动态链接库pyd+存根文件pyi——学会优雅地使用C\C++拓展Python模块的正确/官方姿势
+https://zhuanlan.zhihu.com/p/479371538
+
+
+一文搞懂 PyTorch 内部机制
+https://mp.weixin.qq.com/s/xYNCwmiE4PJJI_vxGEaMiA
+
+PyTorch源码浅析（目录）
+https://zhuanlan.zhihu.com/p/34629243
+PyTorch源码浅析（一）　
+PyTorch源码浅析（二）　
+PyTorch源码浅析（三）　
+PyTorch源码浅析（四）　
+
+
+
+OpenMMLab：PyTorch 源码解读系列
+https://zhuanlan.zhihu.com/p/328674159
+
+OpenMMLab：PyTorch 源码解读之 torch.autograd：梯度计算详解
+OpenMMLab：PyTorch 源码解读之 BN & SyncBN：BN 与 多卡同步 BN 详解
+OpenMMLab：PyTorch 源码解读之 torch.utils.data：解析数据处理全流程
+OpenMMLab：PyTorch 源码解读之 nn.Module：核心网络模块接口详解
+OpenMMLab：PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+OpenMMLab：PyTorch 源码解读之 torch.optim：优化算法接口详解
+OpenMMLab：PyTorch 源码解读之 torch.cuda.amp: 自动混合精度详解
+OpenMMLab：PyTorch 源码解读之 cpp_extension：揭秘 C++/CUDA 算子实现和调用全流程
+
+看PyTorch源代码的心路历程
+https://www.jianshu.com/p/20b92c29d571
+
+
+
+
+
+ 2019-05-05
+PyTorch源码浅析(5)：Python扩展
+ 2019-05-05
+PyTorch源码浅析(4)：Autograd
+ 2019-05-05
+PyTorch源码浅析(3)：NN
+ 2019-05-05
+PyTorch源码浅析(2)：THC
+ 2019-05-05
+PyTorch源码浅析(1)：THTensor
+ 2019-05-05
+PyTorch源码浅析：简介
+ https://www.52coding.com.cn/archives/
+

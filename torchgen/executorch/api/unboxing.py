@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Callable, List, Sequence, Tuple
-
+from pydebug import debuginfo
 from torchgen.api.types import Binding, CType, NamedCType
 from torchgen.model import (
     Argument,

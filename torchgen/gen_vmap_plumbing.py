@@ -1,7 +1,7 @@
 import textwrap
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
-
+from pydebug import debuginfo
 from torchgen.api.translate import translate
 from torchgen.api.types import DispatcherSignature
 from torchgen.context import method_with_native_function

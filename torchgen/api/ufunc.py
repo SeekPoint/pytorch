@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Optional
-
+from pydebug import debuginfo
 import torchgen.api.types as api_types
 
 from torchgen.api import cpp, structured

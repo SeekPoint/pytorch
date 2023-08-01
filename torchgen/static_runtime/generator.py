@@ -3,7 +3,7 @@ import logging
 
 import math
 from typing import Dict, List, Optional, Sequence, Tuple, Union
-
+from pydebug import debuginfo
 import torchgen.api.cpp as cpp
 from torchgen.context import native_function_manager
 from torchgen.model import (

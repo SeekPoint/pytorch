@@ -4,7 +4,7 @@ import pathlib
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, TextIO, Tuple, Union
-
+from pydebug import debuginfo
 import yaml
 
 # Parse native_functions.yaml into a sequence of NativeFunctions and Backend Indices.

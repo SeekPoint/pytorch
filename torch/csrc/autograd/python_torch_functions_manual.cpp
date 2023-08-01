@@ -496,6 +496,7 @@ static PyObject* THPVariable__disable_functionalization(
 // being registered through native_functions.yaml, and be tagged cpp / JIT
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
 static PyMethodDef torch_functions_manual[] = {
+    //实现了python函数和c++函数的绑定：，而绑定的THPVariable_randint函数即为c++函数，具体代码如下：
     {"asarray",
      castPyCFunctionWithKeywords(THPVariable_asarray),
      METH_VARARGS | METH_KEYWORDS | METH_STATIC,

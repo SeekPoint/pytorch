@@ -206,6 +206,7 @@
 # This future is needed to print Python2 EOL message
 from __future__ import print_function
 import sys
+from pydebug import debuginfo
 if sys.version_info < (3,):
     print("Python 2 has reached end-of-life and is no longer supported by PyTorch.")
     sys.exit(-1)
@@ -307,6 +308,7 @@ else:
     cmake_python_library = "{}/{}".format(
         sysconfig.get_config_var("LIBDIR"),
         sysconfig.get_config_var("INSTSONAME"))
+
 cmake_python_include_dir = sysconfig.get_path("include")
 
 
@@ -395,7 +397,12 @@ def mirror_files_into_torchgen():
         raise RuntimeError("Check the file paths in `mirror_files_into_torchgen()`")
 
 # all the work we need to do _before_ setup runs
+
 def build_deps():
+    '''
+    build_dep()函数也是检查工作的一部分，其内部包含检查分模块，检查python包依赖以及python文件位置等等。
+    值得注意的是，这些检查行为都发生在真正的setup操作之前，目的在于保证安装的正确进行，是安装pytorch必不可少的操作。
+    '''
     report('-- Building version ' + version)
 
     check_submodules()
@@ -798,7 +805,7 @@ def get_cmake_cache_vars():
         # CMakeCache.txt does not exist. Probably running "python setup.py clean" over a clean directory.
         return defaultdict(lambda: False)
 
-
+#这一函数内说明了c/c++文件在配置阶段是如何与torch项目相关联的
 def configure_extension_build():
     r"""Configures extension build options according to system environment and user's choice.
 
@@ -855,6 +862,12 @@ def configure_extension_build():
     main_compile_args = []
     main_libraries = ['torch_python']
     main_link_args = []
+
+    '''
+    之前提到的configure_extension_build()函数中与c/c++相关的片段，
+    注意到在声明Extension类时，其中提到过sources参数，
+    而其所传递的main_sources变量在上文被定义过，即：
+    '''
     main_sources = ["torch/csrc/stub.c"]
 
     if cmake_cache_vars['USE_CUDA']:
@@ -909,6 +922,12 @@ def configure_extension_build():
     # Declare extensions and package
     ################################################################################
 
+    '''
+    pytorch项目是在此处将c/c++语言作为Extension纳入自己的项目，
+    并预备在后文的setup()进行编译的。
+    注意此处的Extension类也为setuptools定义好的一个类，
+    具体的作用将实例化时传入的各种参数包装好，留待setup()时一并使用。
+    '''
     extensions = []
     excludes = ['tools', 'tools.*']
     if not cmake_cache_vars['BUILD_CAFFE2']:
@@ -1033,6 +1052,8 @@ def main():
 
     # Parse the command line and check the arguments before we proceed with
     # building deps and setup. We need to set values so `--help` works.
+
+    #Distribution()类是定义在setuptools中的一个类，其作用就是检查主机环境是否含有项目所要求的所有的依赖，若没有则自动安装。
     dist = Distribution()
     dist.script_name = os.path.basename(sys.argv[0])
     dist.script_args = sys.argv[1:]
@@ -1042,7 +1063,9 @@ def main():
         print(e)
         sys.exit(1)
 
+    #检查项目的一些临时文件是否已经被创建，若没有则创建目录和文件，保证本机环境和torch需要的安装环境相同。
     mirror_files_into_torchgen()
+
     if RUN_BUILD_DEPS:
         build_deps()
 
@@ -1224,6 +1247,13 @@ def main():
         'packaged/ATen/native/*',
         'packaged/ATen/templates/*',
     ]
+    '''
+    setup()函数无疑是setup.py()的核心，
+    其本身也是由setuptools实现好的函数，
+    pytorch项目将各种该函数需要的参数设计好，
+    再传入setup()函数中，
+    即可方便快捷的进行项目部署。
+    '''
     setup(
         name=package_name,
         version=version,
@@ -1231,7 +1261,7 @@ def main():
                      "Python with strong GPU acceleration"),
         long_description=long_description,
         long_description_content_type="text/markdown",
-        ext_modules=extensions,
+        ext_modules=extensions,   #这行代码将刚才我们提到的c/c++扩展包放入了安装过程中，
         cmdclass=cmdclass,
         packages=packages,
         entry_points=entry_points,

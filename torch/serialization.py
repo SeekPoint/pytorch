@@ -19,7 +19,7 @@ import copyreg
 import pickle
 import pathlib
 import torch._weights_only_unpickler as _weights_only_unpickler
-
+from pydebug import debuginfo
 DEFAULT_PROTOCOL = 2
 
 LONG_SIZE = struct.Struct('=l').size

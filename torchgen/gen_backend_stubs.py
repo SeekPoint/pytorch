@@ -4,9 +4,9 @@ import pathlib
 import re
 from collections import Counter, defaultdict, namedtuple
 from typing import Dict, List, Optional, Sequence, Set, Union
-
+from pydebug import debuginfo
 import yaml
-
+from pydebug import debuginfo
 import torchgen.api.dispatcher as dispatcher
 import torchgen.dest as dest
 from torchgen.api.types import DispatcherSignature

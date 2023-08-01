@@ -1,5 +1,5 @@
 from typing import List, Tuple
-
+from pydebug import debuginfo
 from torchgen.api import cpp
 from torchgen.api.types import Binding, CppSignatureGroup, CType
 from torchgen.model import (

@@ -2,7 +2,7 @@ from collections import defaultdict
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
-
+from pydebug import debuginfo
 from torchgen import dest
 
 # disable import sorting to avoid circular dependency.

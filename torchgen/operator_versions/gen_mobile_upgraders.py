@@ -3,7 +3,7 @@ import os
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List
-
+from pydebug import debuginfo
 import torch
 from torch.jit.generate_bytecode import generate_upgraders_bytecode
 

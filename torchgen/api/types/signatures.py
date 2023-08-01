@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from typing import Iterator, List, Optional, Sequence, Set, Tuple, Union
-
+from pydebug import debuginfo
 from torchgen.model import (
     BackendIndex,
     FunctionSchema,

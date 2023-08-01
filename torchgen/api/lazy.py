@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+from pydebug import debuginfo
 from torchgen.api.types import (
     BaseCppType,
     BaseCType,

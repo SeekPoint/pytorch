@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 from pathlib import Path
-
+from pydebug import debuginfo
 from torch.jit._decompositions import decomposition_table
 
 # from torchgen.code_template import CodeTemplate

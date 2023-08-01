@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, Union
-
+from pydebug import debuginfo
 import torchgen.api.ufunc as ufunc
 from torchgen.api.translate import translate
 from torchgen.api.types import (

@@ -11,3 +11,21 @@ import builtins
 ${function_hints}
 
 ${all_directive}
+
+
+'''
+https://blog.csdn.net/Sky_FULLl/article/details/125612951
+相信使用过pytorch的深度学习工作者都调用过torch包中的函数，例如torch.randn()，torch.ones()等等，然而除去torch.is_tensor()等少部分函数在python中有实现外，大部分函数的声明都指向了_C包中的_VariableFunctions.pyi文件，其中包含大量函数和变量的定义。类似于：
+
+def sigmoid(input: Tensor, *, out: Optional[Tensor]=None) -> Tensor: ...
+def sigmoid_(input: Tensor) -> Tensor: ...
+def sign(input: Tensor, *, out: Optional[Tensor]=None) -> Tensor: ...
+def signbit(input: Tensor, *, out: Optional[Tensor]=None) -> Tensor: ...
+def sin(input: Tensor, *, out: Optional[Tensor]=None) -> Tensor: ...
+def sin_(input: Tensor) -> Tensor: ...
+小知识：pyi文件是Python 的存根文件，用于代码检查时的类型提示。
+pyi文件是PEP484提案规定的一种用于 Python 代码类型提示（Type Hints）的文件。PEP即Python
+Enhancement Proposals，是经过 Python 社区核心开发者讨论并一致同意后，对外发布的一些正式规范文档。
+
+而该文件则是由_VariableFunctions.pyi.in文件由C++编译生成，可以肯定的是，这些函数的实现都是由c++完成的。pytorch使用ctypes调用c语言接口，而对于c++则是使用pybind11来进行绑定，使其能使用c++实现的函数。
+'''

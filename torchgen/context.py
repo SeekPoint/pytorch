@@ -2,7 +2,7 @@ import contextlib
 
 import functools
 from typing import Callable, Dict, Iterator, Optional, TypeVar, Union
-
+from pydebug import debuginfo
 import torchgen.local as local
 from torchgen.model import (
     BackendIndex,

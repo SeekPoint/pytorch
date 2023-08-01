@@ -18,7 +18,7 @@ from typing import (
 )
 
 import yaml
-
+from pydebug import debuginfo
 import torchgen.dest as dest
 
 from torchgen.api.lazy import setValueT

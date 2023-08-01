@@ -1,5 +1,5 @@
 from typing import Dict, List, NoReturn, Sequence, Union
-
+from pydebug import debuginfo
 from torchgen.api.types import (
     ArrayRefCType,
     BaseCType,

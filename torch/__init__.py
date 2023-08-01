@@ -1,4 +1,7 @@
-
+'''
+python会自动执行库文件中的torch包中的_init_.py，
+该文件中写明了对torch包的功能定义
+'''
 r"""
 The torch package contains data structures for multi-dimensional
 tensors and defines mathematical operations over these tensors.
@@ -7,6 +10,7 @@ Tensors and arbitrary types, and other useful utilities.
 
 It has a CUDA counterpart, that enables you to run your tensor computations
 on an NVIDIA GPU with compute capability >= 3.0.
+即torch包主要功能为多维张量定义数据结构且为这些张量定义数学运算，同时为张量和各种数据类型提供多种功能。
 """
 
 import math
@@ -16,6 +20,8 @@ import platform
 import textwrap
 import ctypes
 import inspect
+from pydebug import debuginfo
+
 if sys.version_info < (3,):
     raise Exception("Python 2 has reached end-of-life and is no longer supported by PyTorch.")
 
@@ -210,7 +216,13 @@ if (USE_RTLD_GLOBAL_WITH_LIBTORCH or os.getenv('TORCH_USE_RTLD_GLOBAL')) and \
     #
     old_flags = sys.getdlopenflags()
     sys.setdlopenflags(os.RTLD_GLOBAL | os.RTLD_LAZY)
+
+    '''
+    还进行了基本的环境变量、cuda文件、DLL文件、python库文件的配置和导入（其中c文件使用ctypes），
+    而C++函数的导入也在该文件中，即：
+    '''
     from torch._C import *  # noqa: F403
+
     sys.setdlopenflags(old_flags)
     del old_flags
 
@@ -1143,7 +1155,7 @@ py_float = float
 py_int = int
 
 # Shared memory manager needs to know the exact location of manager executable
-_C._initExtension(manager_path())
+_C._initExtension(manager_path()) #这些函数的作用就是将c++函数与python进行初始绑定===/csrc/Module.cpp文件中找到了这些函数
 del manager_path
 
 # Appease the type checker: it can't deal with direct setting of globals().
@@ -1264,6 +1276,7 @@ import torch.nn.quantized
 import torch.nn.qat
 import torch.nn.intrinsic
 
+#这些函数的作用就是将c++函数与python进行初始绑定===/csrc/Module.cpp文件中找到了这些函数
 _C._init_names(list(torch._storage_classes))
 
 # attach docstrings to torch and tensor functions

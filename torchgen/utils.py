@@ -26,7 +26,7 @@ from typing import (
 )
 
 from typing_extensions import Literal  # Python 3.8+
-
+from pydebug import debuginfo
 from torchgen.code_template import CodeTemplate
 
 # Safely load fast C Yaml loader/dumper if they are available

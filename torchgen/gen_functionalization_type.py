@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
-
+from pydebug import debuginfo
 from torchgen.api import cpp, dispatcher
 from torchgen.api.translate import translate
 from torchgen.api.types import (

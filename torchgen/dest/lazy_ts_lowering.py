@@ -1,7 +1,7 @@
 from torchgen.api.lazy import LazyIrSchema
 from torchgen.api.types import OptionalCType
 
-
+from pydebug import debuginfo
 def ts_lowering_body(schema: LazyIrSchema) -> str:
     # for now, we just want one IR class decl and soon after also the method defs
     # and we use the functional version not out/inplace.

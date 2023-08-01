@@ -16,7 +16,7 @@ from abc import ABC
 from dataclasses import dataclass
 from enum import auto, Enum
 from typing import List, Optional, Union
-
+from pydebug import debuginfo
 from torchgen.model import Argument, SelfArgument, TensorOptionsArguments
 
 # An ArgName is just the str name of the argument in schema;

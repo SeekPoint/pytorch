@@ -1,5 +1,5 @@
 from typing import List, Optional, Sequence, Set, Union
-
+from pydebug import debuginfo
 from torchgen import local
 from torchgen.api.types import (
     ArgName,

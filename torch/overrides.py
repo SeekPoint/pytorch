@@ -21,7 +21,7 @@ instructions in the ``README.md`` in that directory.
 """
 
 import __future__
-
+from pydebug import debuginfo
 import collections
 import functools
 import types

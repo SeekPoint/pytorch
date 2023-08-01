@@ -1,5 +1,5 @@
 from torchgen.model import NativeFunctionsGroup
-
+from pydebug import debuginfo
 # Follows dispatcher calling convention, but:
 #   - Mutable arguments not allowed.  Meta functions are always
 #     written in functional form.  Look at FunctionSchema.signature()
