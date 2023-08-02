@@ -53,6 +53,7 @@ PyTorch源码浅析（四）　
 
 
 
+
 OpenMMLab：PyTorch 源码解读系列
 https://zhuanlan.zhihu.com/p/328674159
 
@@ -69,9 +70,6 @@ OpenMMLab：PyTorch 源码解读之 cpp_extension：揭秘 C++/CUDA 算子实现
 https://www.jianshu.com/p/20b92c29d571
 
 
-
-
-
  2019-05-05
 PyTorch源码浅析(5)：Python扩展
  2019-05-05
@@ -86,3 +84,20 @@ PyTorch源码浅析(1)：THTensor
 PyTorch源码浅析：简介
  https://www.52coding.com.cn/archives/
 
+
+
+PyTorch 源码分析：Python 层
+https://www.pytorchtutorial.com/pytorch-source-python-layer/
+
+
+推理实践落地 | 最详细的 Pytorch 底层算子扩展总结（文末附源码
+https://www.cvmart.net/community/detail/4189
+
+
+PyTorch源码学习系列 - 1.初识
+https://blog.csdn.net/flydreamforever/article/details/127043152
+PyTorch源码学习系列 - 2. Tensor
+https://blog.csdn.net/flydreamforever/article/details/127478063
+
+想读读PyTorch底层代码？这份内核机制简介送给你
+https://www.jiqizhixin.com/articles/2019-02-28-13
