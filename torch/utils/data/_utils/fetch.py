@@ -26,6 +26,8 @@ class _IterableDatasetFetcher(_BaseDatasetFetcher):
             raise StopIteration
 
         if self.auto_collation:
+            # 即auto_collation为True，表示使用batch_sampler。
+            # 则使用possibly_batched_index，获取1个batch大小的样本
             data = []
             for _ in possibly_batched_index:
                 try:
@@ -38,6 +40,7 @@ class _IterableDatasetFetcher(_BaseDatasetFetcher):
             ):
                 raise StopIteration
         else:
+            # sampler则直接往后遍历，提取1个样本
             data = next(self.dataset_iter)
         return self.collate_fn(data)
 
@@ -45,6 +48,8 @@ class _IterableDatasetFetcher(_BaseDatasetFetcher):
 class _MapDatasetFetcher(_BaseDatasetFetcher):
     def fetch(self, possibly_batched_index):
         if self.auto_collation:
+            # 如果配置了batch_sampler，_auto_collation就为True，
+            # 那么就优先使用batch_sampler，此时fetcher中传入的就是一个batch的索引
             if hasattr(self.dataset, "__getitems__") and self.dataset.__getitems__:
                 data = self.dataset.__getitems__(possibly_batched_index)
             else:

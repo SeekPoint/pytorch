@@ -270,8 +270,9 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
 
         watchdog = ManagerWatchdog()
 
-        while watchdog.is_alive():
+        while watchdog.is_alive(): # 等待在这里
             try:
+                # _try_put_index 如果放入了数据index，这里就被激活，开始工作
                 r = index_queue.get(timeout=MP_STATUS_CHECK_INTERVAL)
             except queue.Empty:
                 continue
@@ -319,7 +320,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                         # See NOTE [ Python Traceback Reference Cycle Problem ]
                         data = ExceptionWrapper(
                             where="in DataLoader worker process {}".format(worker_id))
-            data_queue.put((idx, data))
+            data_queue.put((idx, data)) # 放入数据，通知主进程
             del data, idx, index, r  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.
