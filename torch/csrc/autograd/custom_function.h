@@ -29,7 +29,16 @@ TORCH_API void check_variable_result(
 // Get the return type of the forward function of the custom Function class X
 template <typename X, typename... Args>
 using forward_t = decltype(X::forward(nullptr, std::declval<Args>()...));
+/*我们结合前面 Variable 的概念来看，Function 指的是在计算图中某个节点所进行的运算，比如加减乘除卷积等等。
+每当对Tensor施加一个运算的时候，就会产生一个Function对象，它记录运算的输入，记录运算的发生，产生运算的结果。
+Tensor使用.grad_fn属性记录这个计算图的入口。
 
+Function 内部有 forward() 和 backward() 两个方法，分别应用于正向、反向传播。
+反向传播过程中，autograd引擎会按照逆序，通过Function的backward依次计算梯度。
+
+在最新的代码中，Function 已经被 Node 类替代，这样是为了更好的表达 节点 这个概念。
+但是因为旧代码中依然使用了 Function，所以我们可能会混用这两个概念。
+*/
 /// To use custom autograd operations, implement a Function subclass with
 /// static forward and backward functions:
 ///
@@ -99,6 +108,7 @@ struct TORCH_API Function {
 /// Context to save information during `forward` that can be accessed in
 /// `backward` in custom autograd operations (see `torch::autograd::Function`
 /// for details).
+// AutogradContext 是操作 autograd 的上下文，用来存储在前向过程中产生的信息，这样在后向传播中就可以访问。
 struct TORCH_API AutogradContext {
   AutogradContext() = default;
   AutogradContext(const AutogradContext& other) = delete;

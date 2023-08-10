@@ -1,0 +1,12 @@
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+https://www.cnblogs.com/rossiXYZ/p/15421453.html
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+https://www.cnblogs.com/rossiXYZ/p/15426719.html
+
+深度学习利器之自动微分(1)
+https://www.cnblogs.com/rossiXYZ/p/15395742.html
+深度学习利器之自动微分(2)
+https://www.cnblogs.com/rossiXYZ/p/15395775.html
+深度学习利器之自动微分(3)
+https://www.cnblogs.com/rossiXYZ/p/15413467.html

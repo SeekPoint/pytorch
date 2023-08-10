@@ -35,7 +35,9 @@ namespace autograd {
 struct Edge;
 struct FunctionPostHook;
 struct FunctionPreHook;
-
+//从名字可知，Edge 就是计算图的边。主要变量是：
+//std::shared_ptr function ：本边指向的目标Node。
+//uint32_t input_nr ： 指定本Edge是 function 的第几个输入 。
 using tensor_list = std::vector<at::Tensor>;
 using variable_list = std::vector<Variable>;
 using edge_list = std::vector<Edge>;
@@ -110,6 +112,58 @@ TORCH_API std::shared_ptr<Node> get_current_node();
 // See NOTE [ Sequence Number] for more details on the usages of sequence
 // number.
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/*早期版本中，Node的名字是Function，后来修改为Node，应该是想与节点概念更好的对应。
+
+Node 是一个代表操作的抽象类，其输入是0个或者多个Variable，输出是0个或多个Variable。
+前向图中该Node节点的输入节点，就是后向传播图中该Node节点的输出节点。
+PyTorch的autograd机制中，所有函数都派生自此类，并重写其“apply”方法。这样子类的实例就可以通过call操作符调用。
+
+将autograd系统视为计算图时，Node是通过（有向）Edge相互连接的顶点或节点，其本身通过（Node，input_nr）对来表示。
+Variable 是Node 的输入和输出，并在图形执行期间在这些边之间移动。当两个或多个“边”（来自不同来源）指向一个“节点”的同一输入时，沿所有这些边生成的值在转发到目标“节点”之前将被隐式求和。
+
+其子类通常用来表示可微函数及其梯度算子。然而，请注意，由于“节点”的定义非常笼统，“节点”接受零或更多的输入并产生零或更多的输出。
+“节点”的使用非常灵活，超出了纯数学运算的范围。例如，AccumageGrad函数是一个sink，它接受一个输入，但不产生输出，而是将输入作为副作用进行累积。
+在另一端，“GraphRoot”函数不接收来自其他函数的输入，而是产生多个输出。具体可以参见 torch/csrc/autograd/function.h 的注释。
+
+
+4.2 重要成员变量
+我们具体解释一些重要成员变量。
+
+4.2.1 input_metadata_
+input_metadata_ 代表了 input data 的元信息，界定了一个Function的输入参数。
+
+4.2.2 next_edges_
+这是在前向过程中与该算子相关联的边。
+
+我们将 PyTorch的autograd系统看作是一个图，每个 Node 实例就是图节点，各个 Node 实例之间则是通过Edge连接的。Edge是个结构体，通过 (Function, input_nr) 的配对来代表graph中的边。Node 的成员 next_edges_ 正是一组这样的Edge实例，其代表此 Node 实例的返回值要输出到的（另外）Node，即 next_edges_是 Node 和Node 之间的纽带。
+
+Node 的输入输出都是Variable实例，因此当一个graph被执行的时候，Variable实例就在这些edges之间来传输流动。当两个或者多个Edge指向同一个Node的时候（这个节点的入度大于1），这些edges的输出将被隐含相加起来再送给指向的目标 Node。
+
+用户可以使用add_next_edge()来向 Node 添加一个edge, 通过next_edge(index)获取对应的edge，通过next_edges()方法获得迭代edge的迭代器。
+
+4.2.3 sequence_nr_
+该变量用于将网络中的后向节点与前向操作关联起来，并且在引擎中提供确定信息。sequence_nr_ 随着Function实例的不断构建而单调增长，具体有两个用处：
+
+帮助确定节点在引擎中的执行优先级。在所有其他条件相同的情况下，优先级较高的节点将首先执行。因此，前向传播时后执行的操作就是后向传播之中先执行的操作。需要注意的一点是，对于 AccumulateGrad 节点，我们将sequence_nr显式地设置为UINT64_MAX。在PyTorch的反向图计算中，AccumulateGrad类型代表的就是叶子节点类型，也就是计算图终止节点。AccumulateGrad类中有一个.variable属性指向叶子节点。
+
+此“节点”的 sequence_nr_ 与 thread_id 一起搭配，作为一个节点的唯一标示，在 profiler 之中记录事件。这样做的目的是帮助用户（可能还有程序）解释 profiler 的输出，以便将向后的节点与其向前的操作关联起来。因为 sequence_nr 是 thread_local 类型变量，即在新线程中从零开始计数。
+
+4.2.4 topological_nr_
+此变量是 “节点”的拓扑顺序号，表示从该节点到任何叶节点的最长可能路径的长度。如果有一个叶节点，即AccumulateGrad，topological_nr_ 将是零。
+
+topological_nr_ 用于在autograd发现期间对DAG中的分支进行修剪，维护拓扑 topological_nr_有助于我们在两个节点之间不存在有向路径时，在O(1) 时间完成检查。
+
+topological_nr_ 具有以下属性：
+
+对于G中的每一对节点X，Y，如果存在从X到Y的有向路径，则意味着 topo_nr(X) > topo_nr(Y)。然而，事实并非如此，因此我们无法证明从X到Y的路径的存在性，只能证明不存在。
+我们在使用 topological_nr_ 时所做的一个假设是：一旦使用了一个节点，即它有一个父节点，那么它自己的topological_nr_ 就不会改变。我们在“has_parent_”字段中添加了一些检查来强制执行这一点。
+4.2.5 operator()
+variable_list operator()(variable_list&& inputs)是Node的主要方法。该方法接收vector封装的多个Variable实例，并输出vector封装的多个Variable实例，然后调用apply 具体业务函数。该方法依靠C++的多态，将对operator 的调用转化为对自身（子类）的apply方法调用。
+
+PyTorch中所有用于反向传播计算的函数都继承自Function类，并重写Function类中的apply纯虚函数。
+
+
+*/
 struct TORCH_API Node : std::enable_shared_from_this<Node> {
  public:
   /// Construct a new `Node` with the given `next_edges`
@@ -151,6 +205,7 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
   }
   /// Evaluates the function on the given inputs and returns the result of the
   /// function call.
+  //// 这里对运算符()进行重载，核心其实就是调用apply()
   variable_list operator()(variable_list&& inputs) {
     // In the first iteration of named tensors, autograd ignores names and
     // operates on unnamed tensors. In the long term, autograd should
@@ -624,7 +679,7 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
   std::mutex mutex_;
 
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  edge_list next_edges_;
+  edge_list next_edges_; // 前向过程中的输入variable，在前向过程中与该算子相关联的边
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PyObject* pyobj_ = nullptr; // weak reference
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)

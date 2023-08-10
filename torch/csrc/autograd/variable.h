@@ -23,6 +23,15 @@
 namespace torch {
 namespace autograd {
 
+/*
+Variable 的定义在：torch/csrc/autograd/variable.h，我们可以看看注释中 "Gradient Edges" 的相关部分。
+可以看出来，"Variable" 具有"gradient_edge"的概念，
+这是自动梯度计算图的边，在反向传播之中用来把变量和梯度函数的特定输入联系起来。
+更准确地说，这个梯度函数可以是两个函数之一：
+grad_fn，如果variable 在图的内部。这是产生梯度变量的梯度函数。
+grad_accumulator，如果变量是一个叶子节点，它将一个标量梯度值累加到它的'grad'变量之中。
+*/
+
 /// `Variable` is exactly the same as `Tensor` (i.e. we have `using Variable =
 /// at::Tensor`). This means you can perform all the usual mathematical and
 /// other operations you can perform on `Tensor`s also on `Variable`s.
@@ -198,13 +207,30 @@ TORCH_API void create_cpp_hook(
 /// metadata fields that are necessary for tracking the Variable's autograd
 /// history. As an optimization, a Variable may store a nullptr, in lieu of a
 /// default constructed AutogradMeta.
+/*
+AutogradMeta 的主要成员变量如下：
 
+grad_ ：存储当前Variable实例的梯度，本身也是一个Variable。
+grad_fn ：是个Node实例，非叶子节点才有。通过 grad_fn() 方法来访问，实际上，PyTorch中就是通过 grad_fn是否为空 来判断一个Variable是否是leaf variable。
+grad_accumulator_ ：也是Node的实例，只有叶子节点才有。
+通过Variable的grad_accumulator()来访问。
+叶子节点负责对梯度进行累加，grad_accumulator_ 就是梯度累加处理函数。
+其对应梯度就被保存在 grad_ 变量之中。
+我们总结一下，对于非叶子节点，grad_fn是计算梯度操作。对于叶子节点，PyTorch 虚拟出了一个特殊计算操作，输出这个叶子节点，同时此虚拟计算操作也作为叶子节点的grad_accumulator_来累加其梯度，因此叶子节点的 output_nr_ 必定为 0。
+requires_grad_ ：表明此Variable实例是否需要grad。
+retains_grad_ ： 只有非叶子节点才有意义，意义为是否需要保持图。
+is_view_ ：是个flag，表明此Variable实例是否是个view（没有实际存储，基于base的variable）。
+version_counter_ ：version number。
+output_nr_：是个数字。output_nr_表明是 Node 的第几个输出，比如为 0 就 表明这个Variable是Node 的第 1 个输出。
+base_ ：是view的base variable。
+
+*/
 struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
   std::string name_;
 
-  Variable grad_;
-  std::shared_ptr<Node> grad_fn_;
-  std::weak_ptr<Node> grad_accumulator_;
+  Variable grad_; // 保存当前Variable的梯度，本身也是一个Variable
+  std::shared_ptr<Node> grad_fn_;  // 非叶子节点才有意义，中间节点负责梯度计算。Pytorch就是判断grad_fn_是否为空来判断一个Variable是否是叶子节点，可以通过grad_fn()方法来访问。
+  std::weak_ptr<Node> grad_accumulator_; // Node实例，只有叶子节点才有，叶子节点负责对梯度进行累加，grad_accumulator_就是梯度累加处理函数，梯度就被保存在grad_变量之中
 
   // This field is used to store all the forward AD gradients
   // associated with this AutogradMeta (and the Tensor it corresponds to)
@@ -231,18 +257,18 @@ struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
   std::shared_ptr<hooks_list> cpp_hooks_list_;
 
   // Only meaningful on leaf variables (must be false otherwise)
-  bool requires_grad_{false};
+  bool requires_grad_{false}; // 此Variable是否需要grad
 
   // Only meaningful on non-leaf variables (must be false otherwise)
-  bool retains_grad_{false};
+  bool retains_grad_{false}; // 只有非叶子节点才有意义，是否需要保持图
 
-  bool is_view_{false};
+  bool is_view_{false}; // 此Variable是否是一个View（没有实际存储，这是基于base的Variable）
 
   // The "output number" of this variable; e.g., if this variable
   // was the second output of a function, then output_nr == 1.
   // We use this to make sure we can setup the backwards trace
   // correctly when this variable is passed to another function.
-  uint32_t output_nr_;
+  uint32_t output_nr_;  // Variable是某一个函数的输出数据，output_nr_ 就记录了它是第几个输出，比如 = 0，就表示是函数的第1个输出
 
   // Mutex to ensure that concurrent read operations that modify internal
   // state are still thread-safe. Used by grad_fn(), grad_accumulator(),
@@ -284,7 +310,12 @@ struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
       const at::TensorBase& self,
       uint64_t level,
       bool is_inplace_op) override;
+/*
+AutogradMeta 构造函数之中，gradient_edge 参数需要特别注意，其类型为 Edge。
 
+gradient_edge.function 就被赋值给AutogradMeta 的 grad_fn。
+gradient_edge.input_nr 被赋值给 AutoGradMeta 的 output_nr。
+*/
   AutogradMeta(
       at::TensorImpl* self_impl = nullptr,
       bool requires_grad = false,
@@ -358,6 +389,9 @@ struct TORCH_API ViewInfo {
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 //                     DifferentiableViewMeta
+//对于输入变量，许多操作返回与输入变量共享存储的新变量，返回的变量被称为在基变量之上的视图（view）变量。在PyTorch中，我们有两种类型的视图：可微视图和不可微的视图。
+//为了支持合适的版本校验，无论是哪种类型，基变量和视图变量必须分享同样的版本计数器（version_counter）。
+//DifferentiableViewMeta 就是用来处理可微视图。
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 /// NOTE [ Autograd View Variables ]

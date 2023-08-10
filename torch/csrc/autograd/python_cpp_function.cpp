@@ -123,14 +123,16 @@ void THPCppFunction_dealloc(PyObject* self) {
 }
 
 } // namespace
-
+//THPCppFunction_next_functions 定义在 torch/csrc/autograd/python_cpp_function.cpp，
+//其就是遍历 next_edges_，然后提取出一个tuple列表，
+//每个tuple 内容就是 (Edge.function, Edge.input_nr)，最后作为 next_functions 进行返回。
 PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook) {
   const auto num_next = self->cdata->num_outputs();
   THPObjectPtr py_functions(PyTuple_New(num_next));
   if (!py_functions)
     return nullptr;
-  for (const auto i : c10::irange(num_next)) {
-    auto& c_tuple = self->cdata->next_edge(i);
+  for (const auto i : c10::irange(num_next)) {  // 遍历
+    auto& c_tuple = self->cdata->next_edge(i);  // 获取 Edge
     THPObjectPtr tuple(PyTuple_New(2));
     if (!tuple)
       return nullptr;
@@ -138,13 +140,15 @@ PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook) {
     if (!py_fn)
       return nullptr;
     PyTuple_SET_ITEM(tuple.get(), 0, py_fn);
-    PyObject* py_idx = THPUtils_packUInt32(c_tuple.input_nr);
+    PyObject* py_idx = THPUtils_packUInt32(c_tuple.input_nr); // py_idx 就是 Edge.input_nr
     if (!py_idx)
       return nullptr;
     PyTuple_SET_ITEM(tuple.get(), 1, py_idx);
-    PyTuple_SET_ITEM(py_functions.get(), i, tuple.release());
+
+    // tuple 就是 (py_fn, py_idx)，就是 (Edge.function, Edge.input_nr)
+    PyTuple_SET_ITEM(py_functions.get(), i, tuple.release()); // 设置 py_functions的第几个item
   }
-  return py_functions.release();
+  return py_functions.release(); // 返回tuple
 }
 
 PyObject* THPCppFunction_metadata(THPCppFunction* self, void* _unused) {
@@ -196,7 +200,9 @@ static struct PyMethodDef default_methods[] = {
 static struct PyGetSetDef default_properties[] = {
     THP_FUNCTION_DEFAULT_PROPERTIES,
     {nullptr}};
-
+//_initFunctionPyTypeObject 就是把 function_properties 设置到 tp_getset 之上。
+//所以就把 THPCppFunction_next_functions 添加到了 AccumulateGradClass 的 next_functions 之上。
+//即 AccumulateGradClass 有一个函数集，其中 next_functions 对应了 THPCppFunction_next_functions。
 PyTypeObject* _initFunctionPyTypeObject(
     PyTypeObject& type,
     const char* name,
@@ -207,6 +213,7 @@ PyTypeObject* _initFunctionPyTypeObject(
   type.tp_basicsize = sizeof(THPCppFunction);
   type.tp_call = THPCppFunction_call;
   type.tp_methods = function_methods ? function_methods : default_methods;
+  //// 这里把 function_properties 设置到 tp_getset 之上
   type.tp_getset =
       function_properties ? function_properties : default_properties;
   type.tp_dealloc = THPCppFunction_dealloc;

@@ -1168,6 +1168,39 @@ class _ImperativeEngine:
 # Defined in torch/csrc/autograd/python_variable.cpp
 class _TensorMeta(type):
     pass
+/*
+我们看看其中的部分成员变量：
+
+data：该张量的数据。
+
+dtype ：该张量的数据类型。
+
+device： 存放该张量的设备类型，比如 CPU 或者是 GPU。
+
+grad：保存数据data对应的梯度，和数据data的形状一样。
+
+PyTorch会自动追踪和记录对与张量的所有操作，当前向计算完成后调用.backward()方法会自动计算梯度并且将计算结果保存到grad属性中。
+requires_grad = False时，grad为None。
+梯度值不会自动清空，每次在backward计算时都需要将前一时刻的梯度归零，否则梯度值会一直累加。
+grad_fn：指向一个Function对象。
+
+这个Function对象用来在反向传播时候计算输入的梯度。
+若本张量是非叶节点，则 Function 是向叶节点方向操作的反向传播函数，比如例子里 O 节点对应的函数就是MulBackward，即乘法操作的反向函数；
+若本张量是叶节点且requires_grad为True，则 grad_fn 是None。
+grad_fn 有一个属性 next_functions，这是一个二维 tuple，形式为( (函数1， 整数1)，(函数2，整数2), ..., (函数n，整数n) )。 后续我们会详细解释。
+is_leaf：记录该张量是否是叶子节点 。
+
+用户显式初始化的张量是叶子节点。
+所有requires_grad=False的张量按照惯例也是叶子节点。
+is_leaf 属性只有在需要求导的时候才有意义。对于任意一个张量来说，我们可以用 tensor.is_leaf 来判断它是否是叶子张量（leaf tensor）。在反向传播过程中，只有 is_leaf=True 的时候，需要求导张量的导数结果才会被保留下来。
+对于叶子节点来说，其 grad_fn 属性都为空；而对于非叶子结点来说，因为它们是通过一些操作生成的，所以其 grad_fn 不为空。
+requires_grad : 设置为True则表示该Tensor需要求导，用于判断该tensor是否需要被跟踪并计算梯度。
+
+requires_grad属性默认为False，也就是Tensor变量默认是不需要求导的。
+如果一个节点的requires_grad是True，那么所有依赖它的节点的requires_grad也会是True。换言之，如果一个节点依赖的所有节点都不需要求导，那么它的requires_grad也会是False。因此在反向传播过程中，该节点所在的子图会被排除在计算过程之外。
+Python的定义其实只是C++世界定义的一个映射，我们接下来就看看在C++如何定义。
+
+*/
 
 # Defined in torch/csrc/autograd/python_variable.cpp
 class _TensorBase(metaclass=_TensorMeta):

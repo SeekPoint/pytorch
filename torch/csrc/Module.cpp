@@ -1250,6 +1250,7 @@ extern "C"
 #endif
         TORCH_API PyObject* initModule();
 // separate decl and defn for msvc error C2491
+//initModule函数是对python环境中的torch module进行初始化。其定义在 torch/csrc/Module.cpp
 PyObject* initModule() {
   HANDLE_TH_ERRORS
 
@@ -1298,7 +1299,7 @@ PyObject* initModule() {
   THPQScheme_init(module);
   THPDevice_init(module);
   THPStream_init(module);
-  ASSERT_TRUE(THPVariable_initModule(module));
+  ASSERT_TRUE(THPVariable_initModule(module)); // 继续分析这里，其中会设定_TensorBase
   ASSERT_TRUE(THPFunction_initModule(module));
   ASSERT_TRUE(THPEngine_initModule(module));
   // NOTE: We need to be able to access OperatorExportTypes from ONNX for use in

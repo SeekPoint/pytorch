@@ -13,22 +13,24 @@ but can see the instant effect after change!
 基本完成:
 小白学习pytorch源码（一）：torch包函数如何实现？揭秘__init__.py
 https://blog.csdn.net/Sky_FULLl/article/details/125612951
-
 小白学习pytorch源码（二）：setup.py最详细解读
 https://blog.csdn.net/Sky_FULLl/article/details/125652654
 
-
-
-TBD
-
-罗西的思考 https://www.cnblogs.com/rossiXYZ/p/15421453.html 很多！！！
-
+重要，需要再看！
 PyTorch源码分析（1）- 整体预览
 https://zhuanlan.zhihu.com/p/598044604
 PyTorch源码分析（2）——动态图原理
 https://zhuanlan.zhihu.com/p/598291307
 
 
+
+
+
+
+还没看 TBD：
+
+pytorch学习笔记（十三）：backward过程的底层实现解析  === 2017 太旧
+https://blog.csdn.net/u012436149/article/details/78510945
 
 如何有效地阅读PyTorch的源代码？
 https://www.zhihu.com/question/58253344/answer/241864966

@@ -200,7 +200,21 @@ def backward(
     Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
         tensors, grad_tensors_, retain_graph, create_graph, inputs,
         allow_unreachable=True, accumulate_grad=True)  # Calls into the C++ engine to run the backward pass
+'''
+方法二是通过torch.autograd.grad(）来求导。
+该函数会自动完成求导过程，而且会自动返回对于每一个自变量求导的结果。
+这是和backward不一样的地方。
 
+参数如下：
+
+outputs: 结果节点，微分函数的输出，即需要求导的那个函数。
+inputs: 叶子节点，即返回的梯度，即函数的自变量。
+grad_outputs: Jacobian-vector 积中的向量。
+retain_graph: 如果设置为False，用于计算梯度的图形将被释放。通常在调用backward后，会自动把计算图销毁，如果要想对某个变量重复调用backward，需要将该参数设置为True。
+create_graph: 当设置为True的时候可以用来计算更高阶的梯度。
+allow_unused: 默认为False, 即必须要指定input,如果没有指定的话则报错。
+
+'''
 def grad(
     outputs: _TensorOrTensors,
     inputs: _TensorOrTensors,

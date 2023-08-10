@@ -146,6 +146,10 @@ once backward pass is started. This ensures that if you're using in-place
 functions and not seeing any errors, you can be sure that the computed
 gradients are correct.
 
+早期版本之中，有Tensor和Variable两种数据结构来存储数据，Tensor只负责多维数组的运算。自动微分的职责是Variable完成的。
+Variable包含了与autograd有关的属性，可以是计算图中的叶子节点，也可以是计算时候产生的中间变量。
+在0.4.0版本之后，Tensor和Variable 的功能进行了合并，自动微分的使用就更加简单了。现在，Variable 其实就是Tensor，只是为了向后兼容，才保留这个名字。
+
 Variable (deprecated)
 ^^^^^^^^^^^^^^^^^^^^^
 

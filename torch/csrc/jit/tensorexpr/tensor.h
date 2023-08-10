@@ -12,6 +12,7 @@ namespace torch {
 namespace jit {
 namespace tensorexpr {
 
+///PyTorch 之中大量使用了bridge设计模式，at::Tensor就是利用bridge模式把具体实现转交给TensorImpl完成。
 class TORCH_API Tensor {
  public:
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)

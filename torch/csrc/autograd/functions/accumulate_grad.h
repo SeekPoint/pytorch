@@ -36,7 +36,12 @@ namespace autograd {
           VAR.strides());                                                  \
     }                                                                      \
   }
-
+//所以我们以 AccumulateGrad 为例总结以下。
+//grad_fn 有一个属性 next_functions ，这是一个二维的tuple，形式为( (函数1， 整数1)，(函数2，整数2), ..., (函数N，整数N) )。
+//next_functions 是一个 tuple 列表，列表个数就是这个 grad_fn 的 Edge 数目，列表之中每一个 tuple 对应一条 Edge 信息，
+//内容就是 (Edge.function, Edge.input_nr)。这个列表是由 THPCppFunction_next_functions 生成的。
+//AccumulateGrad 的 next_functions 指向的就是一个 tuple 列表（就是下图中的 2），这个列表来自 AccumulateGradClass（就是下图中的 1）。
+//反向传播时候，顺着这个 next_functions 就可以逐次计算梯度。
 struct TORCH_API AccumulateGrad : public Node {
   explicit AccumulateGrad(Variable variable_);
 

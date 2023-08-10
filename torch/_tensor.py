@@ -425,6 +425,17 @@ class Tensor(torch._C._TensorBase):
         # All strings are unicode in Python 3.
         return torch._tensor_str._str(self, tensor_contents=tensor_contents)
 
+    '''
+    Torch 有两种求导方法。方法1 backward 是 通过 torch.autograd.backward(）求导。
+    
+    其参数为：
+
+    gradient: 如果张量是非标量（即其数据有多个元素）且需要梯度，则backward函数还需要指定“梯度”。它应该是类型和位置都匹配的张量。
+    retain_graph: 如果设置为False，用于计算梯度的图形将被释放。通常在调用backward后，会自动把计算图销毁，如果要想对某个变量重复调用backward，需要将该参数设置为True。
+    create_graph: 当设置为True的时候可以用来计算更高阶的梯度。
+    inputs ：需要计算梯度的张量。如果没有提供，则梯度被累积到所有叶子张量上。
+    需要注意的是，这个函数只是提供求导功能，并不返回值，返回的总是None。
+    '''
     def backward(
         self, gradient=None, retain_graph=None, create_graph=False, inputs=None
     ):
