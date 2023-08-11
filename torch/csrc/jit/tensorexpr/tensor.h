@@ -12,7 +12,33 @@ namespace torch {
 namespace jit {
 namespace tensorexpr {
 
-///PyTorch 之中大量使用了bridge设计模式，at::Tensor就是利用bridge模式把具体实现转交给TensorImpl完成。
+/*
+PyTorch 之中大量使用了bridge设计模式，at::Tensor就是利用bridge模式把具体实现转交给TensorImpl完成。
+
++------------------------------------------------+          +---------------------------+
+|Tensor                                          |          |TensorImpl                 |
+|                                                |          |                           |
+|                                                |  bridge  |                           |
+|      <TensorImpl, UndefinedTensorImpl> impl_+-----------> |       autograd_meta_      |
+|                                                |          |                           |
+|                                                |          |       named_tensor_meta_  |
++------------------------------------------------+          |                           |
+                                                            |       pyobj_              |
+                                                            |                           |
+                                                            |       sizes_and_strides_  |
+                                                            |                           |
+                                                            |       storage_offset_     |
+                                                            |                           |
+                                                            |       data_type_          |
+                                                            |                           |
+                                                            |       device_opt_         |
+                                                            |                           |
+                                                            |                           |
+                                                            +---------------------------+
+
+
+
+*/
 class TORCH_API Tensor {
  public:
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)

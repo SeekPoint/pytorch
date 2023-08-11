@@ -18,13 +18,18 @@
 
 namespace torch { namespace autograd { namespace generated {
 
+//addClass 会调用到 registerCppFunction 注册 type（ function_properties），
+//我们这里参数 function_properties 就是 accumulate_grad_properties，type 就是 AccumulateGradClass。
 template<typename C>
 static void addClass(PyObject* module, PyTypeObject& type, const char* name,
   PyGetSetDef* function_properties=NULL, PyMethodDef* function_methods=NULL)
 {
+  //// 这里设置了 accumulate_grad_properties
   _initFunctionPyTypeObject(type, name, function_properties, function_methods);
   Py_INCREF(&type);
   PyModule_AddObject(module, name, (PyObject*)&type);
+
+  // // 注册了 type
   registerCppFunction(typeid(C), &type);
 }
 

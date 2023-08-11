@@ -36,16 +36,60 @@ namespace autograd {
           VAR.strides());                                                  \
     }                                                                      \
   }
-//所以我们以 AccumulateGrad 为例总结以下。
-//grad_fn 有一个属性 next_functions ，这是一个二维的tuple，形式为( (函数1， 整数1)，(函数2，整数2), ..., (函数N，整数N) )。
-//next_functions 是一个 tuple 列表，列表个数就是这个 grad_fn 的 Edge 数目，列表之中每一个 tuple 对应一条 Edge 信息，
-//内容就是 (Edge.function, Edge.input_nr)。这个列表是由 THPCppFunction_next_functions 生成的。
-//AccumulateGrad 的 next_functions 指向的就是一个 tuple 列表（就是下图中的 2），这个列表来自 AccumulateGradClass（就是下图中的 1）。
-//反向传播时候，顺着这个 next_functions 就可以逐次计算梯度。
-struct TORCH_API AccumulateGrad : public Node {
-  explicit AccumulateGrad(Variable variable_);
+/*
+所以我们以 AccumulateGrad 为例总结以下。
+    grad_fn 有一个属性 next_functions ，这是一个二维的tuple，形式为( (函数1， 整数1)，(函数2，整数2), ..., (函数N，整数N) )。
+    next_functions 是一个 tuple 列表，列表个数就是这个 grad_fn 的 Edge 数目，列表之中每一个 tuple 对应一条 Edge 信息，内容就是 (Edge.function, Edge.input_nr)。这个列表是由 THPCppFunction_next_functions 生成的。
+    AccumulateGrad 的 next_functions 指向的就是一个 tuple 列表（就是下图中的 2），这个列表来自 AccumulateGradClass（就是下图中的 1）。反向传播时候，顺着这个 next_functions 就可以逐次计算梯度。
 
-  variable_list apply(variable_list&& grads) override;
++-----------------+   +-----------------------+        +----------------------+    +---------------------+
+|  Tensor         |   | SubBackward0          |        | PowBackward0         |    | AccumulateGrad      |
+|                 |   |                       |        |                      |    |                     |
+|       grad_fn +---->+     next_functions  +-----+--> |     next_functions +----> |    next_functions +----> {}
+|                 |   |                       |   |    |                      |    |                     |
++-----------------+   +-----------------------+   |    +----------------------+    +---------------------+
+                                                  |
+                                                  |
+                                                  |    +----------------------+    +----------------------+    +---------------------+
+                                                  |    | MulBackward0         |    | PermuteBackward      |    | AccumulateGrad      |
+                                                  +--> |                      |    |                      |    |                     |
+                                                       |     next_functions +----> |     next_functions +----> |    next_functions +-----+
+                                                       |                      |    |                      |    |                     |   |
++---------------------+                               ++-------------------- -+    +----------------------+    +---------------------+   |
+| AccumulateGradClass |                                                                                                                  |
+|                     |                                                                                                                  |
+|       tp_getset     |                                                                                                 2. point to the tuple list
+|           +         |                                                                                                                  |
+|           |         |                                                                                                                  |
++---------------------+                                                                                                                  |
+            |                                                                                                                            v
+            |
+            v                                                            +-----> { (function 1, int 1), (function 2, int 2) ... (function n, int n) }
++-----------+-----------------------------------------------------+      |
+|accumulate_grad_properties                                       |      |
+|                                                                 |      |
+|       "variable", accumulateGradVar                             |      |
+|                                                                 |      |
+|       "next_functions", (getter)THPCppFunction_next_functions +--------+
+|                                                                 |  1. generate the tuple list
+|       "requires_grad", (getter)THPCppFunction_requires_grad     |
+|                                                                 |
+|       "metadata", (getter)THPCppFunction_metadata               |
+|                                                                 |
++-----------------------------------------------------------------+
+
+
+
+*/
+
+//首先看看 AccumulateGrad 的定义，这里省略了 AccumulateGrad 部分成员函数。从构建函数可看出来，一个AccumulateGrad实例必须用一个Variable构建，内部成员变量就是Variable variable。
+//apply调用接收一个Variable list 实例，这和Variable grad_accumulator_相关。
+struct TORCH_API AccumulateGrad : public Node {
+  //从构建函数可看出来，一个AccumulateGrad实例必须用一个Variable构建，内部成员变量就是Variable variable。
+  //apply调用接收一个Variable list 实例，这和Variable grad_accumulator_相关。
+  explicit AccumulateGrad(Variable variable_);   // 必须用一个Variable构建
+
+  variable_list apply(variable_list&& grads) override; // 接收一个list的Variable的实例
 
   std::vector<std::unique_ptr<FunctionPreHook>>& tensor_pre_hooks() noexcept
       override {

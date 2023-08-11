@@ -150,7 +150,7 @@ struct C10_API PlacementDeleteContext {
 };
 
 struct TensorImpl;
-///AutogradMetaInterface 定义如下，这是一个抽象接口，需要派生类来实现具体功能
+//AutogradMetaInterface 定义如下，这是一个抽象接口，需要派生类来实现具体功能
 struct C10_API AutogradMetaInterface {
   virtual void set_requires_grad(
       bool requires_grad,
@@ -510,6 +510,7 @@ class C10_TensorImpl_Size_Check_Dummy_Class;
  *    tensor is fully initialized in all fields.  Please do not write new code
  *    that depends on these uninitialized states.
  */
+
  /*TensorImpl 定义如下，因为本文是自动微分和前向传播相关，因此我们专注这部分功能的相关变量，就是autograd_meta_ 。
  除了 autograd_meta_ 之外，主要是一些描述Tensor大小的元数据，包含元素的类型（dtype），
  Tensor所依赖的设备，Strides（步幅）等等。
@@ -1775,14 +1776,11 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   /**
    * Set the pointer to autograd metadata.
 对于自动微分，std::unique_ptr<c10::AutogradMetaInterface> autograd_meta_ = nullptr; 是关键。
-
 此成员变量用来存储自动微分相关的特殊变量，比如grad_ / grad_fn_ / grad_accumulator_，每一个TensorImpl在同一时刻只有唯一一个AutogradMeta。
-
 autograd_meta_ 是区分一个 Variable 是普通张量还是带 autograd 功能张量的唯一标识：
-
-对于不需要梯度的张量，autograd_meta_ 这个变量为null。
-但是出于优化的目的，即使需要梯度，autograd_meta_ 也可以是null，这种情况等同于被赋值成一个缺省的AutogradMeta。所以在使用时候需要仔细校验是否为null。
-在需要梯度情况下，一般来说，autograd_meta_会被初始化为 AutogradMeta 或者DifferentiableViewMeta。
+    对于不需要梯度的张量，autograd_meta_ 这个变量为null。
+    但是出于优化的目的，即使需要梯度，autograd_meta_ 也可以是null，这种情况等同于被赋值成一个缺省的AutogradMeta。所以在使用时候需要仔细校验是否为null。
+    在需要梯度情况下，一般来说，autograd_meta_会被初始化为 AutogradMeta 或者DifferentiableViewMeta。
    */
   void set_autograd_meta(
       std::unique_ptr<c10::AutogradMetaInterface> autograd_meta);
@@ -2785,7 +2783,7 @@ autograd_meta_ 是区分一个 Variable 是普通张量还是带 autograd 功能
   //    2. autograd_meta_ is default constructed (semantically, same as (1))
   //    3. autograd_meta_ has nontrivial information content
   //
-  std::unique_ptr<c10::AutogradMetaInterface> autograd_meta_ = nullptr;
+  std::unique_ptr<c10::AutogradMetaInterface> autograd_meta_ = nullptr; // 主要关注这里
 
  protected:
   std::unique_ptr<c10::ExtraMeta> extra_meta_ = nullptr;

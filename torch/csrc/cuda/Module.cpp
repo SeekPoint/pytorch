@@ -1045,6 +1045,7 @@ static void bindGetDeviceProperties(PyObject* module) {
 
 // Callback for python part. Used for additional initialization of python
 // classes
+//THPModule_initExtension 函数会调用THPAutograd_initFunctions，该方法初始化了自动微分系统。
 static PyObject* THCPModule_initExtension(PyObject* self, PyObject* noargs) {
 #if C10_ASAN_ENABLED
   TORCH_WARN(

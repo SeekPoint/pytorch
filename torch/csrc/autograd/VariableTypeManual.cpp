@@ -166,7 +166,9 @@ Tensor _make_dual(
         ks & c10::after_autograd_keyset, primal_, tangent_, level);
   })();
 
-  if (grad_fn) {
+  //接下来是配置历史，result 是之前代码计算出来的前向传播输出，这里其实是配置反向传播的输入参数 和 输入如何计算。
+  if (grad_fn) {  // grad_fn 就是 std::shared_ptr<SubBackward0>
+    // 将输出variable与grad_fn绑定，grad_fn之中包含了计算梯度的function
     set_history(flatten_tensor_args(result), grad_fn);
   }
 

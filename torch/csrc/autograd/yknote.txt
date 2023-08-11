@@ -4,15 +4,14 @@ https://www.cnblogs.com/rossiXYZ/p/15421453.html
 [源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
 https://www.cnblogs.com/rossiXYZ/p/15426719.html
 
-[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现   ==可能和编译后生成的代码相关 很多还没加，TBD
 https://www.cnblogs.com/rossiXYZ/p/15436868.html
 
 深度学习利器之自动微分(1)  ==和代码关联不大，理论
 https://www.cnblogs.com/rossiXYZ/p/15395742.html
 深度学习利器之自动微分(2)  ==和代码关联不大，理论
 https://www.cnblogs.com/rossiXYZ/p/15395775.html
-
-深度学习利器之自动微分(3)
+深度学习利器之自动微分(3) ==和代码关联不大，理论
 https://www.cnblogs.com/rossiXYZ/p/15413467.html
 
 [源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎

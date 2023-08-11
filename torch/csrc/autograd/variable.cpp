@@ -146,6 +146,7 @@ static c10::impl::AutogradMetaFactoryRegisterer meta_factory_registerer(
 
 namespace impl {
 
+//其中，materialize_autograd_meta 代码如下，其作用就是从 Tensor 之中获取 autograd_meta_。
 AutogradMeta* materialize_autograd_meta(const at::TensorBase& self) {
   TORCH_CHECK(
       self.defined(),
@@ -267,6 +268,10 @@ std::shared_ptr<Node> try_get_grad_accumulator(const Variable& self) {
   }
 }
 
+/*
+这里有一步需要注意，就是 gradient_edge 方法中，有这样一个语句 return Edge(grad_accumulator(self), 0)，这个代码实际是触发Variable::grad_accumulator()调用。
+在一个Variable第一次调用这个API的时候，会生成一个AccumulateGrad 来初始化它的 grad_accumulator_成员，代码如下：
+*/
 std::shared_ptr<Node> grad_accumulator(const Variable& self) {
   auto autograd_meta = get_autograd_meta(self);
   if (!autograd_meta) {
@@ -289,12 +294,35 @@ std::shared_ptr<Node> grad_accumulator(const Variable& self) {
   c10::raw::intrusive_ptr::incref(self.unsafeGetTensorImpl());
   auto intrusive_from_this =
       c10::intrusive_ptr<at::TensorImpl>::reclaim(self.unsafeGetTensorImpl());
+
+  //// 这里会初始化一个AccumulateGrad，配置给grad_accumulator_
   result = std::make_shared<AccumulateGrad>(
       Variable(std::move(intrusive_from_this)));
   autograd_meta->grad_accumulator_ = result;
   return result;
 }
 
+/*
+4.5 构建边
+构建网络的关键部分就是构建边，这里是配置反向传播的输出边（输出边对应了SubBackward0的两个输入），其中有两步骤:
+    使用 collect_next_edges 来收集输入参数（张量）的边，得到了后续边，后续边就是两个输入参数 self和other的gradient_edge()。
+    使用 set_next_edges 把边配置到张量上。当set_next_edges调用完成后，一个 Node 的 next_edges_成员（类型为std::vector）就会初始化完成。
+4.5.1 获取边
+collect_next_edges 函数就是用来根据输入变量来获取边。其实，collect_next_edges 就是得到 self 和 other 的gradient_edge。
+
+4.5.1.1 gradient_edge
+gradient_edge方法作用是返回通过Variable的 grad_fn_构建的Edge实例，逻辑如下：
+    就是如果一个节点有 grad_fn：
+        说明节点是内部节点（通过运算内部创建的）。
+        grad_fn_就是这个Variable的gradient function，
+        那么就使用 grad_fn来构建一个 Edge返回。
+    如果一个节点没有 grad_fn：
+        说明是叶子节点（用户创建的）。
+        grad_fn_ 是这个Variable的gradient accumulator，也就是一个AccumulateGrad类（Function子类）的实例。PyTorch 使用grad_accumulator来累加输出给这个Variable的梯度。
+        使用grad_accumulator来构建一个 Edge返回。
+代码如下，需要注意的是，output_nr是当前variable在前向计算时是第几个输出，对于单输出的算子比如add或者mul来说，output_nr一般都是0，但对于多输出的算子比如split，则output_nr可能是0,1,2...。
+
+*/
 Edge gradient_edge(const Variable& self) {
   // If grad_fn is null (as is the case for a leaf node), we instead
   // interpret the gradient function to be a gradient accumulator, which will
@@ -302,18 +330,19 @@ Edge gradient_edge(const Variable& self) {
   // nodes get suppressed in some situations, see "suppress gradient
   // accumulation" below. Note that only variables which have `requires_grad =
   // True` can have gradient accumulators.
-  // self.grad_fn() 这里触发了一个调用
+  // self.grad_fn() 这里触发了一个调用  这里触发了一个调用，得到了一个SubBackward0实例
   if (const auto& gradient = self.grad_fn()) { // 这是一个中间节点，gradient 是一个Function，比如可以得到一个SubBackward0实例
     return Edge(gradient, self.output_nr());  // self.output_nr() 表示本Edge是function的第n个输入。前向传播时候的第 n 个输出在反向传播时候就是第 n 个输入。
   } else {
     return Edge(grad_accumulator(self), 0);   // 这是一个叶子节点，所以生成一个AccumulateGrad，0表示本Edge是function的第一个输入
   }
 }
-
+/*配置历史的操作会最终调用到这里，这是使用 edge 来真正配置了本张量如何计算梯度，而且是配置到了 Variable 类之上的 autograd_meta_。
+即获取 Tensor 的 autograd_meta_，配置其 grad_fn_ 和 output_nr_。*/
 void set_gradient_edge(const Variable& self, Edge edge) {
   auto* meta = materialize_autograd_meta(self);
-  meta->grad_fn_ = std::move(edge.function);
-  meta->output_nr_ = edge.input_nr;
+  meta->grad_fn_ = std::move(edge.function); // 配置梯度函数
+  meta->output_nr_ = edge.input_nr; // 配置梯度函数的第几个输出
   // For views, make sure this new grad_fn_ is not overwritten unless it is
   // necessary in the VariableHooks::grad_fn below. This logic is only relevant
   // for custom autograd Functions for which multiple operations can happen on a
@@ -391,6 +420,7 @@ AutogradMeta* get_autograd_meta(const at::TensorBase& self) {
       self.unsafeGetTensorImpl()->autograd_meta());
 }
 
+//get_view_autograd_meta 代码如下，返回了 DifferentiableViewMeta。
 DifferentiableViewMeta* get_view_autograd_meta(const at::TensorBase& self) {
   // NB: return nullptr if self is not a view
   AutogradMeta* meta = get_autograd_meta(self);

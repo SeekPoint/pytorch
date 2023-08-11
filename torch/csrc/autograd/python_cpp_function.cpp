@@ -200,9 +200,41 @@ static struct PyMethodDef default_methods[] = {
 static struct PyGetSetDef default_properties[] = {
     THP_FUNCTION_DEFAULT_PROPERTIES,
     {nullptr}};
-//_initFunctionPyTypeObject 就是把 function_properties 设置到 tp_getset 之上。
-//所以就把 THPCppFunction_next_functions 添加到了 AccumulateGradClass 的 next_functions 之上。
-//即 AccumulateGradClass 有一个函数集，其中 next_functions 对应了 THPCppFunction_next_functions。
+
+/*
+_initFunctionPyTypeObject 就是把 function_properties 设置到 tp_getset 之上。
+所以就把 THPCppFunction_next_functions 添加到了 AccumulateGradClass 的 next_functions 之上。
+即 AccumulateGradClass 有一个函数集，其中 next_functions 对应了 THPCppFunction_next_functions。
++---------------------+
+| AccumulateGradClass |
+|                     |
+|       tp_getset     |
+|           +         |
+|           |         |
++---------------------+
+            |
+            |
+            v
++-----------+-----------------------------------------------------------+
+|accumulate_grad_properties                                             |
+|                                                                       |
+|                                                                       |
+|                                                                       |
+|              "variable", accumulateGradVar                            |
+|                                                                       |
+|                                                                       |
+|              "next_functions", (getter)THPCppFunction_next_functions  |
+|                                                                       |
+|                                                                       |
+|              "requires_grad", (getter)THPCppFunction_requires_grad    |
+|                                                                       |
+|                                                                       |
+|              "metadata", (getter)THPCppFunction_metadata              |
+|                                                                       |
++-----------------------------------------------------------------------+
+
+
+*/
 PyTypeObject* _initFunctionPyTypeObject(
     PyTypeObject& type,
     const char* name,

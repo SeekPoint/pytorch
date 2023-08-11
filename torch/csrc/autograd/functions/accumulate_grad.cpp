@@ -15,6 +15,7 @@ namespace autograd {
 
 // AccumulateGrad sets sequence_nr to the max value so it's always called
 // ASAP during backwards.
+//这会new一个AccumulateGrad对象，使用UINT64_MAX 来初始化Function的sequence_nr_成员。
 AccumulateGrad::AccumulateGrad(Variable variable_)
     : Node(/*sequence_nr=*/UINT64_MAX), variable(std::move(variable_)) {
   add_input_metadata(variable);

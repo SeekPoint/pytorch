@@ -111,10 +111,36 @@ static PyObject* accumulateGradVar(PyObject* _self, void* _unused) {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables,cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
 static struct PyGetSetDef accumulate_grad_properties[] = {
+/*
+具体逻辑如下，这里面就有 THPCppFunction_next_functions:
+
++-----------------------------------------------------------------------+
+|accumulate_grad_properties                                             |
+|                                                                       |
+|                                                                       |
+|                                                                       |
+|              "variable", accumulateGradVar                            |
+|                                                                       |
+|                                                                       |
+|              "next_functions", (getter)THPCppFunction_next_functions  |
+|                                                                       |
+|                                                                       |
+|              "requires_grad", (getter)THPCppFunction_requires_grad    |
+|                                                                       |
+|                                                                       |
+|              "metadata", (getter)THPCppFunction_metadata              |
+|                                                                       |
++-----------------------------------------------------------------------+
+
+前面提到，addClass 方法，把 AccumulateGrad 和 accumulate_grad_properties 联系在一起。
+具体来说，就是通过 createForwardFunctionPyTypeObject 把 accumulate_grad_properties 联系起来。
+*/
     THP_FUNCTION_DEFAULT_PROPERTIES,
     {(char*)"variable", accumulateGradVar, nullptr, nullptr, nullptr},
     {nullptr}};
 
+//THPAutograd_initFunctions 就是在 _TensorBase 基础之上，再加入新的属性或者函数集。
+//**这里会调用了addClass 方法，把 AccumulateGrad 和 accumulate_grad_properties 联系在一起 **。
 void THPAutograd_initFunctions() {
   THPObjectPtr module(PyModule_New("torch._C._functions"));
   if (!module)

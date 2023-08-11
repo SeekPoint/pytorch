@@ -63,7 +63,17 @@ inline bool compute_requires_grad(Args&&... args) {
   }
   return ComputeRequiresGrad().apply(std::forward<Args>(args)...).out;
 }
+/*
+set_history 会把前向传播结果加入到history之中，具体就是遍历结果中的张量，然后把每一个张量加入到history。其中关键一点是调用了前面提到的 set_gradient_edge，把 grad_fn（就是 SubBackward0）配置给了result.autograd_meta_ 的 grad_fn_。
 
+回忆一下 Tensor 的成员变量 grad_fn 定义。
+
+grad_fn：指向一个Function对象。
+    这个Function对象用来在反向传播时候计算输入的梯度。
+    若本张量是非叶节点，则 Function 是向叶节点方向操作的反向传播函数，比如例子里 O 节点对应的函数就是MulBackward，即乘法操作的反向函数；
+经过对比，就可以知道，前向操作的输入 result 在反向传播计算梯度时候，就会使用 grad_fn_ 来计算梯度，就是我们这里的 SubBackward0。这样就设置了反向传播如何针对输入来计算梯度。
+
+*/
 inline void set_history(
     at::Tensor& variable,
     const std::shared_ptr<Node>& grad_fn) {
@@ -73,9 +83,15 @@ inline void set_history(
     // added function to the DONT_REQUIRE_DERIVATIVE list in
     // tools/autograd/gen_variable_type.py
     TORCH_INTERNAL_ASSERT(isDifferentiableType(variable.scalar_type()));
+
+    //// grad_fn 的 input_metadata 之中添加了输出实例，输出实例在反向传播时候就是输入
     auto output_nr = grad_fn->add_input_metadata(variable);
+
+    // 输出实例 result 中设置上了grad_fn，这里配置了边，边就是 {grad_fn, output_nr}。
+    // output_nr_被赋值成了"当前Variable信息在input_metadata_中的index"。
     impl::set_gradient_edge(variable, {grad_fn, output_nr});
   } else {
+    //// 设置成未定义
     grad_fn->add_input_metadata(Node::undefined_input());
   }
 }
@@ -84,7 +100,7 @@ inline void set_history(
     std::vector<Variable>&& variables,
     const std::shared_ptr<Node>& grad_fn) {
   for (auto& variable : variables) {
-    set_history(variable, grad_fn);
+    set_history(variable, grad_fn); // 调用到上面的函数
   }
 }
 

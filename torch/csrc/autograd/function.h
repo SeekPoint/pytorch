@@ -136,32 +136,24 @@ input_metadata_ 代表了 input data 的元信息，界定了一个Function的�
 这是在前向过程中与该算子相关联的边。
 
 我们将 PyTorch的autograd系统看作是一个图，每个 Node 实例就是图节点，各个 Node 实例之间则是通过Edge连接的。Edge是个结构体，通过 (Function, input_nr) 的配对来代表graph中的边。Node 的成员 next_edges_ 正是一组这样的Edge实例，其代表此 Node 实例的返回值要输出到的（另外）Node，即 next_edges_是 Node 和Node 之间的纽带。
-
 Node 的输入输出都是Variable实例，因此当一个graph被执行的时候，Variable实例就在这些edges之间来传输流动。当两个或者多个Edge指向同一个Node的时候（这个节点的入度大于1），这些edges的输出将被隐含相加起来再送给指向的目标 Node。
-
 用户可以使用add_next_edge()来向 Node 添加一个edge, 通过next_edge(index)获取对应的edge，通过next_edges()方法获得迭代edge的迭代器。
 
 4.2.3 sequence_nr_
 该变量用于将网络中的后向节点与前向操作关联起来，并且在引擎中提供确定信息。sequence_nr_ 随着Function实例的不断构建而单调增长，具体有两个用处：
-
-帮助确定节点在引擎中的执行优先级。在所有其他条件相同的情况下，优先级较高的节点将首先执行。因此，前向传播时后执行的操作就是后向传播之中先执行的操作。需要注意的一点是，对于 AccumulateGrad 节点，我们将sequence_nr显式地设置为UINT64_MAX。在PyTorch的反向图计算中，AccumulateGrad类型代表的就是叶子节点类型，也就是计算图终止节点。AccumulateGrad类中有一个.variable属性指向叶子节点。
-
-此“节点”的 sequence_nr_ 与 thread_id 一起搭配，作为一个节点的唯一标示，在 profiler 之中记录事件。这样做的目的是帮助用户（可能还有程序）解释 profiler 的输出，以便将向后的节点与其向前的操作关联起来。因为 sequence_nr 是 thread_local 类型变量，即在新线程中从零开始计数。
+    帮助确定节点在引擎中的执行优先级。在所有其他条件相同的情况下，优先级较高的节点将首先执行。因此，前向传播时后执行的操作就是后向传播之中先执行的操作。需要注意的一点是，对于 AccumulateGrad 节点，我们将sequence_nr显式地设置为UINT64_MAX。在PyTorch的反向图计算中，AccumulateGrad类型代表的就是叶子节点类型，也就是计算图终止节点。AccumulateGrad类中有一个.variable属性指向叶子节点。
+    此“节点”的 sequence_nr_ 与 thread_id 一起搭配，作为一个节点的唯一标示，在 profiler 之中记录事件。这样做的目的是帮助用户（可能还有程序）解释 profiler 的输出，以便将向后的节点与其向前的操作关联起来。因为 sequence_nr 是 thread_local 类型变量，即在新线程中从零开始计数。
 
 4.2.4 topological_nr_
 此变量是 “节点”的拓扑顺序号，表示从该节点到任何叶节点的最长可能路径的长度。如果有一个叶节点，即AccumulateGrad，topological_nr_ 将是零。
-
 topological_nr_ 用于在autograd发现期间对DAG中的分支进行修剪，维护拓扑 topological_nr_有助于我们在两个节点之间不存在有向路径时，在O(1) 时间完成检查。
-
 topological_nr_ 具有以下属性：
+    对于G中的每一对节点X，Y，如果存在从X到Y的有向路径，则意味着 topo_nr(X) > topo_nr(Y)。然而，事实并非如此，因此我们无法证明从X到Y的路径的存在性，只能证明不存在。
+    我们在使用 topological_nr_ 时所做的一个假设是：一旦使用了一个节点，即它有一个父节点，那么它自己的topological_nr_ 就不会改变。我们在“has_parent_”字段中添加了一些检查来强制执行这一点。
 
-对于G中的每一对节点X，Y，如果存在从X到Y的有向路径，则意味着 topo_nr(X) > topo_nr(Y)。然而，事实并非如此，因此我们无法证明从X到Y的路径的存在性，只能证明不存在。
-我们在使用 topological_nr_ 时所做的一个假设是：一旦使用了一个节点，即它有一个父节点，那么它自己的topological_nr_ 就不会改变。我们在“has_parent_”字段中添加了一些检查来强制执行这一点。
 4.2.5 operator()
 variable_list operator()(variable_list&& inputs)是Node的主要方法。该方法接收vector封装的多个Variable实例，并输出vector封装的多个Variable实例，然后调用apply 具体业务函数。该方法依靠C++的多态，将对operator 的调用转化为对自身（子类）的apply方法调用。
-
 PyTorch中所有用于反向传播计算的函数都继承自Function类，并重写Function类中的apply纯虚函数。
-
 
 */
 struct TORCH_API Node : std::enable_shared_from_this<Node> {
@@ -263,6 +255,45 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
     input_metadata_.emplace_back(options, meta_shape, is_tensor_subclass);
     return input_nr;
   }
+  /*
+配置之后，input_metadata_ 里面就增加了一个新 InputMetadata，InputMetadata 内容就是 输出变量 result 的部分信息 (type, shape, device)，input_metadata_ 中的 index 就是 AutogradMeta 之中的 output_nr_。
+
+所以，此时内存大致如下：
+
+               +-------------------------------------------------------------------------------------------------------------+
+ self +--+     | sub_Tensor                                                                                                  |
+         |     |                  +--------------------------+      +----------------------+                                 |
+         +---->+                  |SubBackward0              |      |                      |                                 |
+         |     |                  |                          |      | Compute the gradient |                                 |
+other +--+     | +--> grad_fn---> |      apply  +-----------------> |                      |                                 |
+               | |                |                          |      +----------------------+                                 |
+               | |                |                          |                                                               |
+               | |                |                          |      +-----------------------------------------------------+  |
+               | |                |      next_edges_  +-----------> | edge_list                                           |  |
+               | |                |                          |      |                                                     |  |
+               | |                |      other_scalar_type   |      | [(PowBackward0(self), 0), (PowBackward0(other), 0)] |  |
+               | |                |                          |      |                                                     |  |
+               | |                |      alpha               |      +-----------------------------------------------------+  |
+               | |                |                          |                                                               |
+               | |                |      self_scalar_type    |      +------------------------------------------------------+ |
+               | |                |                          |      |                                                      | |
+               | |                |      input_metadata_  +-------> | [(type of result, shape of result, device of result)]| |
+               | |                |                          |      |                                                      | |
+               | |                +--------------------------+      +------------------------------------------------------+ |
+               | |                                                                                                           |
+               | |                                                                                                           |
+               | |                +-----------------------+         +---------------------------------------+                |
+               | |                |result                 |         | DifferentiableViewMeta                |                |
+               | |                |                       |         |                                       |                |
+               | |                |    autograd_meta_ +-----------> |       grad_        grad_accumulator_  |                |
+               | |                |                       |         |                                       |                |
+               | |                +-----------------------+         |                                       |                |
+               | +--------------------------------------------------------- grad_fn_     output_nr_         |                |
+               |                                                    |                                       |                |
+               |                                                    +---------------------------------------+                |
+               +-------------------------------------------------------------------------------------------------------------+
+
+*/
 
   uint32_t add_input_metadata(const at::Tensor& t) noexcept {
     // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
@@ -310,7 +341,7 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
   }
 
   // Outputs ("Next Edges")
-
+  // update_topological_nr 会依据输出边来设置 topological_nr
   void update_topological_nr(const Edge& edge) {
     TORCH_INTERNAL_ASSERT(
         !has_parent_,
@@ -325,6 +356,27 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
       }
     }
   }
+  /*结合我们的例子，此时应该如下图，下图中 0 的意义举例如下：(PowBackward0(other), 0) 中的 0 表示SubBackward0 的计算输出是 PowBackward0 的第一个输入（原始幂运算只有一个输出）。
+
++------------------------+      +----------------------+
+| SubBackward0           |      |                      |
+|                        |      | Compute the gradient |
+|    apply  +-----------------> |                      |
+|                        |      +----------------------+
+|                        |
+|                        |      +-----------------------------------------------------+
+|    next_edges_  +-----------> | edge_list                                           |
+|                        |      |                                                     |
+|    other_scalar_type   |      | [(MulBackward0(self), 0), (PowBackward0(other), 0)] |
+|                        |      |                                                     |
+|    alpha               |      +-----------------------------------------------------+
+|                        |
+|    self_scalar_type    |
+|                        |
+|    input_metadata_     |
+|                        |
++------------------------+
+*/
 
   void set_next_edge(size_t index, Edge edge) {
     update_topological_nr(edge);
@@ -336,8 +388,9 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
     next_edges_.emplace_back(std::move(edge));
   }
 
+ //获取到了所有输出边之后，接下来就要设置到 SubBackward0 的 next_edges_ 之上，一定要注意，next_edges_成员的值来自前向传播时候的输入参数。
   void set_next_edges(edge_list&& next_edges) {
-    next_edges_ = std::move(next_edges);
+    next_edges_ = std::move(next_edges); // 这里设置了边
     for (const auto& next_edge : next_edges_) {
       update_topological_nr(next_edge);
     }
@@ -718,7 +771,7 @@ topological_nr_ 具有以下属性：
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   std::vector<std::unique_ptr<FunctionPostHook>> post_hooks_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  at::SmallVector<InputMetadata, 2> input_metadata_;
+  at::SmallVector<InputMetadata, 2> input_metadata_; //配置历史中，首先是配置input_metadata。将 input_metadata 之中添加了输出实例 result，输出实例 result 在反向传播时候就是输入。
 };
 
 /// See Node::is_traceable() for definition.
@@ -741,7 +794,7 @@ struct MakeNextFunctionList : IterArgs<MakeNextFunctionList> {
   void operator()(const Variable& variable) {
     // NOLINTNEXTLINE(bugprone-branch-clone)
     if (variable.defined()) {
-      next_edges.emplace_back(impl::gradient_edge(variable));
+      next_edges.emplace_back(impl::gradient_edge(variable));  // 调用gradient_edge
     } else {
       next_edges.emplace_back();
     }
@@ -749,7 +802,7 @@ struct MakeNextFunctionList : IterArgs<MakeNextFunctionList> {
   void operator()(const Variable* variable) {
     // NOLINTNEXTLINE(bugprone-branch-clone)
     if (variable->defined()) {
-      next_edges.emplace_back(impl::gradient_edge(*variable));
+      next_edges.emplace_back(impl::gradient_edge(*variable)); // 调用gradient_edge
     } else {
       next_edges.emplace_back();
     }
@@ -764,6 +817,36 @@ struct MakeNextFunctionList : IterArgs<MakeNextFunctionList> {
   }
 };
 } // namespace detail
+/*
+此时得到了 edge_list，但是没有和 SubBackward0 建立联系。
+
++------------------------+      +----------------------+
+| SubBackward0           |      |                      |
+|                        |      | Compute the gradient |
+|    apply  +-----------------> |                      |
+|                        |      +----------------------+
+|                        |
+|                        |
+|    next_edges_         |
+|                        |
+|    other_scalar_type   |
+|                        |
+|    alpha               |
+|                        |
+|    self_scalar_type    |
+|                        |
+|    input_metadata_     |
+|                        |
++------------------------+
+
+
++-----------------------------------------------------+
+| edge_list                                           |
+|                                                     |
+| [(MulBackward0(self), 0), (PowBackward0(other), 0)] |
+|                                                     |
++-----------------------------------------------------+
+*/
 
 /// Create an `Edge` between the given `variable` and the `function`, which is
 /// assumed to be the gradient function of this variable (i.e. the function
@@ -776,6 +859,17 @@ struct MakeNextFunctionList : IterArgs<MakeNextFunctionList> {
 /// function->add_input_metadata(variable.dispatch_type(), variable.sizes()))`.
 /// If you don't want the `Node`'s `num_inputs` to be incremented, use
 /// `set_gradient_edge` directly.
+/*
+4.3.1 create_gradient_edge
+create_gradient_edge代码位于 torch/csrc/autograd/function.h。其作用是：
+    在给定的"变量"和"函数"之间创建一个"边"，该函数是该变量的梯度函数（即，在后向传播过程中计算该变量梯度的函数）。
+    此函数将设置"variable"的"grad_fn"属性。
+create_gradient_edge 方法假定'Variable'是梯度函数的新输入，因此其'input_nr'等于function->num_inputs()。
+此外，它还将"节点"的输入数增加一。
+
+如果不希望增加"节点"的"num_inputs"，请直接使用"set_gradient_edge"。
+从功能上来说，create_gradient_edge 大约相当于 variable.set_gradient_edge(function, function->add_input_metadata(variable.dispatch_type(), variable.sizes()))。
+*/
 inline void create_gradient_edge(
     Variable& variable,
     std::shared_ptr<Node> function) {
@@ -792,10 +886,12 @@ inline bool any_variable_requires_grad(const variable_list& variables) {
       });
 }
 
+//collect_next_edges 这里建立了边。收集了所有输入的边。
 /// Return the next edges of all the given variables, or tuples of variables.
 template <typename... Variables>
 edge_list collect_next_edges(Variables&&... variables) {
-  detail::MakeNextFunctionList make;
+  detail::MakeNextFunctionList make;  // 这里将调用gradient_edge
+  // next_edges_成员的值来自前向时候的输入参数
   make.apply(std::forward<Variables>(variables)...);
   return std::move(make.next_edges);
 }

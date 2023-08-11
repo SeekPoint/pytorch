@@ -131,6 +131,7 @@ static PyObject* THPModule_initNames(PyObject* self, PyObject* arg) {
 //
 // Callback for python part. Used for additional initialization of python
 // classes
+//THPModule_initExtension 函数会调用THPAutograd_initFunctions，该方法初始化了自动微分系统。
 static PyObject* THPModule_initExtension(
     PyObject* _unused,
     PyObject* shm_manager_path) {
@@ -153,7 +154,7 @@ static PyObject* THPModule_initExtension(
     throw python_error();
 
   THPStorage_postInit(module);
-  THPAutograd_initFunctions();
+  THPAutograd_initFunctions(); // 这里调用,初始化了微分系统
   Py_RETURN_NONE;
   END_HANDLE_TH_ERRORS
 }
@@ -990,6 +991,7 @@ static PyObject* THPModule_are_vmap_fallback_warnings_enabled(
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,
 // cppcoreguidelines-avoid-non-const-global-variables, modernize-avoid-c-arrays)
+// _initExtension 会调用到 _C._initExtension(manager_path())。_C._initExtension对应的是 THPModule_initExtension。
 static PyMethodDef TorchMethods[] = {
     {"_initExtension", THPModule_initExtension, METH_O, nullptr},
     {"_autograd_init", THPAutograd_initExtension, METH_NOARGS, nullptr},

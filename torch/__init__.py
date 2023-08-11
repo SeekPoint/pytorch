@@ -218,6 +218,35 @@ if (USE_RTLD_GLOBAL_WITH_LIBTORCH or os.getenv('TORCH_USE_RTLD_GLOBAL')) and \
     sys.setdlopenflags(os.RTLD_GLOBAL | os.RTLD_LAZY)
 
     '''
+    
+    3.3.1 Python 导入
+    代码中引入 PyTorch 是通过 import torch 完成的。Import torch 的时候，按照Python规范，位于torch/__init__.py中的逻辑就会被执行，torch/__init__.py 的关键就是torch._C，代码如下：
+    
+    from torch._C import *
+    torch._C是C++编译出来的共享库文件，比如linux下的so文件。
+    
+    Tensor类就是继承自torch._C._TensorBase。导入了 torch._C就导入了torch._C._TensorBase，然后 torch.Tensor 就有了继承的基础。具体如下：
+    
+    +---------------------------+
+    |      import torch         |
+    +------------+--------------+
+                 |
+                 |
+                 v
+    +------------+--------------+
+    | torch/__init__.py         |
+    |                           |
+    |    from torch._C impor *  |
+    |                           |
+    +------------+--------------+
+                 |
+                 |
+                 v
+    +------------+--------------+
+    |  torch._C._TensorBase     |
+    +---------------------------+
+
+
     还进行了基本的环境变量、cuda文件、DLL文件、python库文件的配置和导入（其中c文件使用ctypes），
     而C++函数的导入也在该文件中，即：
     '''
@@ -442,6 +471,7 @@ def sym_min(a, b):
         return b.__sym_min__(a)
     return builtins.min(a, b)  # type: ignore[operator]
 
+#在initModule()函数初始化完毕之后，import torch 的初始化工作还没有结束。python的初始化脚本还要继续处理很多模块，比如torch/__init__.py 文件中有：
 # Check to see if we can load C extensions, and if not provide some guidance
 # on what the problem might be.
 try:

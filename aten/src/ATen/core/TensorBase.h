@@ -834,7 +834,7 @@ public:
 
 protected:
   void enforce_invariants();
-  c10::intrusive_ptr<TensorImpl, UndefinedTensorImpl> impl_;
+  c10::intrusive_ptr<TensorImpl, UndefinedTensorImpl> impl_;  // 转嫁出去
 
 private:
   TensorBase __dispatch_contiguous(c10::MemoryFormat) const;

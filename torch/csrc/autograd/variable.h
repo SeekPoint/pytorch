@@ -210,20 +210,62 @@ TORCH_API void create_cpp_hook(
 /// default constructed AutogradMeta.
 /*
 AutogradMeta 的主要成员变量如下：
+    grad_ ：存储当前Variable实例的梯度，本身也是一个Variable。
+    grad_fn ：是个Node实例，非叶子节点才有。通过 grad_fn() 方法来访问，实际上，PyTorch中就是通过 grad_fn是否为空 来判断一个Variable是否是leaf variable。
+    grad_accumulator_ ：也是Node的实例，只有叶子节点才有。
+        通过Variable的grad_accumulator()来访问。
+        叶子节点负责对梯度进行累加，grad_accumulator_ 就是梯度累加处理函数。
+        其对应梯度就被保存在 grad_ 变量之中。
+        我们总结一下，对于非叶子节点，grad_fn是计算梯度操作。对于叶子节点，PyTorch 虚拟出了一个特殊计算操作，输出这个叶子节点，同时此虚拟计算操作也作为叶子节点的grad_accumulator_来累加其梯度，因此叶子节点的 output_nr_ 必定为 0。
+    requires_grad_ ：表明此Variable实例是否需要grad。
+    retains_grad_ ： 只有非叶子节点才有意义，意义为是否需要保持图。
+    is_view_ ：是个flag，表明此Variable实例是否是个view（没有实际存储，基于base的variable）。
+    version_counter_ ：version number。
+    output_nr_：是个数字。output_nr_表明是 Node 的第几个输出，比如为 0 就 表明这个Variable是Node 的第 1 个输出。
+    base_ ：是view的base variable。
 
-grad_ ：存储当前Variable实例的梯度，本身也是一个Variable。
-grad_fn ：是个Node实例，非叶子节点才有。通过 grad_fn() 方法来访问，实际上，PyTorch中就是通过 grad_fn是否为空 来判断一个Variable是否是leaf variable。
-grad_accumulator_ ：也是Node的实例，只有叶子节点才有。
-通过Variable的grad_accumulator()来访问。
-叶子节点负责对梯度进行累加，grad_accumulator_ 就是梯度累加处理函数。
-其对应梯度就被保存在 grad_ 变量之中。
-我们总结一下，对于非叶子节点，grad_fn是计算梯度操作。对于叶子节点，PyTorch 虚拟出了一个特殊计算操作，输出这个叶子节点，同时此虚拟计算操作也作为叶子节点的grad_accumulator_来累加其梯度，因此叶子节点的 output_nr_ 必定为 0。
-requires_grad_ ：表明此Variable实例是否需要grad。
-retains_grad_ ： 只有非叶子节点才有意义，意义为是否需要保持图。
-is_view_ ：是个flag，表明此Variable实例是否是个view（没有实际存储，基于base的variable）。
-version_counter_ ：version number。
-output_nr_：是个数字。output_nr_表明是 Node 的第几个输出，比如为 0 就 表明这个Variable是Node 的第 1 个输出。
-base_ ：是view的base variable。
+
+具体如下，这里把 grad_fn 配置为 SubBackward0 作为例子：
+
++----------------------------------------------+          +-------------------------+
+|Tensor                                        |          |TensorImpl               |
+|                                              |          |                         |
+|                                              |  bridge  |                         |
+|   <TensorImpl, UndefinedTensorImpl> impl_ +-----------> |    autograd_meta_ +---------+
+|                                              |          |                         |   |
+|                                              |          |    named_tensor_meta_   |   |
++----------------------------------------------+          |                         |   |
+                                                          |    pyobj_               |   |
+                                                          |                         |   |
+                                                          |    sizes_and_strides_   |   |
+                                                          |                         |   |
+                                                          |    storage_offset_      |   |
+                                                          |                         |   |
+                                                          |    data_type_           |   |
+                                                          |                         |   |
+                                                          |    device_opt_          |   |
+                                                          |                         |   |
+                                                          |                         |   |
+                                                          +-------------------------+   |
+                                                                                        |
+                   +-------------------------+                                          |
+                   | AutogradMeta            |                                          |
+                   |                         +<-----------------------------------------+
+                   |                         |
+                   |      grad_accumulator_  |
+                   |                         |            +-------------------------+
+                   |      grad_fn_ +--------------------> | SubBackward0            |
+                   |                         |            |                         |
+                   |      hooks_             |            |                         |
+                   |                         |            |                         |
+                   |      retains_grad_      |            |           next_edges_   |
+                   |                         |            |                         |
+                   |      output_nr_         |            |                         |
+                   |                         |            |                         |
+                   |      fw_grad_           |            |                         |
+                   |                         |            |                         |
+                   +-------------------------+            +-------------------------+
+
 
 */
 struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
@@ -313,9 +355,8 @@ struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
       bool is_inplace_op) override;
 /*
 AutogradMeta 构造函数之中，gradient_edge 参数需要特别注意，其类型为 Edge。
-
-gradient_edge.function 就被赋值给AutogradMeta 的 grad_fn。
-gradient_edge.input_nr 被赋值给 AutoGradMeta 的 output_nr。
+    gradient_edge.function 就被赋值给AutogradMeta 的 grad_fn。
+    gradient_edge.input_nr 被赋值给 AutoGradMeta 的 output_nr。
 */
   AutogradMeta(
       at::TensorImpl* self_impl = nullptr,

@@ -423,6 +423,22 @@ class Function(_SingleLevelFunction):
 
     Examples::
 
+    3.4 Auto Function
+        Autograd使用Function来计算结果和梯度，并对操作历史进行编码。在Tensor 上执行的每个操作都会创建一个新的 Function 对象，该对象执行计算并记录发生了什么。操作历史以函数 DAG 的形式保留，边表示数据依赖关系 ( input <- output )。
+        通常，用户与 Function 交互的唯一方式是创建子类和定义新操作（扩展新的功能），这是扩展 torch.autograd 的推荐方式。有关如何使用此类的更多详细信息，请参阅有关扩展 autograd 引擎的说明： https://pytorch.org/docs/stable/notes/extending.html#extending-torch-autograd
+        用户如果要使用自定义autograd操作，请使用静态正向和反向函数实现一个Function子类。
+
+        forward可以接受任意多个参数，并应返回变量列表或变量。
+            任何Variable参数的使用都将在计算图中注册，但是vectors/sets 或者其他数据结构不会遍历注册。
+            您可以使用c10::optional作为参数之一，如果参数有值，它将在图形中注册为变量。
+            forward应该将指向“torch::autograd::AutogradContext”的指针作为第一个参数。变量可以使用“ctx->save_for_backward”，保存在“ctx->saved_data” map中，其他数据将以<std::string, at::IValue>”对的形式保存在“ctx->saved_data” map中。
+        backward应该使用指向torch::autograd::AutogradContext的指针 以及一个变量列表作为参数。
+            该变量列表包含的变量数量与forward输出的变量数量相同。
+            backward应该返回与输入一样多的变量，其中每个变量都包含与输入相应的梯度。
+            “forward”中保存的变量可以通过“ctx->get_saved_Variables”访问，其他保存的数据可以通过“ctx->saved_data”访问。
+            当 backward被调用时，通过调用每个Function对象的方法，并将返回的梯度传递给下一个Function ，我们就可以按照拓扑顺序来处理这个计算图 。
+Function 具体派生子类例子如下
+
         >>> # xdoctest: +REQUIRES(env:TORCH_DOCTEST_AUTOGRAD)
         >>> class Exp(Function):
         >>>     @staticmethod
@@ -439,6 +455,8 @@ class Function(_SingleLevelFunction):
         >>> # Use it by calling the apply method:
         >>> # xdoctest: +SKIP
         >>> output = Exp.apply(input)
+
+    如前所示，Function 已经被 Node 替换，所以我们再来到了 Node。
     """
     def __init__(self, *args, **kwargs):
         cls = self.__class__

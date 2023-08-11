@@ -62,6 +62,7 @@ PyObject* CppFunction_pynew(
     (char*)"metadata", (getter)THPCppFunction_metadata, nullptr, nullptr, \
         nullptr                                                           \
   }
+//所以，accumulate_grad_properties 就是拓展了 THP_FUNCTION_DEFAULT_PROPERTIES 和 accumulateGradVar。
 
 PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook);
 PyObject* THPCppFunction_metadata(THPCppFunction* self, void* _unused);
@@ -82,6 +83,7 @@ PyObject* registerFunctionHook(Node& fn, PyObject* hook);
 
 PyObject* registerFunctionPreHook(Node& fn, PyObject* hook);
 
+//createForwardFunctionPyTypeObject 是用来设置accumulate_grad_properties，具体函数如下：
 template <typename Ctor>
 PyTypeObject* createForwardFunctionPyTypeObject(
     PyTypeObject& type,

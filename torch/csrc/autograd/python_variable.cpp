@@ -1373,11 +1373,108 @@ int THPVariable_set_imag(PyObject* self, PyObject* imag, void* unused) {
 // properties are registered here because we are currently only able to bind
 // them manually. TODO: make declarable in native_functions
 // NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
-//我们回忆一下前面提到的 _TenseBase 来对比：
-//tp_getset 是Python虚拟机类机制里面的一个函数集，就是一个 THPVariable_properties。
-//AccumulateGradClass 设置的是 accumulate_grad_properties。
-//_TenseBase 设置的是 THPVariable_properties。
-//以下是 _TenseBase 的函数集（我们省略了很多）。
+
+/*
+我们回忆一下前面提到的 _TenseBase 来对比：
+tp_getset 是Python虚拟机类机制里面的一个函数集，就是一个 THPVariable_properties。
+    AccumulateGradClass 设置的是 accumulate_grad_properties。
+    _TenseBase 设置的是 THPVariable_properties。
+以下是 _TenseBase 的函数集（我们省略了很多）。
+
+
+这个初始化逻辑和映射逻辑如下：
+
+                       Python     +     C++                    +---------------+
+                                  |                            |               |
++---------------------------+     |                            |   PyInit__C   |
+|      import torch         |     |                            |               |
++------------+--------------+     |                            +-------+-------+
+             |                    |                                    |
+             |                    |                                    |
+             v                    |                                    |
++------------+--------------+     |                                    v
+| torch/__init__.py         |     |                            +-------+-------+
+|                           |     |                            |  initModule   |
+|    from torch._C impor *  |     |                            +-------+-------+
+|                           |     |                                    |
++------------+--------------+     |                                    |
+             |                    |                                    |
+             |                    |                                    v
+             |                    |                     +--------------+----------------+
+             |                    |                     |                               |
+             |                    |                     | THPVariable_initModule(module)|
+             |                    |                     |                               |
+             |                    |                     +--------------+----------------+
+             |                    |                                    |
+             |                    |                                    |
+             |                    |                                    |
+             |                    |                                    v
+             |                    |    +-------------------------------+---------------------------------------+
+             |                    |    |                                                                       |
+             |                    |    | PyModule_AddObject(module, "_TensorBase",(PyObject *)&THPVariableType)|
+             |                    |    |                                                                       |
+             |                    |    +-------------------------------+---------------------------------------+
+             |                    |                                    |
+             |                    |                                    |
+             |                    |                                    |
+             |                    |                                    v
+             |                    |                        +-----------+--------------+    +------------------------------------------------------+
+             |                    |                        | THPVariableType          |    | THPVariable_properties+                              |
+             v                    |                        |                          |    |                                                      |
++------------+--------------+     |                        |                          |    |                                                      |
+|  torch._C._TensorBase     | <----------------------->    |              tp_getset -----> |  { grad, grad_fn, T, _cdata, is_leaf, output_nr ...} |
++---------------------------+     |                        |                          |    |                                                      |
+                                  |                        +--------------------------+    +------------------------------------------------------+
+                                  +
+
+
+至此，业务逻辑如下：
+
+                                Python    +   C++
+                                          |
++--------------------------------------+  |   +---------------------------+
+| torch/__init__.py                    |  |   |                           |
+|                                      |  |   |  THPModule_initExtension  |
+|  from torch._C import _initExtension |  |   |                           |
+|                                      |  |   +--------------+------------+
++-------------------+------------------+  |                  |
+                    |                     |                  |
+                    |                     |                  v
+                    |                     |  +---------------+--------------+
+                    |                     |  |                              |
+                    |                     |  |  THPAutograd_initFunctions() |
+                    |                     |  |                              |
+                    |                     |  +---------------+--------------+
+                    |                     |                  |
+                    |                     |                  |
+                    |                     |                  v
+                    |                     |  +---------------+-------------------------------------------+
+                    |                     |  |                                                           |
+                    |                     |  | addClass<AccumulateGrad, NoCtor>(module,                  |
+                    |  import             |  | 	                             AccumulateGradClass,        |
+                    |                     |  | 	                             "AccumulateGrad",           |
+                    |                     |  | 	                             accumulate_grad_properties) |
+                    |                     |  |                                                           |
+                    |                     |  +--------------+--------------------------------------------+
+                    |                     |                 |
+                    |                     |                 |  register
+                    v                     |                 v
+                                          |                                                               +----------------------------------------------------------+
+        +----------------------+          |     +--------------------+       +---------------------+      |accumulate_grad_properties                                |
+        |                      |          |     |                    |       | AccumulateGradClass |      |                                                          |
+        |   AccumulateGrad     | <------------> |   AccumulateGrad   +-----> |                     |      |  "variable", accumulateGradVar                           |
+        |                      |          |     |                    |       |       tp_getset +------->  |                                                          |
+        |                      |          |     |                    |       |                     |      |  "next_functions", (getter)THPCppFunction_next_functions |
+        +----------------------+          |     +--------------------+       |                     |      |                                                          |
+                                          |                                  +---------------------+      |  "requires_grad", (getter)THPCppFunction_requires_grad   |
+                                          |                                                               |                                                          |
+                                          |                                                               |  "metadata", (getter)THPCppFunction_metadata             |
+                                          |                                                               |                                                          |
+                                          |                                                               +----------------------------------------------------------+
+
+手机如下：
+*/
+
 static struct PyGetSetDef THPVariable_properties[] = {
     {"_python_dispatch",
      (getter)THPVariable_get_python_dispatch,
@@ -2082,6 +2179,7 @@ bool THPVariable_initModule(PyObject* module) {
   if (PyType_Ready(&THPVariableType) < 0)
     return false;
   Py_INCREF(&THPVariableType);
+
   //执行THPVariable_initModule的时候，使用如下代码来将 THPVariableType 注册成为torch._C._TensorBase。所以torch._C._TensorBase就是c++中的 THPVariableType。
   PyModule_AddObject(module, "_TensorBase", (PyObject*)&THPVariableType);
   torch::autograd::initTorchFunctions(module);

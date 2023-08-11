@@ -66,7 +66,7 @@ Function 内部有 forward() 和 backward() 两个方法，分别应用于正向
 /// `ctx->get_saved_variables` (see
 /// `torch::autograd::AutogradContext::get_saved_variables`) and other saved
 /// data can be accessed from `ctx->saved_data`.
-///
+///对用户来说，AutogradContext 主要是在 自定义 Auto Function 方面。以下是注释之中的例子。
 /// For example:
 /// ```
 /// class MyFunction : public Function<MyFunction> {
@@ -95,6 +95,7 @@ Function 内部有 forward() 和 backward() 两个方法，分别应用于正向
 /// auto y = MyFunction::apply(6, x);
 /// // Example backward call
 /// y[0].sum().backward();
+//我们籍此进入到 Auto Function。
 /// ```
 template <class T>
 struct TORCH_API Function {
