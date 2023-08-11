@@ -81,9 +81,13 @@ namespace autograd {
 
 
 */
+//accumulateGrad 实际就是：
+//先累积梯度。
+//再调用传入的 update_grad 函数来更新梯度。
 
-//首先看看 AccumulateGrad 的定义，这里省略了 AccumulateGrad 部分成员函数。从构建函数可看出来，一个AccumulateGrad实例必须用一个Variable构建，内部成员变量就是Variable variable。
-//apply调用接收一个Variable list 实例，这和Variable grad_accumulator_相关。
+// 首先看看 AccumulateGrad 的定义，这里省略了 AccumulateGrad 部分成员函数。
+// 从构建函数可看出来，一个AccumulateGrad实例必须用一个Variable构建，内部成员变量就是Variable variable。
+// apply调用接收一个Variable list 实例，这和Variable grad_accumulator_相关。
 struct TORCH_API AccumulateGrad : public Node {
   //从构建函数可看出来，一个AccumulateGrad实例必须用一个Variable构建，内部成员变量就是Variable variable。
   //apply调用接收一个Variable list 实例，这和Variable grad_accumulator_相关。
@@ -157,7 +161,7 @@ struct TORCH_API AccumulateGrad : public Node {
       at::Tensor& variable_grad,
       const at::Tensor& new_grad,
       size_t num_expected_refs,
-      const T& update_grad) {
+      const T& update_grad) {  // 传入的更新梯度函数
     if (!variable_grad.defined()) {
       if (!GradMode::is_enabled() && !new_grad.is_sparse() &&
           !new_grad.is_sparse_csr() &&
@@ -247,7 +251,7 @@ struct TORCH_API AccumulateGrad : public Node {
         // work correctly if it is mutated out of place here, but DDP will
         // maintain one extra copy of grad tensors in buffer and thus
         // increase peak memory usage.
-        variable_grad += new_grad;
+        variable_grad += new_grad;   // 进行累积
         CHECK_RESULT(variable_grad, variable);
         // ^ We could enforce the contract more aggressively here by writing:
         // if (variable_grad.is_sparse() || new_grad.is_sparse()) {
@@ -268,12 +272,12 @@ struct TORCH_API AccumulateGrad : public Node {
       if (variable_grad.is_sparse() && !new_grad.is_sparse()) {
         // CPU backend throws an error on sparse + dense, so prefer dense +
         // sparse here.
-        result = new_grad + variable_grad;
+        result = new_grad + variable_grad; // 进行累积
       } else {
         // Assumes operator+ result typically matches strides of first arg,
         // and hopes variable_grad was originally created obeying layout
         // contract.
-        result = variable_grad + new_grad;
+        result = variable_grad + new_grad;  // 进行累积
       }
       CHECK_RESULT(result, variable);
       update_grad(std::move(result));

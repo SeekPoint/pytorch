@@ -21,6 +21,68 @@ AccumulateGrad::AccumulateGrad(Variable variable_)
   add_input_metadata(variable);
 }
 
+/*
+当调用 apply 时候， 有两个注意点：
+传入的更新函数就是 { grad = std::move(grad_update); } 更新梯度。
+mutable_grad 得到的是张量的梯度成员变量。
+
+AccumulateGrad                                 Tensor           AutogradMeta
+     +                                           +                   +
+     |                                           |                   |
+     |                                           |                   |
+     |                                           |                   |
+     v                                           |                   |
+   apply(update_grad)                            |                   |
+     +                                           |                   |
+     |                                           |                   |
+     |                                           |                   |
+     |                                           |                   |
+     v                                           |                   |
+accumulateGrad                                   |                   |
+     +                                           |                   |
+     |                                           |                   |
+     | result = variable_grad + new_grad         |                   |
+     |                                           |                   |
+     v                result                     v                   v
+ update_grad +---------------------------->  mutable_grad +--->    grad_
+
+或者如下，对于一个叶子张量，反向计算时候会调用AccumulateGrad进行累积梯度，然后更新到叶子张量的 grad_ 之中：
+
++----------------------------------------------+          +-------------------------+
+|Tensor                                        |          |TensorImpl               |
+|                                              |          |                         |
+|                                              |  bridge  |                         |
+|   <TensorImpl, UndefinedTensorImpl> impl_ +-----------> |    autograd_meta_ +---------+
+|                                              |          |                         |   |
+|                                              |          |                         |   |
++----------------------------------------------+          +-------------------------+   |
+                                                                                        |
+                                                                                        |
+                                                                                        |
++-------------------------+                                                             |
+| AutogradMeta            | <-----------------------------------------------------------+
+|                         |
+|                         |
+|                         |            +------------------------------------------------+
+|                         |            | AccumulateGrad                                 |
+|      grad_fn_ +--------------------> |                                                |
+|                         |            |                                                |
+|                         |            |      apply(grads) {                            |
+|                         |            |                                                |
+|      grad_accumulator_  |            |         accumulateGrad(new_grad) {             |
+|                         |            |                                                |
+|                         |            |           result = variable_grad + new_grad    |
+|                         |   update   |                                                |
+|      grad_    <--------------------------------+ update_grad(result)                  |
+|                         |            |                                                |
+|                         |            |         }                                      |
+|                         |            |      }                                         |
+|                         |            |                                                |
+|                         |            |                                                |
++-------------------------+            +------------------------------------------------+
+
+现在我们知道了，梯度就是累积在叶子节点的 grad_ 之上
+*/
 auto AccumulateGrad::apply(variable_list&& grads) -> variable_list {
   check_input_variables("AccumulateGrad", grads, 1, 0);
 
@@ -42,7 +104,7 @@ auto AccumulateGrad::apply(variable_list&& grads) -> variable_list {
   // see Note [Thread Safety on Autograd Node]
   std::lock_guard<std::mutex> lock(mutex_);
 
-  at::Tensor& grad = variable.mutable_grad();
+  at::Tensor& grad = variable.mutable_grad(); // 得到变量的mutable_grad
 
   // If the function has post hooks (for example, a DDP allreduce hook),
   // call_function in Engine.cpp will temporarily bump the expected refcount

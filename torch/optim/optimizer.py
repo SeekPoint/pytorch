@@ -166,30 +166,45 @@ class Optimizer:
             options (used when a parameter group doesn't specify them).
     """
 
+    '''
+    Optimizer 是所有优化器的基类，它有如下主要公共方法:
+        add_param_group : 添加可学习参数组。
+        step : 进行一次参数更新操作。
+        zero_grad : 在反向传播计算梯度之前对上一次迭代时的梯度清零。
+        state_dict : 返回用 dict 结构表示的参数和状态。
+        load_state_dict : 加载 dict 结构表示的参数和状态。
+    2.1 初始化
+    在 Optimizer 初始化函数之中，会做如下操作：
+        初始化参数包括：可学习参数（params）和超参数（defaults）。
+        在 self.defaults 之中保存 lr, momentun 等全局参数（超参数）。
+        在 self.state 保存优化器当前状态。
+        在 self.param_groups 之中保存所有待优化的变量。
+    '''
     def __init__(self, params, defaults):
         torch._C._log_api_usage_once("python.optimizer")
-        self.defaults = defaults
+        self.defaults = defaults  # 保存 lr, momentun 等全局参数
         self._optimizer_step_pre_hooks: Dict[int, Callable] = OrderedDict()
         self._optimizer_step_post_hooks: Dict[int, Callable] = OrderedDict()
 
         self._patch_step_function()
 
-        if isinstance(params, torch.Tensor):
+        if isinstance(params, torch.Tensor): # params必须是字典或者tensors
             raise TypeError("params argument given to the optimizer should be "
                             "an iterable of Tensors or dicts, but got " +
                             torch.typename(params))
 
-        self.state = defaultdict(dict)
-        self.param_groups = []
+        self.state = defaultdict(dict)  # 保存优化器当前状态
+        self.param_groups = [] # 所有待优化的参数，其每一项是一个字典，对应一组待优化参数和其他相关参数
 
-        param_groups = list(params)
+        param_groups = list(params) # 需要被优化的变量，是__init__ 传入的参数
         if len(param_groups) == 0:
             raise ValueError("optimizer got an empty parameter list")
         if not isinstance(param_groups[0], dict):
-            param_groups = [{'params': param_groups}]
+            # 将参数转换为字典
+            param_groups = [{'params': param_groups}] # param_groups 是一个列表，其中一项是字典形式，优化变量被保存在其中。
 
         for param_group in param_groups:
-            self.add_param_group(param_group)
+            self.add_param_group(param_group) # 把param_groups所有项都加到self.param_groups之中
 
         # Allows _cuda_graph_capture_health_check to rig a poor man's TORCH_WARN_ONCE in python,
         # which I don't think exists
@@ -337,6 +352,18 @@ class Optimizer:
         self._optimizer_step_post_hooks[handle.id] = hook
         return handle
 
+    '''
+    PyTorch 的 state_dict 是 Python 的字典对象。
+
+    对于模型，state_dict 会把每一层和其训练过程中需要学习的参数（比如权重和偏置）建立起来映射关系，只有参数可以训练的layer才会保存在模型的 state_dict 之中，如卷积层，线性层等。
+    
+    对于优化器，state_dict 是其状态信息，其包括了两组信息：
+    
+        state ：一个包括了优化器当前状态（也就是更新变量的过程之中计算得到的最新缓存变量）的字典。
+            字典的 key 是缓存的index。
+            字典的 value 也是一个字典，key 是缓存变量名，value 是相应的张量。
+        param_groups : 一个包括了所有 param groups 的字典。
+    '''
     def state_dict(self):
         r"""Returns the state of the optimizer as a :class:`dict`.
 
@@ -353,19 +380,25 @@ class Optimizer:
 
         def pack_group(group):
             nonlocal start_index
+            # 'params'采用不同规则
             packed = {k: v for k, v in group.items() if k != 'params'}
             param_mappings.update({id(p): i for i, p in enumerate(group['params'], start_index)
                                    if id(p) not in param_mappings})
+            # 保存了参数的id，而并非参数的值
             packed['params'] = [param_mappings[id(p)] for p in group['params']]
             start_index += len(packed['params'])
             return packed
+
+        # 对self.param_groups进行遍历，进行pack
         param_groups = [pack_group(g) for g in self.param_groups]
+
+        # 将state中的所有Tensor替换为相应的 use order indices
         # Remap state to use order indices as keys
         packed_state = {(param_mappings[id(k)] if isinstance(k, torch.Tensor) else k): v
                         for k, v in self.state.items()}
         return {
-            'state': packed_state,
-            'param_groups': param_groups,
+            'state': packed_state,  # 状态
+            'param_groups': param_groups,  # 待优化的参数
         }
 
     def load_state_dict(self, state_dict):
@@ -485,7 +518,10 @@ class Optimizer:
             ``.grad`` field of the parameters.
         """
         raise NotImplementedError
-
+    '''
+    add_param_group 添加不同分组的可学习参数。代码如下（省略了大部分检验代码）。
+    其中，param_groups目的是为了可以用 key-value 方式来访问待优化变量，这在fine tuning时候特别有用。
+    '''
     def add_param_group(self, param_group):
         r"""Add a param group to the :class:`Optimizer` s `param_groups`.
 
@@ -498,14 +534,16 @@ class Optimizer:
         """
         assert isinstance(param_group, dict), "param group must be a dict"
 
-        params = param_group['params']
+        params = param_group['params'] # 得到待优化的变量
         if isinstance(params, torch.Tensor):
-            param_group['params'] = [params]
+            param_group['params'] = [params] # 构建一个列表，其中就是待优化的变量
         elif isinstance(params, set):
             raise TypeError('optimizer parameters need to be organized in ordered collections, but '
                             'the ordering of tensors in sets will change between runs. Please use a list instead.')
         else:
             param_group['params'] = list(params)
+
+        # 省略校验，比如必须是tensor类型，而且是叶子节点
 
         for param in param_group['params']:
             if not isinstance(param, torch.Tensor):
@@ -514,13 +552,14 @@ class Optimizer:
             if not self.defaults.get('differentiable', None) and not (param.is_leaf or param.retains_grad):
                 raise ValueError("can't optimize a non-leaf Tensor")
 
-        for name, default in self.defaults.items():
+        for name, default in self.defaults.items():  # 缺省参数也加入到 param_group 之中
             if default is required and name not in param_group:
                 raise ValueError("parameter group didn't specify a value of required optimization parameter " +
                                  name)
             else:
-                param_group.setdefault(name, default)
+                param_group.setdefault(name, default)  # 所有组都设置同样的缺省参数（超参数）
 
+        # 用set来去重
         params = param_group['params']
         if len(params) != len(set(params)):
             warnings.warn("optimizer contains a parameter group with duplicate parameters; "
@@ -534,4 +573,5 @@ class Optimizer:
         if not param_set.isdisjoint(set(param_group['params'])):
             raise ValueError("some parameters appear in more than one parameter group")
 
-        self.param_groups.append(param_group)
+        # 更新自身的参数组中
+        self.param_groups.append(param_group) # 加入到param_groups

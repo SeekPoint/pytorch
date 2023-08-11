@@ -6,7 +6,23 @@ from typing import List, Optional
 from torch.utils._foreach_utils import _group_tensors_by_device_and_dtype
 
 __all__ = ['SGD', 'sgd']
+\'''
+我们用 SGD 来进一步看看优化器。SGD（stochastic gradient descent）是随机梯度下降，即梯度下降的batch版本。
+对于训练数据集，将其分成n个batch，每个batch包含m个样本。每次更新都利用一个batch的数据，而非整个训练集。
 
+PyTorch SGD with Momentum/Nesterov 的实现与Sutskever et. al.和其他框架的实现不同。
+
+比如 PyTorch 使用如下方法来实现 Momentum 的特殊例子：
+
+vt+1 =μ∗vt + gt+1
+pt+1=pt−lr∗vt+1,
+其他框架则使用：
+
+vt+1 = μ∗vt+lr∗gt+1
+pt+1=pt−vt+1.
+
+
+'''
 class SGD(Optimizer):
     def __init__(self, params, lr=required, momentum=0, dampening=0,
                  weight_decay=0, nesterov=False, *, maximize: bool = False, foreach: Optional[bool] = None,
@@ -183,7 +199,6 @@ SGD.__doc__ = r"""\
 
     """
 
-
 def sgd(params: List[Tensor],
         d_p_list: List[Tensor],
         momentum_buffer_list: List[Optional[Tensor]],
@@ -244,25 +259,48 @@ def _single_tensor_sgd(params: List[Tensor],
 
     for i, param in enumerate(params):
         d_p = d_p_list[i] if not maximize else -d_p_list[i]
-
+        # 正则化及动量累积
         if weight_decay != 0:
+            # gt = gt + (p ∗ weight_decay)
             d_p = d_p.add(param, alpha=weight_decay)
+
+        '''
+        Momentum ：来源于物理学，翻译为动量或则冲量。作用是把上次更新于当前梯度结合来进行当前权值优化更新。
+
+        引入原因是：训练网络的初始化权值可能因为不合适而导致在训练过程之中出现局部最小值，没有找到全局最优。
+        
+        而引入动量可以在一定程度上解决此问题。动量模拟物体运动时候的惯性，表示力对时间的积累效应。更新时候在一定程度之上保持以前更新的方向，同时结合当前梯度来调整更新的方向。动量越大，转换为势能的能量越大，可以增加稳定性，也能更快的学习，从而越有可能摆脱局部凹区域，进入全局凹区域。
+        
+        原生权重更新公式如下：
+            w=w−Lr∗dw
+        这里 w 是权重，Lr 是学习率，dw 是 w 的导数。
+        引入momentum之后的权重更新公式如下：
+            v=momentum∗v−Lr∗dw
+            w=w+v
+        这里 momentum 是动量，v 是速度。这个公式的意思就是加上上次更新的 v 与 momentum 的乘积。
+        当本次梯度下降 -Lr * dw 的方向与上次更新 v 的方向相同，则上次更新 v 可以起到正向加速作用。
+        当本次梯度下降 -Lr * dw 的方向与上次更新 v 的方向相反，则上次更新 v 可以起到减速作用。
+        代码对应如下：
+        '''
 
         if momentum != 0:
             buf = momentum_buffer_list[i]
 
             if buf is None:
+                # 历史更新量
                 buf = torch.clone(d_p).detach()
                 momentum_buffer_list[i] = buf
             else:
+                # 通过buf更新了self.state
+                # vt = vt−1 ∗ momentum + gt ∗ (1−dampening)
                 buf.mul_(momentum).add_(d_p, alpha=1 - dampening)
 
             if nesterov:
                 d_p = d_p.add(buf, alpha=momentum)
             else:
                 d_p = buf
-
-        param.add_(d_p, alpha=-lr)
+        # 更新当前组学习参数  w.data -= w.grad*lr
+        param.add_(d_p, alpha=-lr) # add_ 会更改对象数值
 
 
 def _multi_tensor_sgd(params: List[Tensor],

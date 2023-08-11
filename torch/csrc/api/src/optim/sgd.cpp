@@ -97,6 +97,8 @@ Tensor SGD::step(LossClosure closure) {
                     .momentum_buffer();
           buf.mul_(momentum).add_(d_p, 1 - dampening);
         }
+        # 是否启用nesterov动量，从pytorch源码来看，当nesterov为True时，在上述得到 v_t 的基础上又使用了一次momentum和v_t。
+        # ▽wJ(w)+m ∗ vt+1
         if (nesterov) {
           d_p = d_p.add(buf, momentum);
         } else {

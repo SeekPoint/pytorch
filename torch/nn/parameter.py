@@ -9,7 +9,14 @@ class _ParameterMeta(torch._C._TensorMeta):
         return super().__instancecheck__(instance) or (
             isinstance(instance, torch.Tensor) and getattr(instance, '_is_param', False))
 
+'''
+优化器是优化 _parameters，所以我们需要特殊了解一下。
 
+1.3.1 构建
+我们首先看看生成时候的特点：requires_grad=True。参数这么设置，就说明 Parameter 就是需要计算梯度的。
+因为张量默认是不需要求导的，requires_grad属性默认为False，
+如果某个节点 requires_grad 属性被设置为True，就说明其需要求导，并且所有依赖于它的节点 requires_grad 都为True。
+'''
 class Parameter(torch.Tensor, metaclass=_ParameterMeta):
     r"""A kind of Tensor that is to be considered a module parameter.
 
@@ -27,7 +34,7 @@ class Parameter(torch.Tensor, metaclass=_ParameterMeta):
         requires_grad (bool, optional): if the parameter requires gradient. See
             :ref:`locally-disable-grad-doc` for more details. Default: `True`
     """
-    def __new__(cls, data=None, requires_grad=True):
+    def __new__(cls, data=None, requires_grad=True):  # 需要计算梯度
         if data is None:
             data = torch.empty(0)
         if type(data) is torch.Tensor or type(data) is Parameter:

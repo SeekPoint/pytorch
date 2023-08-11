@@ -44,7 +44,30 @@ class Identity(Module):
     def forward(self, input: Tensor) -> Tensor:
         return input
 
+'''
+Torch.nn.Linear 可以对输入数据实现线形变换，一般用来设置全连接层。
 
+1.4.1 使用
+在 PyTorch 之中使用 torch.nn.Linear 例子如下。
+
+input = torch.randn(2,3)
+linear = nn.Linear(3,4)
+out = linear(input)
+print(out)
+
+# 输出结果如下
+tensor([[-0.6938,  0.0543, -1.4393, -0.3554],
+        [-0.4653, -0.2421, -0.8236, -0.1872]], grad_fn=<AddmmBackward>)
+1.4.2 定义
+Linear 具体定义如下，可以看到，其参数主要是
+
+self.weight = Parameter()。
+self.bias = Parameter()。
+由前面我们可以知道，Parameter 的生成时候参数是 requires_grad=True，说明 weight，bias 是需要计算梯度的。
+
+从前面简略计算图我们可以知道，torch.nn.Linear 的反向计算是 AddmmBackward。
+我们从代码之中找到了 addmm 的定义，其注释说明这是个矩阵乘法操作。
+'''
 class Linear(Module):
     r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
 

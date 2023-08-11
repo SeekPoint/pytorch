@@ -362,7 +362,51 @@ def _forward_unimplemented(self, *input: Any) -> None:
     """
     raise NotImplementedError(f"Module [{type(self).__name__}] is missing the required \"forward\" function")
 
+'''
+Module 内部有如下重要变量，大致可以分为如下三类。
 
+基础类型：
+    _parameters ：类型为张量的权重参数，用于前向和后向传播，保存模型就是保存这些参数。使用 parameters() 函数可以递归获取到模型所有参数，但是需要注意，parameters() 函数返回的是 iterator。
+    _buffers : 存储一些需要持久化的非网络参数的变量，比如BN 的 running_mean。
+    _modules : 存储类型为 Module 的变量，当后去一个模型的parameters 时候，PyTorch 通过递归遍历所有_modules来实现。
+
+计算相关类型：
+在模型计算时候，是按照如下顺序完成：
+ _backward_hooks  ----> forward ----> _forward_hooks ----> _backward_hooks
+ 
+具体如下：
+    _forward_pre_hooks ：在 forward 之前运行，不会更改 forward 输入参数。
+    _forward_hooks ：在 forward 之后运行，不会改变 forward 的输入和输出。
+    _backward_hooks ：在 backward 之后运行，不会改变 backward 的输入和输出。
+
+保存/加载相关：
+以下是保存相关的，PyTorch 使用如下来保存 torch.save(cn.state_dict()...) ，使用 load_state_dict(state_dict) 来加载。
+    _load_state_dict_pre_hooks : 在调用 _load_from_state_dict 加载模型时希望执行的操作。
+    _state_dict_hooks ：在调用state_dict方法时希望执行的操作。
+    
+    
+具体运行时候如下：  TBD???怎么查看的？？？？？
+
+net = {ToyModel} 
+ T_destination = {TypeVar} ~T_destination
+ dump_patches = {bool} False
+ net1 = {Linear} Linear(in_features=10, out_features=10, bias=True)
+ net2 = {Linear} Linear(in_features=10, out_features=5, bias=True)
+ relu = {ReLU} ReLU()
+ training = {bool} True
+  _backward_hooks = {OrderedDict: 0} OrderedDict()
+  _buffers = {OrderedDict: 0} OrderedDict()
+  _forward_hooks = {OrderedDict: 0} OrderedDict()
+  _forward_pre_hooks = {OrderedDict: 0} OrderedDict()
+  _is_full_backward_hook = {NoneType} None
+  _load_state_dict_pre_hooks = {OrderedDict: 0} OrderedDict()
+  _modules = {OrderedDict: 3} OrderedDict([('net1', Linear(in_features=10, out_features=10, bias=True)), ('relu', ReLU()), ('net2', Linear(in_features=10, out_features=5, bias=True))])
+  _non_persistent_buffers_set = {set: 0} set()
+  _parameters = {OrderedDict: 0} OrderedDict()
+  _state_dict_hooks = {OrderedDict: 0} OrderedDict()
+  _version = {int} 1
+
+'''
 class Module:
     r"""Base class for all neural network modules.
 
@@ -580,7 +624,7 @@ class Module:
                 output = hook(self, name, param)
                 if output is not None:
                     param = output
-            self._parameters[name] = param
+            self._parameters[name] = param  # 这里添加了
 
     def add_module(self, name: str, module: Optional['Module']) -> None:
         r"""Adds a child module to the current module.
@@ -1614,6 +1658,7 @@ class Module:
         raise AttributeError("'{}' object has no attribute '{}'".format(
             type(self).__name__, name))
 
+    #如果类的成员是从Parameter类派生，那么nn.Module使用__setattr__机制把他们归属到_parameters 之中。比如Linear的weight和bias。
     def __setattr__(self, name: str, value: Union[Tensor, 'Module']) -> None:
         def remove_from(*dicts_or_sets):
             for d in dicts_or_sets:
@@ -2056,6 +2101,17 @@ class Module:
                 name = module_prefix + ('.' if module_prefix else '') + k
                 yield name, v
 
+    '''
+    我们无法直接获取到 _parameters 这个变量，只能通过 parameters 方法来获取，其返回的是一个Iterator。
+    比如：
+    for param in net.parameters():
+        print(type(param), param.size())
+    输出：
+        <class 'torch.nn.parameter.Parameter'> torch.Size([10, 10])
+        <class 'torch.nn.parameter.Parameter'> torch.Size([10])
+        <class 'torch.nn.parameter.Parameter'> torch.Size([5, 10])
+        <class 'torch.nn.parameter.Parameter'> torch.Size([5])
+    '''
     def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
         r"""Returns an iterator over module parameters.
 
@@ -2081,6 +2137,7 @@ class Module:
         for name, param in self.named_parameters(recurse=recurse):
             yield param
 
+    #再来看看 named_parameters，其核心是 module._parameters.items()，以列表返回可遍历的元组数组。
     def named_parameters(
             self,
             prefix: str = '',

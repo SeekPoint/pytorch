@@ -43,12 +43,15 @@ class SparseAdam(Optimizer):
             closure (Callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
+        # 使用 closure 重新计算loss
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
-        for group in self.param_groups:
+        # 使用计算得到的梯度更新变量
+        # self.param_groups 就是我们传入的参数列表
+        for group in self.param_groups:   # 每一个group是一个dict, 其包含每组参数所需的必要参数
             params_with_grad = []
             grads = []
             exp_avgs = []
@@ -59,9 +62,9 @@ class SparseAdam(Optimizer):
             beta1, beta2 = group['betas']
             maximize = group.get('maximize', False)
 
-            for p in group['params']:
-                if p.grad is not None:
-                    params_with_grad.append(p)
+            for p in group['params']: # 遍历本组所有需要更新的参数
+                if p.grad is not None:  # 获取到模型参数的梯度
+                    params_with_grad.append(p) # 利用梯度进行优化
                     if not p.grad.is_sparse:
                         raise RuntimeError('SparseAdam does not support dense gradients, please consider Adam instead')
                     grads.append(p.grad)
