@@ -27,9 +27,10 @@ namespace autograd {
 Variable 的定义在：torch/csrc/autograd/variable.h，我们可以看看注释中 "Gradient Edges" 的相关部分。
 可以看出来，"Variable" 具有"gradient_edge"的概念，
 这是自动梯度计算图的边，在反向传播之中用来把变量和梯度函数的特定输入联系起来。
+
 更准确地说，这个梯度函数可以是两个函数之一：
-grad_fn，如果variable 在图的内部。这是产生梯度变量的梯度函数。
-grad_accumulator，如果变量是一个叶子节点，它将一个标量梯度值累加到它的'grad'变量之中。
+    grad_fn，如果variable 在图的内部。这是产生梯度变量的梯度函数。
+    grad_accumulator，如果变量是一个叶子节点，它将一个标量梯度值累加到它的'grad'变量之中。
 */
 
 /// `Variable` is exactly the same as `Tensor` (i.e. we have `using Variable =

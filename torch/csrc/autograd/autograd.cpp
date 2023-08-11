@@ -80,6 +80,8 @@ variable_list _make_grads(
   }
   return new_grads;
 }
+//这里应该是专门为了 C++ 世界直接调用的需要，与我们之前通过 Python 迂回调用不同。
+//run_backward 最后也调用了 Engine::get_default_engine().execute。
 variable_list run_backward(
     const variable_list& outputs,
     const variable_list& grad_outputs,
@@ -128,6 +130,7 @@ variable_list run_backward(
     }
   }
 
+  // 调用了引擎代码
   variable_list grad_inputs = Engine::get_default_engine().execute(
       roots,
       grad_outputs,

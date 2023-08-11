@@ -248,7 +248,17 @@ void set_grad_accumulator(
   materialize_autograd_meta(self)->grad_accumulator_ =
       std::move(grad_accumulator);
 }
+/*
+上面代码之中，有 grad_fn = torch::autograd::impl::try_get_grad_accumulator(tensor) 来获取计算梯度的方法。其实是用它来判断是否是叶子节点，只有非叶子节点 grad_accumulator_才不为空。
 
+try_get_grad_accumulator 返回的是个指向Node对象的指针 : std::weak_ptr<Node> grad_accumulator_。就是如何计算梯度。
+
+具体逻辑是：
+
+先通过函数get_autograd_meta返回一个AutogradMeta结构体。
+然后访问结构体中的成员变量grad_accumulator_，而grad_accumulator_是一个指向类型为Node对象的std::weak_ptr指针。
+最后通过lock()函数创建一个std::shared_ptr来管理对象。
+*/
 std::shared_ptr<Node> try_get_grad_accumulator(const Variable& self) {
   if (get_autograd_meta(self)) {
     return get_autograd_meta(self)->grad_accumulator_.lock();
@@ -292,10 +302,11 @@ Edge gradient_edge(const Variable& self) {
   // nodes get suppressed in some situations, see "suppress gradient
   // accumulation" below. Note that only variables which have `requires_grad =
   // True` can have gradient accumulators.
-  if (const auto& gradient = self.grad_fn()) {
-    return Edge(gradient, self.output_nr());
+  // self.grad_fn() 这里触发了一个调用
+  if (const auto& gradient = self.grad_fn()) { // 这是一个中间节点，gradient 是一个Function，比如可以得到一个SubBackward0实例
+    return Edge(gradient, self.output_nr());  // self.output_nr() 表示本Edge是function的第n个输入。前向传播时候的第 n 个输出在反向传播时候就是第 n 个输入。
   } else {
-    return Edge(grad_accumulator(self), 0);
+    return Edge(grad_accumulator(self), 0);   // 这是一个叶子节点，所以生成一个AccumulateGrad，0表示本Edge是function的第一个输入
   }
 }
 

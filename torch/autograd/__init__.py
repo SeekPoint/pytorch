@@ -111,6 +111,12 @@ def backward(
     grad_variables: Optional[_TensorOrTensors] = None,
     inputs: Optional[_TensorOrTensors] = None,
 ) -> None:
+    '''
+        这里 backward 主要逻辑是：
+        利用输入参数来构建输入张量和梯度张量 。
+        使用 _make_grads 把 grad_tensors 中的元素重新组织成tuple(list(torch.Tensor, ...))的形式。
+        然后利用 Variable._execution_engine.run_backward 执行后向传播。
+    '''
     r"""Computes the sum of gradients of given tensors with respect to graph
     leaves.
 
@@ -185,10 +191,12 @@ def backward(
     if inputs is not None and len(inputs) == 0:
         raise RuntimeError("'inputs' argument to backward() cannot be empty.")
 
+    # 利用输入参数来构建输入张量和梯度张量
     tensors = (tensors,) if isinstance(tensors, torch.Tensor) else tuple(tensors)
     inputs = (inputs,) if isinstance(inputs, torch.Tensor) else \
         tuple(inputs) if inputs is not None else tuple()
 
+    # _make_grads 把 grad_tensors 中的元素重新组织成tuple(list(torch.Tensor, ...))的形式
     grad_tensors_ = _tensor_or_tensors_to_tuple(grad_tensors, len(tensors))
     grad_tensors_ = _make_grads(tensors, grad_tensors_, is_grads_batched=False)
     if retain_graph is None:
@@ -197,6 +205,7 @@ def backward(
     # The reason we repeat same the comment below is that
     # some Python versions print out the first line of a multi-line function
     # calls in the traceback and some print out the last line
+    # 执行后向传播
     Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
         tensors, grad_tensors_, retain_graph, create_graph, inputs,
         allow_unreachable=True, accumulate_grad=True)  # Calls into the C++ engine to run the backward pass

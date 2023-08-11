@@ -10,7 +10,10 @@ bool THPEngine_initModule(PyObject* module);
 namespace torch {
 namespace autograd {
 namespace python {
-
+//Python 的 tensors 被转换为 C++ 的 root。
+//Python 的 grad_tensors 被转换为 C++ 的 grads。
+//Python 的 inputs 被转换为 C++ 的 output_edges。
+//最终把这三个变量传递给引擎：PythonEngine.execute(roots, grads, keep_graph, create_graph, accumulate_grad, output_edges)。
 struct PythonEngine : public Engine {
   static Engine& get_python_engine();
   ~PythonEngine() override;

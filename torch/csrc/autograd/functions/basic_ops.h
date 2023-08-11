@@ -70,7 +70,7 @@ struct TORCH_API UndefinedGradBackward : public Node {
 
 struct TORCH_API GraphRoot : public Node {
   GraphRoot(edge_list functions, variable_list inputs)
-      : Node(std::move(functions)), outputs(std::move(inputs)) {
+      : Node(std::move(functions)), outputs(std::move(inputs)) {  // 把输入的 input 配置给 outputs 成员变量。
     // Ensures calls to stream() on a GraphRoot instance reflect current
     // stream(s) on devices of root grad tensors at the time the instance is
     // constructed.
@@ -80,10 +80,10 @@ struct TORCH_API GraphRoot : public Node {
   }
 
   variable_list apply(variable_list&& inputs) override {
-    return outputs;
+    return outputs;  // apply 方法仅仅返回它的输入，就是梯度。Node 的其他派生类会有自己不同的实现。
   }
 
-  variable_list outputs;
+  variable_list outputs; // 梯度。其只是通过 apply() 来进行使用，就是 apply 方法返回这个outputs。
 };
 
 struct TORCH_API Identity : public Node {

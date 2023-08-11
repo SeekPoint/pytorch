@@ -435,6 +435,7 @@ class Tensor(torch._C._TensorBase):
     create_graph: 当设置为True的时候可以用来计算更高阶的梯度。
     inputs ：需要计算梯度的张量。如果没有提供，则梯度被累积到所有叶子张量上。
     需要注意的是，这个函数只是提供求导功能，并不返回值，返回的总是None。
+    
     '''
     def backward(
         self, gradient=None, retain_graph=None, create_graph=False, inputs=None

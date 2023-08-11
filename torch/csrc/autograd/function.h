@@ -188,6 +188,8 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
     thread_id_ = at::RecordFunction::currentThreadId();
   }
 
+  // GraphRoot 就是使用边列表构建了基类 Node，反向传播的根节点 roots 就是 GraphRoot（Node）相关联的边，
+  // 然后 GraphRoot 本身新增了成员变量 variable_list outputs（就是输入 input 参数）。
   explicit Node(edge_list&& next_edges = edge_list())
       : Node(
             /*sequence_nr=*/at::sequence_number::get_and_increment(),
@@ -343,6 +345,7 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
 
   const Edge& next_edge(size_t index) const noexcept {
     return next_edges_[index];
+    //next_edges_ 指向的是前向图中该Node节点的输入节点，所以在反向传播中，就是该节点的输出节点。
   }
 
   const edge_list& next_edges() const noexcept {
@@ -381,7 +384,18 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
   uint64_t sequence_nr() const noexcept {
     return sequence_nr_;
   }
-
+/*
+topological_nr_ 是 “节点”的拓扑顺序号，表示从该节点到任何叶节点的最长可能路径的长度。
+如果某个节点是叶节点，即AccumulateGrad，topological_nr_ 将是零。
+topological_nr_ 用于在autograd发现期间对DAG中的分支进行修剪，
+维护拓扑 topological_nr_有助于我们在两个节点之间不存在有向路径时，在O(1) 时间完成检查。
+topological_nr_ 具有以下属性：
+对于G中的每一对节点X，Y，如果存在从X到Y的有向路径，则意味着 topo_nr(X) > topo_nr(Y)。
+然而，事实并非如此，因此我们无法证明从X到Y的路径的存在性，只能证明不存在。
+我们在使用 topological_nr_ 时所做的一个假设是：一旦使用了一个节点，
+即，它有一个父节点，那么它自己的topological_nr_ 就不会改变。我们在“has_parent_”字段中添加了一些检查来强制执行这一点。
+具体大家也可以通过代码中的注释来印证。
+*/
   // NOTE [ Topological Number ]
   //
   // topological_nr is used to prune branches in the DAG during autograd

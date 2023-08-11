@@ -1301,7 +1301,7 @@ PyObject* initModule() {
   THPStream_init(module);
   ASSERT_TRUE(THPVariable_initModule(module)); // 继续分析这里，其中会设定_TensorBase
   ASSERT_TRUE(THPFunction_initModule(module));
-  ASSERT_TRUE(THPEngine_initModule(module));
+  ASSERT_TRUE(THPEngine_initModule(module)); // 这里初始化引擎
   // NOTE: We need to be able to access OperatorExportTypes from ONNX for use in
   // the export side of JIT, so this ONNX init needs to appear before the JIT
   // init.

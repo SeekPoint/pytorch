@@ -216,11 +216,15 @@ void InputBuffer::add(
   }
 }
 
+//如何通过 input_buffer.device() 来得到对应的 device？就是遍历 input_buffer 中的 variables，
+//其中第一个设备非cpu的variable的device将成为input_buffer的device，否则设备就是CPU。
+//InputBuffer::device 是从输入参数中获取设备。这里如果有配置设备，就返回，否则返回 at::kCPU。
 auto InputBuffer::device() const -> at::Device {
   // Since we pick the first non-CPU tensor, this won't work with
   // mixed device-type operations (e.g., an op that is both CUDA
   // and XLA).  This is *incredibly* unlikely, so we don't worry
   // about it.
+  //// 遍历buffer，获取第一个非CPU张量，然后得到他的device
   for (auto& var : buffer) {
     if (var.defined()) {
       auto device = var.device();

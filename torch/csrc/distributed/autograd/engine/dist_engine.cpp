@@ -175,6 +175,11 @@ void DistEngine::validateRootsAndRetrieveEdges(
       rootEdges, grads, [](const std::string& msg) { return msg; });
 }
 
+/*
+ExecInfo.Capture.GradCaptureHook 是要对梯度再做后续处理。
+但是这个使用却是主要在分布式状态下，是因为分布式引擎有一个累积梯度的需要，
+这个必须在正常梯度操作之后的后置处理中完成。
+*/
 void DistEngine::computeDependencies(
     const ContextPtr& autogradContext,
     const edge_list& rootEdges,
@@ -318,6 +323,7 @@ void DistEngine::computeDependencies(
           // Capture hooks are technically deprecated, but as an exception below
           // is the single and only instance of capture hooks usage that we
           // support. See NOTE [Deprecated capture hooks] for more context.
+          // 在这里添加 hook
           capture.DO_NOT_USE_DEPRECATED_register_capture_hook(
               std::make_unique<DistAccumulateGradCaptureHook>(
                   std::dynamic_pointer_cast<AccumulateGrad>(
