@@ -5,6 +5,208 @@ functions to be run in multiprocessing. E.g., the data loading worker loop is
 in `./_utils/worker.py`.
 """
 
+
+'''
+0x01 数据加载
+1.1 加速途径
+当分布式训练时候，为了加速训练，有三个层面的工作需要处理。
+
+数据加载层面
+多机通讯层面
+代码层面
+在数据层面，可以使用多进程并行加载来加速数据预处理过程，也有利用GPU特点来加速，比如Nvidia DALI 通过将数据预处理放到 GPU 处理来解决 CPU 瓶颈问题。
+
+在多机通讯层面，有各种集合通信库可以利用，比如NCCL，OpenMPI, Gloo 等。
+
+在代码层面，可以使用框架提供的分布式API，或者利用 Horovod 来改造单机版代码，使其支持分布式任务。
+
+接下来我们就看看数据层面如何加速。
+
+1.2 并行处理
+AI框架的数据处理主要如下并行处理：
+
+数据加载/处理使用CPU。
+训练使用GPU。
+在理想状态下，应该是每轮迭代训练之前，CPU就完成加载，准备好训练数据，这样训练就可以持续无缝迭代。
+
+然而，GPU算力每年会提升一倍，CPU的提升速度远远落后于GPU，所以CPU会是拖后腿的那个角色。这里不仅仅是CPU算力不足的问题，也包括村存储中读取数据速度不足的问题。
+
+因此，机器学习对于数据加载和前期预处理的要求越来越高，必须在GPU计算时间内，完成下一迭代数据的准备工作，不能让GPU因为等待训练数据而空闲。
+
+1.3 流水线
+对于机器学习训练，加载数据可以分为三个步骤：
+
+将数据从磁盘或者分布式存储加载到主机（CPU）。
+将数据从主机可分页内存传输到主机固定内存。
+将数据从主机固定内存转移到主机GPU。
+因此，流行的深度学习框架会依据加载步骤的特点和异构硬件的特点来进行流水线处理，从而提高数据处理过程的吞吐量。
+
+流水线一般包括多个算子，每个算子内部由数据队列组成一个缓冲区，上游算子完成处理之后会传给给下游算子进行处理。这样每个算子任务会彼此独立，算子内部可以使用细粒度的多线程/多进程来并行加速，每个算子可以独立控制处理速度和内存以适配不同网络对于处理速度的需求。
+
+如果算子内部数据队列不为空，模型就会一直源源不断获得数据，就不会因为等待训练数据而产生瓶颈。
+
+下面是串行处理逻辑：
+
++------+            +-----------+           +---------------------------+
+|      |            |           |           |                           |
+| Data +----------> | Load Data +---------> | Transfer to Pinned Memory |
+|      |            |           |           |                           |
++------+            +-----------+           +---------------------------+
+下面是并行流水线逻辑：
+
+                    +------------+
++--------+          |            |
+|        |          | Process 1  |
+| Data 1 +--------> |            +------+
+|        |          | Load Data  |      |
++--------+          |            |      |
+                    +------------+      |
+                                        |
+                                        |
+                                        |
+                    +------------+      |        +-----------------------------------+
++--------+          |            |      |        |                                   |
+|        |          | Process 2  |      +------> | Pin-memory process                |
+| Data 2 +--------> |            |               |                                   |
+|        |          | Load Data  +-------------> |                                   |
++--------+          |            |               |        Transfer to Pinned Memory  |
+                    +------------+       +-----> |                                   |
+                                         |       |                                   |
+                                         |       +-----------------------------------+
+                                         |
++--------+          +------------+       |
+|        |          |            |       |
+| Data 3 +--------> | Process 3  +-------+
+|        |          |            |
++--------+          | Load Data  |
+                    |            |
+                    +------------+
+
+
+
+
+1.4 GPU
+本文到现在是解决CPU侧的数据传输问题，即：从磁盘加载数据，从可分页到固定内存。
+
+但是，从固定内存到GPU的数据传输（tensor.cuda()）也可以使用CUDA流进行流水线处理。
+
+另外，深度学习应用程序需要复杂的多阶段数据处理管道，包括加载、解码、裁剪、调整大小和许多其他增强功能。这些目前在 CPU 上执行的数据处理管道已经成为瓶颈，限制了训练和推理的性能和可扩展性。
+
+Nvidia DALI 通过将数据预处理放到 GPU 处理来解决 CPU 瓶颈问题，用户可以依据自己模型的特点，构建基于 GPU 的 pipeline，或者基于CPU的pipeline。
+
+此处有img！！
+
+
+
+
+我们小结一下多进程逻辑。
+
+总体逻辑如下：
+
+主进程把需要获取的数据 index 放入index_queue。
+子进程从 index_queue 之中读取 index，进行数据读取，然后把读取数据的index放入worker_result_queue。
+主进程的 pin_memory_thread 会从 worker_result_queue 读取数据index，依据这个index进行读取数据，进行处理，把结果放入 data_queue。
+具体流程如下图:
+
+在 _MultiProcessingDataLoaderIter 的初始化函数 __init__ 之中会进行初始化：
+配置，生成各种成员变量，配置各种queue。
+启动各个子进程。
+启动主进程中的pin_memory的线程。
+调用 _reset 函数，这是进一步完善业务初始化，也用来重置环境。上面已经启动了worker子进程，但是没有分配任务，所以reset函数会进行任务分配，预取。
+接下来是一个预取操作（在看下图中一定要留意）。
+_try_put_index 函数就是使用sampler获取下一批次的数据index。这里 _prefetch_factor 缺省值是 2，主要逻辑如下。
+使用 _next_index 从sampler获取下一批次的index。
+通过 _worker_queue_idx_cycle 找出下一个可用的工作worker，然后把index分给它。
+并且调整主进程的信息。
+拿到index之后，回到主线程。这里会进行数据提取。就是通过index_queue, data_queue与主进程交互。
+从 index_queue 获取新的数据index；
+如果没有设置本worker结束，就使用 fetcher获取数据。
+然后把数据放入data_queue，并且通知主进程，这里需要注意，data_queue是传入的参数，如果设置了pin memory，则传入的是 worker_result_queue，否则传入 data_queue。
+当用户迭代时，调用了Loader基类的 __next__ 函数 ，其调用 _next_data 从 DataLoader 之中获取数据。
+使用 _get_data 如何从 self._data_queue 中取数据。
+使用_process_data 设置下一次迭代的 index，即使用 _try_put_index，_next_index 来进行下一轮设置。
+具体如下图：
+
+user        _MultiProcessingDataLoaderIter   Sampler        Queue(index_queue)    Queue(data_queue)    _worker_loop     Fetcher
+ +                       +                      +                  +                     +                  +              +
+ |                       |                      |                  |                     |                  |              |
+ |                       |                      |                  |                     |                  |              |
+ |                       v                      |                  |                     |                  |              |
+ |                   __init__                   |                  |                     |                  |              |
+ |               1    _reset                    |                  |                     |                  |              |
+ |                       +                      |                  |                     |                  |              |
+ |                       |                      |                  |                     |                  |              |
+ |                       |                      |                  |                     |                  |              |
+ |                       v                      |                  |                     |                  |              |
+ |            2   _try_put_index     next       |                  |                     |                  |              |
+ |                  _next_index  +------------> |                  |                     |                  |              |
+ |                       +                      |                  |                     |                  |              |
+ |                       |  <-----------------+ |                  |                     |                  |              |
+ |                       |           index      |                  |                     |                  |              |
+ |                       |                      |                  |                     |                  |              |
+ |                       | +------------------------------------>  |                     |                  |              |
+ |                       |           put        |                  |                     |       get        |              |
+ |                       |                      |                  +--------------------------------------> |              |
+ |                       |                      |                  |                     |                  |    index     |
+ |                       |                      |                  |                     |                  +------------> |
+ |         next          |                      |                  |                     |                  | <----------+ |
+ +---------------------> |                      |                  |                     | <----------------+    data      |
+ |                       |                      |                  |                     |      data        |              |
+ |                       +                      |                  |                     |                  |              |
+ |                   _next_data                 |                  |                     |                  |              |
+ |              3   _get_data          get      |                  |                     |                  |              |
+ |                  _try_get_data  +-------------------------------------------------->  |                  |              |
+ |                       +                      |                  |                     |                  |              |
+ |                       |  <----------------------------------------------------------+ |                  |              |
+ |                       |             data     |                  |                     |                  |              |
+ |                       +                      |                  |                     |                  |              |
+ |                   _process_data              |                  |                     |                  |              |
+ |                  _try_put_index     next     |                  |                     |                  |              |
+ |                  _next_index +-------------> |                  |                     |                  |              |
+ |                       + <--------------------+                  |                     |                  |              |
+ |                       |           index      |                  |                     |                  |              |
+ |                       +---------------------------------------> |                     |       get        |              |
+ | <-------------------+ |             put      |                  +------------------------------------->  |     index    |
+ |        data           |                      |                  |                     |                  | +----------> |
+ |                       |                      |                  |                     |                  +<-----------+ |
+ v                       v                      v                  v                     v                  v     data     v
+
+
+
+至此，我们把之前的pipeline图进一步细化，具体如下：
+
+                                                  +------------+
+                              +--------+          |            |
+                              |        |          | Process 1  |
+                      +-----> | Data 1 +--------> |            +------+
+                      |       |        |          | Load Data  |      |
+                      |       +--------+          |            |      |
+                      |                           +------------+      |
+                      |                                               |
+                      |                                               |
+                      |                                               |
++----------------+    |                           +------------+      |                                          +-------------------------+
+|Main process    |    |       +--------+          |            |      |                                          |  pin_memory_thread      |
+|                |    |       |        |          | Process 2  |      +------>  +------------------------+       |                         |          +------------+
+|  index_queue   +----------> | Data 2 +--------> |            |                |                        |       |                         |          |            |
+|                |    |       |        |          | Load Data  +------------->  |  _worker_result_queue  +-----> |  Write to pinned memory +--------> | data_queue |
+|                |    |       +--------+          |            |                |                        |       |                         |          |            |
++----------------+    |                           +------------+       +----->  |                        |       |                         |          +------------+
+                      |                                                |        +------------------------+       |                         |
+                      |                                                |                                         +-------------------------+
+                      |                                                |
+                      |       +--------+          +------------+       |
+                      |       |        |          |            |       |
+                      +-----> | Data 3 +--------> | Process 3  +-------+
+                              |        |          |            |
+                              +--------+          | Load Data  |
+                                                  |            |
+                                                  +------------+
+
+
+至此，PyTorch 分布式的数据加载部分分析完毕，下一篇我们回归到 Paracel 如何处理数据加载。
+
+'''
 import functools
 import itertools
 import logging
@@ -125,7 +327,12 @@ def _share_dist_seed(generator, pg):
         dist.broadcast(_shared_seed, src=0, group=pg)
     return _shared_seed.item()
 
-
+'''
+DataLoader的作用是：结合Dataset和Sampler之后，在数据集上提供了一个迭代器。
+可以这么理解：
+    DataSet 是原始数据，Sampler 提供了如何切分数据的策略（或者说是提供了切分数据的维度），
+    DataLoader就是依据策略来具体打工干活的，其中单进程加载就是一个人干活，多进程加载就是多拉几个人一起干活。
+'''
 class DataLoader(Generic[T_co]):
     r"""
     Data loader. Combines a dataset and a sampler, and provides an iterable over
@@ -404,6 +611,7 @@ class DataLoader(Generic[T_co]):
     由上节我们可以知道，_SingleProcessDataLoaderIter 是单进程加载数据的核心，loader通过它来与sampler，dataset交互。
     在多进程中，这个核心对应的就是 _MultiProcessingDataLoaderIter。
     '''
+    #具体会依据是否是多进程来区别生成。
     def _get_iterator(self) -> '_BaseDataLoaderIter':
         if self.num_workers == 0:
             return _SingleProcessDataLoaderIter(self)
@@ -455,6 +663,9 @@ class DataLoader(Generic[T_co]):
 
     for 语句会调用enumerate 会返回一个迭代器，以此来遍历数据集。
     在eumerate之中，dataloader 的 __next__(self) 方法会被调用，逐一获取下一个对象，从而遍历数据集。
+            cuda0 = torch.device('cuda:0')  # CUDA GPU 0
+            for i, x in enumerate(train_loader):
+                x = x.to(cuda0)
     '''
     def __iter__(self) -> '_BaseDataLoaderIter':
         # When using a single worker the returned iterator should be
@@ -462,19 +673,22 @@ class DataLoader(Generic[T_co]):
         # However, in the case of a multiple workers iterator
         # the iterator is only created once in the lifetime of the
         # DataLoader object so that workers can be reused
+
         if self.persistent_workers and self.num_workers > 0:  # 如果是多进程或者设置了持久化
+            #当多进程加载时候，在DataLoader声明周期之中，迭代器只被建立一次，这样worker可以重用迭代器。
             if self._iterator is None:  # 如果没有，才会新生成
                 self._iterator = self._get_iterator()
             else:
                 self._iterator._reset(self)
             return self._iterator
         else: # 单进程
-            return self._get_iterator() # 每次都直接生成新的
+            return self._get_iterator() # 每次都直接生成新的  在单进程加载时候，应该每次生成，以避免重置状态。
 
     @property
     def _auto_collation(self):
         return self.batch_sampler is not None
 
+    #这里关键函数之一就是_index_sampler，用来让迭代器调用sampler，我们接下来就会讲到
     @property
     def _index_sampler(self): #关键函数之一就是_index_sampler，用来让迭代器调用sampler
         # The actual sampler used for generating indices for `_DatasetFetcher`
@@ -593,7 +807,12 @@ class DataLoader(Generic[T_co]):
                 self.num_workers,
                 cpuset_checked))
 
-
+'''
+_BaseDataLoaderIter 是迭代器基类，我们挑选关键函数看看。
+这里关键成员变量就是：
+    _index_sampler：这里设置了loader 的 sampler，所以迭代器可以据此获取采样策略。
+    _sampler_iter：得到 sampler 的迭代器。
+'''
 class _BaseDataLoaderIter:
     def __init__(self, loader: DataLoader) -> None:
         self._dataset = loader.dataset
@@ -650,6 +869,12 @@ class _BaseDataLoaderIter:
             shared_rng.manual_seed(self._shared_seed)
             self._dataset = torch.utils.data.graph_settings.apply_random_seed(self._dataset, shared_rng)
 
+    '''
+    _try_put_index 函数就是使用sampler获取下一批次的数据index。这里 _prefetch_factor 缺省值是 2，主要逻辑如下。
+        从sampler获取下一批次的index。
+        通过 _worker_queue_idx_cycle 找出下一个可用的工作worker，然后把index分给它。
+        并且调整主进程的信息。
+    '''
     def _next_index(self):    # 定义在基类 _BaseDataLoaderIter 之中，就是获取下一批index
         return next(self._sampler_iter)  # may raise StopIteration
 
@@ -674,7 +899,7 @@ class _BaseDataLoaderIter:
             if self._sampler_iter is None:
                 # TODO(https://github.com/pytorch/pytorch/issues/76750)
                 self._reset()  # type: ignore[call-arg]
-            data = self._next_data() # 获取数据
+            data = self._next_data()  # 获取数据
             self._num_yielded += 1
             if self._dataset_kind == _DatasetKind.Iterable and \
                     self._IterableDataset_len_called is not None and \
@@ -701,7 +926,12 @@ class _BaseDataLoaderIter:
         # but signalling the end is tricky without a non-blocking API
         raise NotImplementedError("{} cannot be pickled", self.__class__.__name__)
 
-
+'''
+_SingleProcessDataLoaderIter 继承了 _BaseDataLoaderIter，可以看到，其增加了 _dataset_fetcher，在构造时候传入了 _collate_fn 等各种参数。
+回忆下，__next__会调用 self._next_data() 获取数据，而在这里，_next_data 就会：
+    使用 self._next_index()，其又会使用 _sampler_iter（采样器的迭代器）来获取indices 。
+    使用 self._dataset_fetcher.fetch(index)来依据indices获取数据。
+'''
 class _SingleProcessDataLoaderIter(_BaseDataLoaderIter):
     def __init__(self, loader):
         super().__init__(loader)
@@ -726,7 +956,108 @@ class _SingleProcessDataLoaderIter(_BaseDataLoaderIter):
             data = _utils.pin_memory.pin_memory(data, self._pin_memory_device)
         return data
 
+'''
+_MultiProcessingDataLoaderIter 中的注释十分详尽，值得大家深读，而且给出了逻辑流程图如下，其基本流程是围绕着三个queue进行的:
+    主进程把需要获取的数据 index 放入index_queue，这是指定子进程需要获取哪些数据的队列。同时也给子进程传入结果队列，关于结果队列，有两个分支：
+        如果设置了pin memory，则传入的是 worker_result_queue。
+        否则传入 data_queue。
+    子进程从 index_queue 之中读取 index，进行数据读取，然后把读取数据的index放入worker_result_queue，这是向主进程返回结果的队列。
+    主进程进行处理，这里有两个分支：
+        如果设置了pin memory，则主进程的 pin_memory_thread 会从 worker_result_queue 读取数据index，依据这个index进行读取数据，进行处理，把结果放入 data_queue，这是处理结果的队列。
+        如果不需要pin memory，则结果已经存在 data_queue 之中，不做新操作。
+    可以看到，每个进程的输入是一个队列index_queue ，输出也是一个队列worker_result_queue。主进程和子进程通过这2~3个 queue 联系了起来，从而达到解耦合和加速的作用。
 
+    # NOTE [ Data Loader Multiprocessing Shutdown Logic ]
+    #
+    # Preliminary:
+    #
+    # Our data model looks like this (queues are indicated with curly brackets):
+    #
+    #                main process                              ||
+    #                     |                                    ||
+    #               {index_queue}                              ||
+    #                     |                                    ||
+    #              worker processes                            ||     DATA
+    #                     |                                    ||
+    #            {worker_result_queue}                         ||     FLOW
+    #                     |                                    ||
+    #      pin_memory_thread of main process                   ||   DIRECTION
+    #                     |                                    ||
+    #               {data_queue}                               ||
+    #                     |                                    ||
+    #                data output                               \/
+    #
+    # P.S. `worker_result_queue` and `pin_memory_thread` part may be omitted if
+    #      `pin_memory=False`.
+
+具体如下图所示，如果不需要 pin memory，则为：
+
+                                               +-----------+
+               indices  -------------+ indices | Worker    | Data
+             +--------->+index queue +-------->+ Process   +------+
+             |          |            |         |           |      |
+             |          -------------+         +-----------+      |
+             |                                                    |   +------------+
+             |                                                    |   |            |
++---------+  |                                                    +--->            |
+| Main    |  | indices  -------------+ indices +-----------+          |            |
+| Process +------------>+index queue +-------->+ Worker    | Data     | Data Queue |
+|         |  |          |            |         | Process   +---------->            |
++---------+  |          -------------+         |           |          |            |
+             |                                 +-----------+      +--->            |
+             |                                                    |   +------------+
+             |                                                    |
+             | indices  -------------+ indices +-----------+      |
+             +--------->+index queue +-------->+ Worker    | Data |
+                        |            |         | Process   +------+
+                        -------------+         |           |
+                                               +-----------+
+
+当有pin memory时候，则是先进入 result queue，然后 pin_memory_thread 处理之后会转入到 data queue：
+
+                                               +-----------+
+               indices  -------------+ indices | Worker    | Data
+             +--------->+index queue +-------->+ Process   +------+
+             |          |            |         |           |      |
+             |          -------------+         +-----------+      |
+             |                                                    |   --------------+
+             |                                                    |   |             |
++---------+  |                                                    +--->             |
+| Main    |  | indices  -------------+ indices +-----------+          |             |
+| Process +------------>+index queue +-------->+ Worker    | Data     | result_queue|
+|         |  |          |            |         | Process   +---------->             |
++---------+  |          -------------+         |           |          |             |
+             |                                 +-----------+      +--->             |
+             |                                                    |   ---------+----+
+             |                                                    |            |
+             | indices  -------------+ indices +-----------+      |            |
+             +--------->+index queue +-------->+ Worker    | Data |  +---------+--------+
+                        |            |         | Process   +------+  | pin_memory_thread|
+                        -------------+         |           |         |         |        |
+                                               +-----------+         |         |        |
+                                                                     |         |        |
+                                                                     +------------------+
+                                                                               |
+                                                                               |
+                                                                               |
+                                                                               v
+                                                                         +-----+------+
+                                                                         | Data Queue |
+                                                                         |            |
+                                                                         +------------+
+
+2.4.2 初始化
+初始化函数如下，主要是：
+    配置，生成各种成员变量，配置各种queue。
+    启动各个子进程。
+    启动主进程中的pin_memory的线程。
+主要成员变量为：
+    _index_queues: 这是一个queue 列表，列表的每一个元素是一个 queue，就是每个子进程的队列需要处理的数据index，每个子进程对应一个 queue。
+    _worker_result_queue: 子进程处理完的 (idx, data)。
+    data_queue: 经过主进程 pin_memory 线程处理之后的数据队列，如果不需要pin，则直接会使用 _worker_result_queue。
+    _worker_queue_idx_cycle 用以找出下一个工作的worker。
+
+'''
 class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
     '''
     _MultiProcessingDataLoaderIter有如下 flag 参数来协调各个 worker （包括各种queue）之间的工作：
@@ -740,19 +1071,6 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                 分别对应数据 未取 和 已取 的情况
 
     _tasks_outstanding: 整型，代表已经准备好的 task/batch 的数量（可能有些正在准备中）
-
-    _send_idx: 发送索引，记录下一次要放 index_queue 中 task batch 的 idx。
-
-    _rcvd_idx: 接受索引，记录下一次要从 data_queue 中取出的 task batch 的 idx。
-                _send_idx 和 _rcvd_idx 主要用来进行流量控制和确保接受索引有意义。
-
-    _task_info: 存储将要产生的 data 信息的 dict，key为 task batch idx（由 0 开始的整型索引），
-                value 为 (worker_id,) 或 (worker_id, data)，
-                分别对应数据 未取 和 已取 的情况。
-                _task_info的作用是依据 task batch idx 获取对应的 worker id 和暂存乱序数据。
-
-    _tasks_outstanding: 整型，正在准备的 task/batch 的数量，实际上就是进行一些确认工作，没有太实际的意义。
-
     '''
     r"""Iterates once over the DataLoader's dataset, as specified by the sampler"""
 
@@ -990,13 +1308,6 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
     #       of the data model the queue is at).
     #
     # [ worker processes ]
-    # 就是通过index_queue, data_queue与主进程交互。
-    #
-    # 从index_queue获取新的数据index；
-    # 如果没有设置本worker结束，就使用fetcher获取数据。
-    # 然后把数据放入data_queue，并且通知主进程，
-    # 这里需要注意，data_queue是传入的参数，
-    # 如果设置了pin memory，则传入的是worker_result_queue, 否则传入data_queue。
     #   While loader process is alive:
     #     Get from `index_queue`.
     #       If get anything else,
@@ -1021,10 +1332,6 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
     #                                          `cancel_join_thread`.)
     #
     # [ pin_memory_thread ]
-    # 在主进程之中，如果设置了需要pin memory，
-    # 主进程的pin_memory_thread会从worker_result_queue读取数据，
-    # 进行处理（加速CPU和GPU的数据拷贝），
-    # 把结果放入data_queue。
     #   # No need to check main thread. If this thread is alive, the main loader
     #   # thread must be alive, because this thread is set as daemonic.
     #   While `pin_memory_thread_done_event` is not set:
@@ -1075,12 +1382,6 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
     #     down.
 
     def __init__(self, loader):
-        '''
-        _index_queues: 这是一个queue 列表，列表的每一个元素是一个 queue，就是每个子进程的队列需要处理的数据index，每个子进程对应一个 queue。
-        _worker_result_queue: 子进程处理完的 (idx, data)。
-        data_queue: 经过主进程 pin_memory 线程处理之后的数据队列，如果不需要pin，则直接会使用 _worker_result_queue。
-        _worker_queue_idx_cycle 用以找出下一个工作的worker。
-        '''
         super().__init__(loader)
 
         self._prefetch_factor = loader.prefetch_factor
@@ -1173,6 +1474,33 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         self._worker_pids_set = True
         self._reset(loader, first_iter=True) # 继续完善业务 # __init__ 函数最后会调用 _reset 函数，这是进一步完善业务初始化，也用来重置环境
 
+    '''
+    __init__ 函数最后会调用 _reset 函数，这是进一步完善业务初始化，也用来重置环境。
+
+    上小节函数中，已经启动了worker子进程，但是没有分配任务，所以_reset函数会进行任务分配，预取。
+    
+    _MultiProcessingDataLoaderIter有如下 flag 参数来协调各个 worker （包括各种queue）之间的工作：
+    
+    _send_idx: 发送索引，用来记录这次要放 index_queue 中 batch 的 idx
+    
+    _rcvd_idx: 接受索引，记录要从 data_queue 中取出的 batch 的 idx
+    
+    _task_info: 存储将要产生的 data 信息的 dict，key为 task idx（由 0 开始的整型索引），value 为 (worker_id,) 或 (worker_id, data)，分别对应数据 未取 和 已取 的情况
+    
+    _tasks_outstanding: 整型，代表已经准备好的 task/batch 的数量（可能有些正在准备中）
+    
+    _send_idx: 发送索引，记录下一次要放 index_queue 中 task batch 的 idx。
+    
+    _rcvd_idx: 接受索引，记录下一次要从 data_queue 中取出的 task batch 的 idx。_send_idx 和 _rcvd_idx 主要用来进行流量控制和确保接受索引有意义。
+    
+    _task_info: 存储将要产生的 data 信息的 dict，key为 task batch idx（由 0 开始的整型索引），value 为 (worker_id,) 或 (worker_id, data)，分别对应数据 未取 和 已取 的情况。_task_info的作用是依据 task batch idx 获取对应的 worker id 和暂存乱序数据。
+    
+    _tasks_outstanding: 整型，正在准备的 task/batch 的数量，实际上就是进行一些确认工作，没有太实际的意义。
+    
+    对于加载数据，每个 worker 一次产生一个 batch 的数据，返回 batch 数据前，会放入下一个批次要处理的数据下标，所以 reset 函数会把 _send_idx，_rcvd_idx 都恢复成0，这样下次迭代就可以重新处理。
+    
+    在 reset 方法最后，有一个预取数据操作。我们会在后面结合乱序处理进行讲解。
+    '''
     def _reset(self, loader, first_iter=False):
         '''
         对于加载数据，每个 worker 一次产生一个 batch 的数据，返回 batch 数据前，
@@ -1197,6 +1525,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         # Not that this indicates that a worker still has work to do *for this epoch*.
         # It does not mean that a worker is dead. In case of `_persistent_workers`,
         # the worker will be reset to available in the next epoch.
+
         # 每个worker的状态
         self._workers_status = [True for i in range(self._num_workers)]
         # Reset the worker queue cycle so it resumes next epoch at worker 0
@@ -1217,6 +1546,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         for _ in range(self._prefetch_factor * self._num_workers):
             self._try_put_index()
 
+    #_try_get_data 就是从 _data_queue 读取。主进程和worker进程通过queue上的put, get进行通讯交互。
     def _try_get_data(self, timeout=_utils.MP_STATUS_CHECK_INTERVAL):
         #_try_get_data 就是从 _data_queue 读取。主进程和worker进程通过queue上的put, get进行通讯交互。
 
@@ -1370,9 +1700,9 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         其次，我们看看 _get_data 如何从 self._data_queue 中取数据。
         具体是使用 _try_get_data 来提取。
 
-        如果有超时配置，就按照超时读取。
-        如果设置了pin memory，则从pin 线程处理之后的数据读取。
-        否则循环读取worker处理的数据，直至获取到数据为止。
+            如果有超时配置，就按照超时读取。
+            如果设置了pin memory，则从pin 线程处理之后的数据读取。
+            否则循环读取worker处理的数据，直至获取到数据为止。
         '''
         # Fetches data from `self._data_queue`.
         #
@@ -1406,6 +1736,13 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                 if success:
                     return data
 
+    '''
+    所以，我们要看 _MultiProcessingDataLoaderIter 的_next_data。
+
+        因为之前有预取了index，worker进程已经开始获取数据，所以主进程此时可以得到数据，如果没有数据，就继续while True等待。
+        如果获取成功，则使用 _process_data 设定下一次的indx，准备下一次迭代。
+        通过 _task_info 来记录乱序数据，如果暂时无法处理，就在这里保存。
+    '''
     def _next_data(self):
         while True:
             # If the worker responsible for `self._rcvd_idx` has already ended
@@ -1415,11 +1752,13 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # This part needs to run in the loop because both the `self._get_data()`
             # call and `_IterableDatasetStopIteration` check below can mark
             # extra worker(s) as dead.
-            while self._rcvd_idx < self._send_idx:
+
+            # 找到待取idx
+            while self._rcvd_idx < self._send_idx: # 如果 待取batch idx < 已取batch idx
                 info = self._task_info[self._rcvd_idx]
                 worker_id = info[0]
                 if len(info) == 2 or self._workers_status[worker_id]:  # has data or is still active
-                    break
+                    break   # 有数据或者正在工作，就跳出内部这个while
                 del self._task_info[self._rcvd_idx]
                 self._rcvd_idx += 1
             else:
@@ -1433,11 +1772,11 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # Check if the next sample has already been generated
             if len(self._task_info[self._rcvd_idx]) == 2:
                 data = self._task_info.pop(self._rcvd_idx)[1]
-                return self._process_data(data)
+                return self._process_data(data)  # 设定下一次的indx，进行下一次迭代
 
             assert not self._shutdown and self._tasks_outstanding > 0
-            idx, data = self._get_data()
-            self._tasks_outstanding -= 1
+            idx, data = self._get_data()  # 从 self._data_queue 中取数据
+            self._tasks_outstanding -= 1  # 正在准备的batch个数需要减1
             if self._dataset_kind == _DatasetKind.Iterable:
                 # Check for _IterableDatasetStopIteration
                 if isinstance(data, _utils.worker._IterableDatasetStopIteration):
@@ -1448,12 +1787,12 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                     self._try_put_index()
                     continue
 
-            if idx != self._rcvd_idx:
+            if idx != self._rcvd_idx: # 乱序数据
                 # store out-of-order samples
                 self._task_info[idx] += (data,)
             else:
-                del self._task_info[idx]
-                return self._process_data(data)
+                del self._task_info[idx]  # 正常数据
+                return self._process_data(data)  # 设定下一次的indx，进行下一次迭代
 
     def _try_put_index(self):
         '''

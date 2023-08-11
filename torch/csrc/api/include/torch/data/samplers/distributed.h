@@ -16,7 +16,22 @@ class InputArchive;
 namespace torch {
 namespace data {
 namespace samplers {
+/*
+3.4 Sampler in C++
+因为某些公司是C++开发，他们也有迫切的使用pytorch的需求，所以pytorch也提供了C++ API，我们接下来就看看如何实现。
 
+3.4.1 定义
+其类定义在：torch\csrc\api\include\torch\data\samplers\distributed.h
+
+我们可以看到，DistributedSampler 是基类，主要成员变量是：
+    size_t size_ 文件大小
+    size_t num_replicas_ 副本数目
+    size_t rank_ 本sampler 对应哪个进程或者GPU
+    size_t epoch 本次训练的epoch
+    bool allow_duplicates_ 是否允许备份
+接下来是两个派生类： DistributedRandomSampler 和 DistributedSequentialSampler。
+
+*/
 /// A `Sampler` that selects a subset of indices to sample from and defines a
 /// sampling behavior. In a distributed setting, this selects a subset of the
 /// indices depending on the provided num_replicas and rank parameters. The

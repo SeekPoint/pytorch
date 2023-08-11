@@ -205,6 +205,15 @@ def _generate_state(base_seed, worker_id):
         state.append(data_val)
     return state
 
+'''
+_worker_loop 是 worker进程的主函数
+    就是通过index_queue, data_queue与主进程交互。
+        从index_queue获取新的数据index；
+        如果没有设置本worker结束，就使用fetcher获取数据。
+        然后把数据放入data_queue，并且通知主进程，
+        这里需要注意，data_queue是传入的参数，
+        如果设置了pin memory，则传入的是worker_result_queue, 否则传入data_queue。
+'''
 def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                  auto_collation, collate_fn, drop_last, base_seed, init_fn, worker_id,
                  num_workers, persistent_workers, shared_seed):
