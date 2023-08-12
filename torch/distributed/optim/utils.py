@@ -10,6 +10,10 @@ from .functional_rmsprop import _FunctionalRMSprop
 from .functional_rprop import _FunctionalRprop
 from .functional_sgd import _FunctionalSGD
 
+'''
+DistributedOptimizer 的定义其实看不到啥东西，这是因为 Python 的语言特性，我们没办法在统一地方看到类的成员变量，但是有一个 functional_optim_map 值得我们关注。 
+这里是把每个内置优化器又配置了一个对应的新优化器，比如 optim.Adagrad 对应的是 _FunctionalAdagrad，我们就选择一个新优化器看看。
+'''
 # dict to map a user passed in optimizer_class to a functional
 # optimizer class if we have already defined inside the
 # distributed.optim package, this is so that we hide the

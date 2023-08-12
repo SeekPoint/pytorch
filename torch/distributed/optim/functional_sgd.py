@@ -7,6 +7,12 @@ from torch import Tensor
 
 __all__: List[str] = []
 
+'''
+optim.SGD 对应的是 _FunctionalSGD。其代码位于 torch/distributed/optim/functional_sgd.py。
+具体是定义一个与TorchScript兼容的函数式SGD优化器，PyTorch 将以函数的方式使用这些优化器。
+在更新参数时，PyTorch 不使用 param.grad，而是显式地允许分布式优化器将梯度传递给 step 函数。
+注意：此优化器应该仅由分布式优化器内部使用，而不是向用户公开
+'''
 # Define a TorchScript compatible Functional SGD Optimizer
 # where we use these optimizer in a functional way.
 # Instead of using the `param.grad` when updating parameters,

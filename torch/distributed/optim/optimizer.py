@@ -59,6 +59,8 @@ class _ScriptLocalOptimizer(nn.Module):
 
 # TODO (wanchaol): remove/merge this with ScriptLocalOptimizer once
 # we have converted all to functional optimizer in distributed.optim
+# _LocalOptimizer 是本地优化器，其运行在远端worker节点之上，master 拥有这些优化器的代理。
+#_LocalOptimizer 的 step 首先获取分布式梯度，然后用这个梯度进行参数优化。
 class _LocalOptimizer:
     # Ideally we would only need to share a lock for instances of
     # _LocalOptimizer that deal with the same parameters. We are
@@ -71,21 +73,27 @@ class _LocalOptimizer:
 
     def __init__(self, optim_cls, local_params_rref, *args, **kwargs):
         self._local_params = [rref.local_value() for rref in local_params_rref]
-        self.optim = optim_cls(self._local_params, *args, **kwargs)
+
+        #优化器还是普通的优化器，因为优化器代码还是之前的，只是优化的参数对象变成了异地节点参数
+        self.optim = optim_cls(self._local_params,   # 用参数代理初始化
+                               *args,
+                               **kwargs)
 
     def step(self, autograd_ctx_id):
+        # 获取到分布上下文里面计算好的梯度
         all_local_grads = dist_autograd.get_gradients(autograd_ctx_id)
 
         with _LocalOptimizer.global_lock:
             for param, grad in all_local_grads.items():
                 param.grad = grad
-            self.optim.step()
+            self.optim.step() # 参数优化
 
-
+# _new_local_optimizer 是生成了_LocalOptimizer
 def _new_local_optimizer(optim_cls, local_params_rref, *args, **kwargs):
     return rpc.RRef(_LocalOptimizer(optim_cls, local_params_rref, *args, **kwargs))
 
-
+# 4.5.1 本地优化
+# _local_optimizer_step 就是得到 _LocalOptimizer，然后调用其 step。
 def _local_optimizer_step(local_optim_rref, autograd_ctx_id):
     local_optim = local_optim_rref.local_value()
     local_optim.step(autograd_ctx_id)
@@ -107,7 +115,7 @@ def _script_local_optimizer_step(
     local_optim = local_optim_rref.local_value()
     local_optim.step(autograd_ctx_id)
 
-
+# 用 _wait_for_all 等待异步完成。
 def _wait_for_all(rpc_futs):
     # TODO: improve error propagation
     exception = None
@@ -122,7 +130,55 @@ def _wait_for_all(rpc_futs):
         raise exception
     return results
 
+'''
+DistributedOptimizer 得到了分散在 workers 之上参数的远端引用，然后对于这些参数在本地运行优化器。
+对于单个worker来说，如果它接受到来自相同或不同客户端的~torch.distributed.optim.DistributedOptimizer.step的并发调用，
+则这些调用将会在这个worker之上串行进行，因为每个worker的优化器一次只能处理一组梯度。
 
+
+对应的逻辑如下：
+    ref1, ref2 是远端待优化的参数，都是 torch.rand((3, 3))。
+    optim_rref1，optim_rref2 分别是 Node 2，Node 3上本地优化器的 rref。
+                                                      +----------------------------------+
++--------------------------------------------+        | Node 2                   worker 1|
+| Node 1                              master |        |                                  |
+|                                            |        |    +--------------------------+  |
+|                                            |        |    | _LocalOptimizer          |  |
+|  +---------------------------------+       |        |    |                          |  |
+|  | DistributedOptimizer            |       |        |    |                          |  |
+|  |                                 |       |        |    |   optim = _FunctionalSGD |  |
+|  |                                 |       |        |    |                          |  |
+|  |     remote_optimizers = [       |       |        |    |   _local_params = rref1  |  |
+|  |                optim_rref1 +------------------------> |                     +    |  |
+|  |                ,                |       |        |    |                     |    |  |
+|  |                optim_rref2 +-------+    |        |    +--------------------------+  |
+|  |                ]                |  |    |        |                          |       |
+|  |                                 |  |    |        |                          v       |
+|  |                                 |  |    |   +-------------->   torch.rand((3, 3))   |
+|  |                                 |  |    |   |    |                                  |
+|  +---------------------------------+  |    |   |    +----------------------------------+
+|                                       |    |   |
+|                                       |    |   |    +-----------------------------------+
+|                                       |    |   |    | Node 3                   worker 2 |
+|                                       |    |   |    |                                   |
+|                                       |    |   |    |     +--------------------------+  |
+|                                       |    |   |    |     | _LocalOptimizer          |  |
+|                                       |    |   |    |     |                          |  |
+|                                       +-----------------> |                          |  |
+|                                            |   |    |     |   optim = _FunctionalSGD |  |
+|                                            |   |    |     |                          |  |
+|                             rref1 +------------+    |     |   _local_params = rref2  |  |
+|                                            |        |     |                     +    |  |
+|                                            |        |     |                     |    |  |
+|                             rref2 +------------+    |     +--------------------------+  |
+|                                            |   |    |                           |       |
+|                                            |   |    |                           |       |
+|                                            |   |    |                           v       |
+|                                            |   +--------------->   torch.rand((3, 3))   |
+|                                            |        |                                   |
++--------------------------------------------+        +-----------------------------------+
+
+'''
 class DistributedOptimizer:
     """
     DistributedOptimizer takes remote references to parameters scattered
@@ -182,13 +238,19 @@ class DistributedOptimizer:
 
     __ https://github.com/pytorch/tutorials/pull/1465
     """
-
+    '''
+    这部分代码主要对应了：分布式优化器在每个 worker 节点上创建其本地Optimizer的实例，并将持有这些本地优化器的 RRef。
+    具体结合我们之前示例代码来看，params_rref 就是需要优化的参数列表，每个会对应一个优化器，
+    就是 DistributedOptimizer 生成了所有节点上的优化器，以 rpc.RRef(_LocalOptimizer) 形式保存在 self.remote_optimizers 之中。
+    '''
     def __init__(self, optimizer_class, params_rref, *args, **kwargs):
+
         torch._C._log_api_usage_once("torch.distributed.optim.DistributedOptimizer")
         per_worker_params_rref = defaultdict(list)
         for param in params_rref:
             per_worker_params_rref[param.owner()].append(param)
 
+        # 拿到对应的本地优化器类
         if optimizer_class in functional_optim_map and jit._state._enabled:
             optim_ctor = functional_optim_map.get(optimizer_class)
         else:
@@ -205,20 +267,25 @@ class DistributedOptimizer:
                 "Global Interpreter Lock (GIL). Please file an issue if you need this "
                 "optimizer in TorchScript. "
             )
-            optimizer_new_func = _new_local_optimizer
+            optimizer_new_func = _new_local_optimizer # 下面会介绍
 
         remote_optim_futs = []
         for worker, param_rrefs in per_worker_params_rref.items():
             remote_optim_rref_fut = rpc.rpc_async(
-                worker,
-                optimizer_new_func,
+                worker,  # 在 worker 之上生成其本地优化器
+                optimizer_new_func,  # rpc_async 会调用
                 args=(optim_ctor, param_rrefs) + args,
                 kwargs=kwargs,
             )
             remote_optim_futs.append(remote_optim_rref_fut)
 
-        self.remote_optimizers = _wait_for_all(remote_optim_futs)
+        self.remote_optimizers = _wait_for_all(remote_optim_futs) # 本地保存的远端各个节点上优化器
 
+    '''
+    DistributedOptimizer 在优化时候，会遍历保存的优化器，逐一调用 _local_optimizer_step。
+    为什么可以在Node 1 之上统一调用这些远端优化器？
+    因为最后更新所有参数完毕之后，才能调用下一轮前向传播，所以可以统一调用然后等待都完成。
+    '''
     def step(self, context_id):
         """
         Performs a single optimization step.
@@ -241,11 +308,11 @@ class DistributedOptimizer:
             optimizer_step_func = _local_optimizer_step
 
         rpc_futs = []
-        for optimizer in self.remote_optimizers:
-            rpc_futs.append(
+        for optimizer in self.remote_optimizers: # 遍历 _LocalOptimizer
+            rpc_futs.append(   # 异步异地调用
                 rpc.rpc_async(
                     optimizer.owner(),
-                    optimizer_step_func,
+                    optimizer_step_func, # 逐一调用
                     args=(optimizer, context_id),
                 )
             )

@@ -243,7 +243,7 @@ const c10::Dict<torch::Tensor, torch::Tensor> DistAutogradContext::
     auto& event = entry.second;
     event.block(impl_.getStream(event.device()));
   }
-  return accumulatedGrads_;
+  return accumulatedGrads_; // 分布式梯度累积在这里
 }
 
 void DistAutogradContext::runGradCallbackForVariable(

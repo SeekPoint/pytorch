@@ -17,6 +17,66 @@ class RecvRpcBackward;
 
 // DistAutogradContext which stores information for a single distributed
 // autograd pass on a worker.
+/*
+所以我们逻辑拓展如下：
+
+DistributedOptimizer 调用 optim_rref1 和 optim_rref2 的 step 方法在远端 worker 之上进行运行，优化。
+Worker 1 和 worker 2 之上的 _LocalOptimizer 分别获得对本地 _local_params_ 进行优化。
+优化结果在 _Node DistAutogradContext 之中的accumulatedGrads_累积。
+这样，整个模型的各个子模型就在各个 Node 之上以统一的步骤进行训练/优化。
+
+                                                   +--------------------------------------+
+                                                   | Node 2                      worker 1 |
+                                                   |                                      |
+                                                   |    +--------------------------+      |
+                                                   |    | DistAutogradContext      |      |
+                                                   |    |                          |  3   |
+                                                   |    |     accumulatedGrads_ <------+  |
++-----------------------------------------+        |    |                          |   |  |
+| Node 1                           master |        |    +--------------------------+   |  |
+|                                         |        |    +--------------------------+   |  |
+| +-------------------------------+       |  +--------> | _LocalOptimizer          |   |  |
+| | DistributedOptimizer          |       |  |     |    |                          |   |  |
+| |                               |       |  |     |    |   optim = _FunctionalSGD |   |  |
+| |                               |       |  |     |    |                          |   |  |
+| |   remote_optimizers = [       |       |  |     |    |   _local_params = rref1  |   |  |
+| |              optim_rref1 +---------------+     |    |                     +    |   |  |
+| |              ,                |       |     +---------> step() +-------------------+  |
+| |              optim_rref2 +-------+    |     |  |    |                     |    |      |
+| |                               |  |    |     |  |    +--------------------------+      |
+| |              ]           +----------------->+  |                        2 |           |
+| |                          |    |  |    |        |                          v           |
+| |                          |    |  |    |   +----------------> torch.rand((3, 3))       |
+| |                        1 |    |  |    |   |    |                                      |
+| |   step() {               |    |  |    |   |    +--------------------------------------+
+| |                          |    |  |    |   |
+| |     optim_rref1.step()+--+    |  |    |   |    +--------------------------------------+
+| |                               |  |    |   |    | Node 3                      worker 2 |
+| |     optim_rref2.step()+--+    |  |    |   |    |                                      |
+| |                          |    |  |    |   |    |     +--------------------------+     |
+| |   }                      |    |  |    |   |    |     | _LocalOptimizer          |     |
+| |                          |    |  |    |   |    |     |                          |     |
+| +-------------------------------+  +-----------------> |                          |     |
+|                            |            |   |    |     |   optim = _FunctionalSGD |     |
+|                            |            |   |    |     |                          |     |
+|                          1 |            |   |    |     |   _local_params = rref2  |     |
+|                            |            |   |    |     |                     +    |  3  |
+|                            +-----------------------------> step() +------------------v  |
+|                                         |   |    |     |                     |    |  |  |
+|                         rref1 +-------------+    |     +--------------------------+  |  |
+|                                         |        |                        2  |       |  |
+|                                         |        |                           v       |  |
+|                         rref2 +-------------------------------> torch.rand((3, 3))   |  |
+|                                         |        |                                   |  |
++-----------------------------------------+        |     +--------------------------+  |  |
+                                                   |     | DistAutogradContext      |  |  |
+                                                   |     |                          |  |  |
+                                                   |     |     accumulatedGrads_ <-----+  |
+                                                   |     |                          |     |
+                                                   |     +--------------------------+     |
+                                                   +--------------------------------------+
+
+*/
 class TORCH_API DistAutogradContext {
  public:
   using GradCallback = std::function<bool(torch::Tensor&)>;

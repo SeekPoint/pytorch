@@ -278,7 +278,7 @@ TORCH_LIBRARY_IMPL(aten, CatchAll, m) {
     const auto& autogradContext =
         dist_autograd::DistAutogradContainer::getInstance().retrieveContext(
             context_id);
-    return autogradContext->getGradients();
+    return autogradContext->getGradients(); // 上下文
   });
 }
 
