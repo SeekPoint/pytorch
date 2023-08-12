@@ -33,6 +33,7 @@ class Copy(torch.autograd.Function):
     @staticmethod
     # type: ignore[override]
     def forward(ctx: Context, prev_stream: AbstractStream, next_stream: AbstractStream, *input,) -> Tensors:
+        # 这里会把拷贝操作的source，dst 都保存在上下文之中，反向操作时候会取出来
         ctx.prev_stream = prev_stream
         ctx.next_stream = next_stream
 
@@ -42,7 +43,7 @@ class Copy(torch.autograd.Function):
         with use_stream(prev_stream), use_stream(next_stream):
             for x in input:
                 if torch.is_tensor(x):
-                    y = x.to(get_device(next_stream), non_blocking=True)
+                    y = x.to(get_device(next_stream), non_blocking=True)  # 进行拷贝操作
                     output.append(y)
 
                     # 'prev_stream' is not where 'x' has been allocated.
@@ -57,6 +58,7 @@ class Copy(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Context, *grad_output: Tensor,) -> Tuple[Optional[Tensor], ...]:
+        # 取出来上下文保存的拷贝操作的src，dst。
         prev_stream = ctx.prev_stream
         next_stream = ctx.next_stream
 
@@ -65,7 +67,7 @@ class Copy(torch.autograd.Function):
 
         with use_stream(prev_stream), use_stream(next_stream):
             for x in reversed(grad_output):
-                y = x.to(get_device(prev_stream), non_blocking=True)
+                y = x.to(get_device(prev_stream), non_blocking=True)  # 进行拷贝操作
                 grad_input.appendleft(y)
 
                 # 'next_stream' is not where 'x' has been allocated.
@@ -77,7 +79,7 @@ class Copy(torch.autograd.Function):
         grad_streams: Tuple[Optional[Tensor], ...] = (None, None)
         return grad_streams + tuple(grad_input)
 
-
+#Wait 算子代码如下，主要就是起到同步作用，等待拷贝操作的完成
 class Wait(torch.autograd.Function):
     """Synchronizes a stream to another stream.
 

@@ -17,7 +17,7 @@ __all__: List[str] = ["get_phony"]
 
 _phonies: Dict[Tuple[torch.device, bool], Tensor] = {}
 
-
+#Phony是没有空间的张量，因为它不需要任何梯度累积，所以可以在 autograd 图中构建任意的依赖。
 def get_phony(device: torch.device, *, requires_grad: bool) -> Tensor:
     """Gets a phony. Phony is tensor without space. It is useful to make
     arbitrary dependency in a autograd graph because it doesn't require any

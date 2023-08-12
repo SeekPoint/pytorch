@@ -416,6 +416,7 @@ class Pipe(Module):
 
         return super().to(*args, **kwargs)
 
+    #_ensure_copy_streams 就是针对每一个设备的每一个macro-batch，都生成了一个专用流。
     def _ensure_copy_streams(self) -> List[List[AbstractStream]]:
         """Ensures that :class:`Pipe` caches CUDA streams for copy.
 
@@ -429,6 +430,37 @@ class Pipe(Module):
                 self._copy_streams.append([new_stream(device) for _ in range(self.chunks)])
 
         return self._copy_streams
+    '''
+    假设有3个devices，模型被分成3个子网络，小批次被分割成 4个微批次。则具体如下：就是说 _copy_streams[i][j] 之中，i 表示 device 的序列，j 表示 batch 序列。（后续的文章之中，有对如何使用的详述）
+
+                  +----------------------------------+
+                  | _copy_streams                    |
+                  |                                  |
+                  |     +----------------------+     |
+                  |     |                      |     |
+                  |     |  [1,1] [1,2] [1,3]+--------------------------------+
+                  |     |                      |     |                       |
+                  |     |  [2,1] [2,2] [2,3]+------------------------------------------+
+                  |     |                      |     |                       |         |
++-------------------------+[3,1] [3,2] [3,3]   |     |                       |         |
+|                 |     |                      |     |                       |         |
+|                 |     +----------------------+     |                       |         |
+|                 |                                  |                       |         |
+|                 +----------------------------------+                       |         |
+|                                                                            |         |
+|                                                                            v         |
+|   +------------------------------------------------------------------------+------+  |
+|   | Stream of device 1, Stream of device 1, Stream of device 1, Stream of device 1|  |
+|   +-------------------------------------------------------------------------------+  |
+|                                                                                      |
+|   +-------------------------------------------------------------------------------+  |
+|   | Stream of device 2, Stream of device 2, Stream of device 2, Stream of device 2+<-+
+|   +-------------------------------------------------------------------------------+
+|
+|   +-------------------------------------------------------------------------------+
++-->+ Stream of device 3, Stream of device 3, Stream of device 3, Stream of device 3|
+    +-------------------------------------------------------------------------------+
+    '''
 
     def forward(self, *inputs) -> RRef:
         """
