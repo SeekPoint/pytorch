@@ -16,7 +16,16 @@ __all__: List[str] = ["CPUStreamType", "new_stream", "current_stream", "default_
                       "use_device", "use_stream", "get_device", "wait_stream", "record_stream",
                       "is_cuda", "as_cuda"]
 
+'''
+2.1 Stream
+Stream 类是用来封装 CUDA stream 和 CPU stream。代码位于：torchgpipe/stream.py。
 
+CUDA流表示一个GPU操作队列，即某个设备绑定的，按照顺序执的核（kernel）序列。
+我们可以把一个流看作是GPU之上的一个任务。
+用户向流的队列上添加一系列操作，GPU会按照添加到流中的先后顺序而依次执行这一系列操作。
+在同一个流之中，所有操作是串行序列化，因此这些操作永远不会并行。
+因此，要想并行，两个操作必须位于不同的 stream 中。不同流中的核函数可以交错，甚至可能重叠
+'''
 class CPUStreamType:
     pass
 
@@ -59,7 +68,7 @@ def use_device(device: torch.device) -> Generator[None, None, None]:
     with torch.cuda.device(device):
         yield
 
-
+#torch.cuda.stream(stream) 的作用是选择给定流的上下文管理器。
 @contextmanager
 def use_stream(stream: AbstractStream) -> Generator[None, None, None]:
     """:func:`torch.cuda.stream` for either CPU or CUDA stream."""

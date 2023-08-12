@@ -174,16 +174,16 @@ def check(first_device, *inputs) -> None:
 
 def scatter(*inputs, chunks: int) -> List[Batch]:
     """Splits an input mini-batch into multiple micro-batches."""
-    if len(inputs) == 1 and isinstance(inputs[0], Tensor):
+    if len(inputs) == 1 and isinstance(inputs[0], Tensor): # 如果是张量，则直接分割
         return [Batch(x) for x in inputs[0].chunk(chunks)]
 
     batches: List[Any] = [[] for _ in range(chunks)]
     # Actual number of chunks produced
     num_chunks = -1
-    for input in inputs:
+    for input in inputs: # 如果是张量数组，则遍历
         if torch.is_tensor(input):
             # Chunk only tensors.
-            tensors = input.chunk(chunks)
+            tensors = input.chunk(chunks)  # 对于每一个张量进行分割
 
             # Validate number of chunks equal across all inputs.
             if num_chunks != -1 and num_chunks != len(tensors):
@@ -204,9 +204,9 @@ def scatter(*inputs, chunks: int) -> List[Batch]:
     # Truncate to actual number of chunks
     batches = batches[:num_chunks]
 
-    return [Batch(x) for x in batches]
+    return [Batch(x) for x in batches] # 映射成 Batch 列表返回
 
-
+# gather 方法则是把scatter的结果重新聚集起来，就是一个逆向操作
 def gather(outputs: List[Batch]):
     """Concatenates output micro-batches into a mini-batch."""
     output: Any
