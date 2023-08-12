@@ -462,6 +462,14 @@ class Pipe(Module):
     +-------------------------------------------------------------------------------+
     '''
 
+    '''
+    GPipe 的前向传播之中做了如下操作：
+        利用 scatter 函数把输入分割，就是把 mini-batch 分割为 micro-batches。
+        利用 _ensure_copy_streams 方法针对每个设备生成新的 CUDA stream。
+        生成一个 Pipeline，并且运行。
+        运行结束之后，利用 gather 方法把micro-batches 合并成一个 mini-batch。
+    因此我们可以看到，对于每次迭代的 forward 操作，都会生成一个 Pipeline 类进行操作，返回给调用者。
+    '''
     def forward(self, *inputs) -> RRef:
         """
         Processes a single input mini-batch through the pipe and returns an

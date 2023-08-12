@@ -362,11 +362,12 @@ class Pipeline:
         skip_trackers = [SkipTrackerThroughPotals(skip_layout) for _ in batches]
 
         for schedule in _clock_cycles(m, n): # 这里使用，给出了执行序列计划，后续按照这个来执行
-            self.fence(batches, schedule, skip_trackers) # 构建后向传播依赖关系
-            self.compute(batches, schedule, skip_trackers) # 进行计算
+            self.fence(batches, schedule, skip_trackers) # 构建后向传播依赖关系  # 拷贝，设定依赖
+            self.compute(batches, schedule, skip_trackers) # 进行计算 # 启动各种Task
 
     #在 Pipeline 之中我们可以看到具体的使用方法，fence 方法（省略部分代码）利用 depend 来构建后向传播的依赖关系，确保 batches[i-1] 在 batches[i] 之后完成。
     #建立了图例之中的行，列 两种依赖关系。
+    #在 Pipeline 之中，fence 方法（省略部分代码）利用 depend 来构建后向传播的依赖关系。
     def fence(
         self, batches: List[Batch], schedule: List[Tuple[int, int]], skip_trackers: List[SkipTrackerThroughPotals],
     ) -> None:
@@ -391,7 +392,7 @@ class Pipeline:
             # 建立跨设备依赖关系，指定了 device[j-1] 的输出是 device[i] 的输入
             if j != 0:
                 prev_stream = copy_streams[j - 1][i]  # 拿到src设备的拷贝流
-                _copy(batches[i], prev_stream, next_stream) # 建立跨设备依赖关系
+                _copy(batches[i], prev_stream, next_stream) # 建立跨设备依赖关系  # 从之前的micro-batches进行拷贝
 
     '''
     batches[i] 这里是会变化的，比如 batches[0] 在经过 partitions[j] 的计算之后，会变成 batches[0][j]。
@@ -449,7 +450,7 @@ class Pipeline:
             partition = partitions[j]
 
             # Synchronize with the copied input. ([1] in the diagram)
-            if j != 0:
+            if j != 0:  # 等待拷贝结束
                 _wait(batch, copy_streams[j][i], streams[j]) # 这里保证了同步完成
 
             # Determine whether checkpointing or not.
@@ -486,9 +487,10 @@ class Pipeline:
                 del compute
 
             # Compute tasks in parallel. ([2] in the diagram)
-            self.in_queues[j].put(task)
+            self.in_queues[j].put(task)  # 并行执行操作
 
         for i, j in schedule:
+            # 等待运行结果
             ok, payload = self.out_queues[j].get()  # 获取 worker 的前向计算结果，就是 第 j 个device 对 第 i 个 batch 的计算结果
 
             # Hold the first exception.
@@ -502,7 +504,7 @@ class Pipeline:
 
             # The copy stream synchronizes to copy the output. ([3] in the
             # diagram)
-            if j != n - 1:
+            if j != n - 1: # 拷贝输出
                 _wait(batch, streams[j], copy_streams[j][i])
 
             # Finalize tasks. If checkpointing is enabled, here the
@@ -584,5 +586,71 @@ c = {Tensor: 2} tensor([2., 3.], requires_grad=True)
                     | +--------------------+                         |                            | +-------------------+                         |
                     +------------------------------------------------+                            +-----------------------------------------------+
 
+
+'''
+
+
+
+'''
+我们总结梳理一下大致业务逻辑（并行逻辑）：
+
+系统调用 spawn_workers 来生成若干 workers。
+spawn_workers 为每个 device 生成了一个 Thread，这个 Thread 的执行函数是 worker。spawn_workers 内部也会针对每一个device生成一个 in_queue, out_queue。所以可保证每个device之上是串行来执行业务操作。
+这些 queues 被添加到 (in_queues, out_queues) 之中。然后把 (in_queues, out_queues) 返回给 Pipeline 主线程。之后就是使用 (in_queues, out_queues) 作为各个task 之间传递信息的上下文。
+Pipeline 主线程得到 (in_queues, out_queues) 之后，使用clock_cycles 算法生成一系列迭代，每个迭代是一个schedule。
+对于每个迭代（schedule），先用fence来进行拷贝stream & 设定依赖，然后使用 compute 来进行训练。这就顺序启动了多个 compute。
+在每个 compute 之中，遍历这个 schedule，对于其中 (i, j) 运行一个Task，即找到其device对应的in_queue，把Task插进去。
+Worker Thread 阻塞在 in_queue 之上，如果发现有内容，就读取 Task，运行。虽然多个 compute 是顺序执行，但是因为compute 只是一个插入queue操作，可以立即返回。而多个 worker Thread 阻塞在 queue 之上，这之后是可以并行训练的。
+Worker Thread 把运行结果插入到 out_queue之中。
+compute 方法会取出 out_queue 之中的运行结果，进行后续处理。
+具体如下图。
+
+         +-------------------------------------------------------------------+       +-----------------------------------------+
+         | Pipeline                                                          |  1    | spawn_workers                           |
+         |                                     spawn_workers(devices)  +-----------> |                                         |
+         |                                                                   |       | +-------------------------------------+ |
+         |               for schedule in clock_cycles(m, n)                  |       | | workers                             | |
+         |                     +                                             |       | |                                     | |
+         |                     | 2                                           |       | |                                     | |
+         |                     |                                             |       | |  device 1 : in_queue 1, out_queue 1 | |
+         |                     +-----------+---------------+                 |       | |                                     | |
+         |                     |           |               |                 |       | |  device 2 : in_queue 2, out_queue 2 | |
+         |                     v           v               v                 |       | |                                     | |
+         |  +------------------+------+        +-----------+--------------+  |       | |  device 3 : in_queue 3, out_queue 3 | |
+         |  | compute                 |        | compute                  |  |       | |                                     | |
+         |  |                         |  3     |                          |  |       | |                                     | |
+         |  |  in_queues[j].put(task) |        |   in_queues[j].put(task) |  |       | +-------------------------------------+ |
+         |  |                         | ...... |                          |  |       |                                         |
+         |  |  out_queues[j].get()    |        |   out_queues[j].get()    |  |       +-----------------------------------------+
+         |  |                         |        |                          |  |
+         |  +----------+---+----------+        +----------------+----+----+  |
+         |             |   ^                                    ^    |       |
+         |             |   |                                    |    |       |
+         +-------------------------------------------------------------------+
+                     7 |   | 4                                7 |    | 4
+                       |   |                                    |    |
+                       v   |                                    |    v
+                 +-----+---+------------------------------------+----+-----+
+                 |                in_queues        out_queues              |
++------------>   |                                                         |  <--------------------+
+|                +-----+---------------------------------------------+-----+                       |
+| 6                    |                                             |                           6 |
+|                    5 |                                             | 5                           |
+|                      |                                             |                             |
+|                      |                                             |                             |
+|    +-------------------------------------+          +-------------------------------------+      |
+|    | Thread 1        |        device 1   |          | Thread 2     |             device 3 |      |
+|    |                 |                   |          |              |                      |      |
+|    | +---------------------------------+ |          | +---------------------------------+ |      |
+|    | | Worker        |                 | |          | | Worker     |                    | |      |
+|    | |               v                 | |          | |            v                    | |      |
+|    | |  task = in_queue.get()          | |          | |   task = in_queue.get()         | |      |
+|    | |                                 | |  ......  | |                                 | |      |
+|    | |  batch = task.compute()         | |          | |   batch = task.compute()        | |      |
+|    | |                                 | |          | |                                 | |      |
++--------+out_queue.put((task, batch)))  | |          | |   out_queue.put((task, batch))+--------->+
+     | |                                 | |          | |                                 | |
+     | +---------------------------------+ |          | +---------------------------------+ |
+     +-------------------------------------+          +-------------------------------------+
 
 '''
