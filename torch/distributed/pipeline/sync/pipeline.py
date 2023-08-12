@@ -60,7 +60,12 @@ def _wait(batch: Batch, prev_stream: AbstractStream, next_stream: AbstractStream
     # Gradients are only supported for float Tensors.
     batch[:] = tuple([x.detach() if torch.is_tensor(x) and not x.is_floating_point() else x for x in batch])
 
-
+'''
+我们再来看看代码。首先是生成时钟周期，这里：
+    min(1+k, n) 就是在 k 时钟时候，可以启动的最大device数目（partition）。
+    max(1+k-m, 0) 就是在 k 时钟时候，可以启动的最小微batch（micro-batch）。
+所以最终返回的序列就是k 时钟时候，可以启动的（index of micro-batch，index of partition）序列。
+'''
 def _clock_cycles(m: int, n: int) -> Iterable[List[Tuple[int, int]]]:
     """Generates schedules for each clock cycle."""
     # m: number of micro-batches
@@ -76,9 +81,111 @@ def _clock_cycles(m: int, n: int) -> Iterable[List[Tuple[int, int]]]:
     # 2 (2,0) (1,1) (0,2)
     # 3       (2,1) (1,2)
     # 4             (2,2)
+    # 我们解析一下，这里 k 就是时钟数，从1开始，最多时钟序号就是 m+n-1。
+    # min(1+k, n) 就是在 k 时钟时候，可以启动的最大device数目
+    # max(1+k-m, 0) 就是在 k 时钟时候，可以启动的最小batch
     for k in range(m + n - 1):
         yield [(k - j, j) for j in range(max(1 + k - m, 0), min(1 + k, n))]
 
+
+'''
+设定 m = 4, n =3，solve(4,3) 的输出是：
+
+[(0, 0)]
+[(1, 0), (0, 1)]
+[(2, 0), (1, 1), (0, 2)]
+[(3, 0), (2, 1), (1, 2)]
+[(3, 1), (2, 2)]
+[(3, 2)]
+因为论文有一个示例图，而这个图和注释&代码不完全一致，为了更好的说明，我们就按照图上来，因为图片是从 F1,1
+开始，所以我们把注释修正以下:
+
+# 0 (0,0)                   ----> clock 1 运行图上的 (1,1)
+# 1 (1,0) (0,1)             ----> clock 2 运行图上的 (2,1) (1,2)
+# 2 (2,0) (1,1) (0,2)       ----> clock 3 运行图上的 (3,1) (2,2) (1,3)
+# 3       (2,1) (1,2)       ----> clock 4 运行图上的 (3,2) (2,3)
+# 4             (2,2)       ----> clock 5 运行图上的 (3,3)
+我们把 solve代码修改下，为了打印正确的index，这样大家就可以更好的把代码和图片对应起来了。
+
+m=4 # m: number of micro-batches
+n=3 # n: number of partitions
+for k in range(m + n - 1):
+    print( [(k - j + 1 , j +1 ) for j in range(max(1 + k - m, 0), min(1 + k, n))] )
+
+打印是：
+[(1, 1)]  # 第 1 轮训练计划 & 数据
+[(2, 1), (1, 2)] # 第 2 轮训练计划 & 数据
+[(3, 1), (2, 2), (1, 3)] # 第 3 轮训练计划 & 数据
+[(4, 1), (3, 2), (2, 3)] # 第 4 轮训练计划 & 数据
+[(4, 2), (3, 3)] # 第 5 轮训练计划 & 数据
+[(4, 3)] # 第 6 训练计划 & 数据
+我们把流水线的图再祭出来看看。
+
+在这里插入图片描述
+
+我们把上面的输出按照流水线的图绘制一下作为比对。
+
+可以看到，前 4 个时钟周期内，分别有 4 个 micro-batch 进入了 cuda:0，分别是(1,1) (2,1) (3,1) (4,1) 。然后按照 clock_cycles 算法给出的顺序，每次迭代（时钟周期）内执行不同的schedule，经过了 6 个时钟周期之后，完成了第一轮 forward 操作。这就形成了流水线。
+
+流水线优势在于，如果 number of micro-batches 配置的合适，那么可以在每个时钟周期内，最大程度的让所有设备都运行起来。与之对比，原生流水线每一时间只能让一个设备互活跃。
+
+           +          +          +          +          +          +          +
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+ cuda:0    |  (1,1)   |   (2,1)  |  (3,1)   |   (4,1)  |          |          |
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+ cuda:1    |          |   (1,2)  |  (2,2)   |   (3,2)  |  (4,2)   |          |
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+ cuda:2    |          |          |  (1,3)   |   (2,3)  |  (3,3)   |  (4,3)   |
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+           |          |          |          |          |          |          |
+           | clock 1  |  clock 2 |  clock 3 |  clock 4 |  clock 5 |  clock 6 |
+           +          +          +          +          +          +          +
+
++------------------------------------------------------------------------------>  Time
+
+具体数据batch的走向是：
+
+         +             +            +             +            +            +             +
+         |             |            |             |            |            |             |
+ cuda:0  |    (1,1)    |   (2,1)    |   (3,1)     |   (4,1)    |            |             |
+         |      +      |     +      |       +     |       +    |            |             |
+         |      |      |     |      |       |     |       |    |            |             |
+         |      |      |     |      |       |     |       +----------+      |             |
+         |      |      |     |      |       +-----------+      |     |      |             |
+         |      |      |     +------------+       |     |      |     |      |             |
+         |      |      |            |     |       |     |      |     |      |             |
+         |      +------------+      |     |       |     |      |     |      |             |
+         |             |     |      |     |       |     |      |     |      |             |
+         |             |     |      |     v       |     v      |     v      |             |
+         |             |     v      |             |            |            |             |
+ cuda:1  |             |   (1,2)    |   (2,2)     |   (3,2)    |  (4,2)     |             |
+         |             |     +      |     +       |      +     |      +     |             |
+         |             |     |      |     |       |      |     |      |     |             |
+         |             |     |      |     |       |      |     |      +-------------+     |
+         |             |     |      |     |       |      +----------+       |       |     |
+         |             |     |      |     +------------+       |    |       |       |     |
+         |             |     +-----------+        |    |       |    |       |       |     |
+         |             |            |    |        |    v       |    v       |       v     |
+         |             |            |    v        |            |            |             |
+ cuda:2  |             |            |   (1,3)     |   (2,3)    |  (3,3)     |     (4,3)   |
+         |             |            |             |            |            |             |
+         |             |            |             |            |            |             |
+         |             |            |             |            |            |             |
+         |   clock 1   |  clock 2   |   clock 3   |  clock 4   |  clock 5   |     clock 6 |
+         +             +            +             +            +            +             +
+
++----------------------------------------------------------------------------------->  Time
+
+
+'''
 
 class Pipeline:
     """The pipeline parallelism for Pipe."""
@@ -98,6 +205,7 @@ class Pipeline:
         self.checkpoint_stop = checkpoint_stop
         (self.in_queues, self.out_queues) = create_workers(devices)
 
+    #在 Pipeline 类之中，我们可以看到，就是按照时钟周期来启动计算，这样在前向传播之中，就按照这个序列，像水波纹一样扩散。
     def run(self, batches: List[Batch]) -> None:
         """Runs pipeline parallelism.
 
@@ -113,9 +221,9 @@ class Pipeline:
 
         skip_trackers = [SkipTrackerThroughPotals(skip_layout) for _ in batches]
 
-        for schedule in _clock_cycles(m, n):
-            self.fence(batches, schedule, skip_trackers)
-            self.compute(batches, schedule, skip_trackers)
+        for schedule in _clock_cycles(m, n): # 这里使用，给出了执行序列计划，后续按照这个来执行
+            self.fence(batches, schedule, skip_trackers) # 构建后向传播依赖关系
+            self.compute(batches, schedule, skip_trackers) # 进行计算
 
     def fence(
         self, batches: List[Batch], schedule: List[Tuple[int, int]], skip_trackers: List[SkipTrackerThroughPotals],
