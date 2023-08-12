@@ -207,8 +207,8 @@ c10::intrusive_ptr<JitFuture> pyRpcBuiltin(
   // Release GIL since args and kwargs processing is done.
   py::gil_scoped_release release;
   auto scriptCall = std::make_unique<ScriptCall>(op, std::move(stack));
-  auto agent = RpcAgent::getCurrentRpcAgent();
-  return toPyJitFuture(sendMessageWithAutograd(
+  auto agent = RpcAgent::getCurrentRpcAgent(); // 获取当前agent
+  return toPyJitFuture(sendMessageWithAutograd(  // 发送请求
       *agent,
       dst,
       std::move(*scriptCall).toMessage(),

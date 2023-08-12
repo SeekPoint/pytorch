@@ -10,7 +10,13 @@
 namespace torch {
 namespace distributed {
 namespace rpc {
+/*Agent 在收到消息时候，会调用回调函数。
+而 RequestCallbackImpl 实现了回调逻辑。
+RequestCallbackImpl 是派生类，我们先来看看基类 RequestCallbackNoPython，
+结果找到了RequestCallback 这个接口，所以 RequestCallback 才是这个派生体系的基础。
 
+RequestCallbackNoPython 的定义在 torch/csrc/distributed/rpc/request_callback_no_python.h，
+*/
 // RequestCallback implementation with no Python dependencies.
 class TORCH_API RequestCallbackNoPython : public RequestCallback {
  public:

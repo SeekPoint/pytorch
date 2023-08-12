@@ -117,6 +117,17 @@ struct TORCH_API RpcRetryInfo {
 // will invoke the given ``RequestCallback`` to process received requests. It
 // should immediately become ready to serve request and accept response after
 // construction.
+/*
+2.2 RPC 代理
+dist.autograd 的相关功能都是基于 RPC 代理完成，所以我们需要仔细看看代理。
+
+2.2.1 RpcAgent
+这是用来传递RPC的代理，是收发 RPC消息的代理基类，其：
+
+提供了send API用来处理request 和 response。
+也配置了 cb_ 用来处理接收到的请求。
+WorkerInfo 是代理实例所在 worker 的全局唯一标示，包括name_和id_这两个成员变量。name_是全局唯一名字，id_是全局唯一ID。
+*/
 class TORCH_API RpcAgent {
  public:
   // `WorkerInfo` is the globally unique identifier for this RpcAgent instance.
@@ -146,6 +157,7 @@ class TORCH_API RpcAgent {
   // If ``message.isRequest()`` is true, the ``JitFuture`` will be
   // completed when the response arrives. For other message types, the Future
   // should be ignored by the caller.
+  // 给 to.id 代表的其他 RpcAgengt 发送一个消息，返回一个JitFuture，这个实现是异步的。
   virtual c10::intrusive_ptr<JitFuture> send(
       const WorkerInfo& to,
       c10::intrusive_ptr<Message> message,
@@ -257,9 +269,9 @@ class TORCH_API RpcAgent {
 
  protected:
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  const WorkerInfo workerInfo_;
+  const WorkerInfo workerInfo_; // 代理实例的全局唯一标示
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  const std::unique_ptr<RequestCallback> cb_;
+  const std::unique_ptr<RequestCallback> cb_; // 回调函数
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   std::atomic<std::chrono::milliseconds> rpcTimeout_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
@@ -273,7 +285,19 @@ class TORCH_API RpcAgent {
   std::atomic<bool> rpcAgentRunning_;
 
  private:
-  static std::shared_ptr<RpcAgent> currentRpcAgent_;
+ /*
+ 在 C++ 之中，静态成员变量有如下特点：
+
+其属于整个类所有。
+其生命期不依赖于任何对象，为程序的生命周期。
+可以通过类名直接访问公有静态成员变量。
+可以通过对象名访问一个类的公有静态成员变量。
+类的所有派生对象共享该类的静态成员变量。
+静态成员变量需要在该类外单独分配空间。
+静态成员变量在程序内部位于全局数据区。
+所以，我们可知RpcAgent::currentRpcAgent_ 可以认为就是全局变量，rpc 统一使用这个变量进行协调。具体通过 RpcAgent 的一些公有成员函数来完成这些功能。
+*/
+  static std::shared_ptr<RpcAgent> currentRpcAgent_;  // 全局代理
   // Add GIL wait time data point to metrics
   virtual void addGilWaitTime(const std::chrono::microseconds gilWaitTime) = 0;
   friend class PythonRpcHandler;

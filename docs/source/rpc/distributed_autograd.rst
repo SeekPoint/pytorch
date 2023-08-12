@@ -29,7 +29,7 @@ nodes. This can be implemented using :mod:`torch.distributed.rpc` as follows:
   t2 = torch.rand((3, 3), requires_grad=True)
 
   # Perform some computation remotely.
-  t3 = rpc.rpc_sync("worker1", my_add, args=(t1, t2))
+  t3 = rpc.rpc_sync("worker1", my_add, args=(t1, t2)) #首先来到 rpc_sync，发现其调用了_invoke_rpc。
 
   # Perform some computation locally based on remote result.
   t4 = torch.rand((3, 3), requires_grad=True)
@@ -294,7 +294,7 @@ As an example the complete code with distributed autograd would be as follows:
     t1 = torch.rand((3, 3), requires_grad=True)
     t2 = torch.rand((3, 3), requires_grad=True)
 
-    # Perform some computation remotely.
+    # Perform some computation remotely. # 第一阶段：RPC操作，构建依赖基础
     t3 = rpc.rpc_sync("worker1", my_add, args=(t1, t2))
 
     # Perform some computation locally based on remote result.
@@ -304,7 +304,7 @@ As an example the complete code with distributed autograd would be as follows:
     # Compute some loss.
     loss = t5.sum()
 
-    # Run the backward pass.
+    # Run the backward pass. # 第二阶段，执行后向传播
     dist_autograd.backward(context_id, [loss])
 
     # Retrieve the gradients from the context.

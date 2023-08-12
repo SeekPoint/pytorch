@@ -108,7 +108,7 @@ _all_gather_dict_lock = threading.RLock()
 _all_gather_sequence_id: Dict[str, int] = {}
 _all_gather_sequence_id_to_states: collections.defaultdict = collections.defaultdict(AllGatherStates)
 
-
+#_init_rpc_states 会把代理设置在PyTorch环境之中，其定义在 torch/distributed/rpc/api.py 之中有。
 def _init_rpc_states(agent):
     worker_infos = agent.get_worker_infos()
     global _ALL_WORKER_NAMES
@@ -672,7 +672,7 @@ def remote(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
 
     return rref
 
-
+#其次来到_invoke_rpc，可以看到此函数依据调用类型不同（内置操作，script，udf这三种），选择了不同路径。
 def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RPC_TIMEOUT):
     if not callable(func):
         raise TypeError("function should be callable.")
@@ -696,14 +696,14 @@ def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RP
                 func = wrapped
 
         if qualified_name is not None:
-            fut = _invoke_rpc_builtin(
+            fut = _invoke_rpc_builtin(  # 内置rpc
                 dst_worker_info,
                 qualified_name,
                 rpc_timeout,
                 *args,
                 **kwargs
             )
-        elif isinstance(func, torch.jit.ScriptFunction):
+        elif isinstance(func, torch.jit.ScriptFunction): # 脚本
             fut = _invoke_rpc_torchscript(
                 dst_worker_info.name,
                 torch._jit_internal._qualified_name(func),
@@ -716,7 +716,7 @@ def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RP
             (pickled_python_udf, tensors) = _default_pickler.serialize(
                 PythonUDF(func, args, kwargs)
             )
-            fut = _invoke_rpc_python_udf(
+            fut = _invoke_rpc_python_udf( # 用户udf
                 dst_worker_info,
                 pickled_python_udf,
                 tensors,

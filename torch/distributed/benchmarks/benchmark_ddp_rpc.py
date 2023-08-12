@@ -196,7 +196,7 @@ def _run_trainer(emb_rref_list, rank):
     measurements = measurements[WARMUP_CYCLES:]
     return rank, measurements, batch_size
 
-
+#可以用如下办法来启动了两个 worker，其中使用了 rpc.init_rpc 来初始化 rpc。worker0 会启动，然后利用 RPC 在 worker 1 之上也进行了一些操作。
 def run_worker(rank, world_size):
     r"""
    A wrapper function that initializes RPC, calls the function, and shuts down

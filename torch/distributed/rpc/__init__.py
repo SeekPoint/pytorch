@@ -101,6 +101,7 @@ if is_available():
                 implementation. Supported values is
                 ``BackendType.TENSORPIPE`` (the default).
                 See :ref:`rpc-backends` for more information.
+                从 RPC 注释中可以看到两个概念，就是大家常见的 rank 和 world_size。
             rank (int): a globally unique id/rank of this node.
             world_size (int): The number of workers in the group.
             rpc_backend_options (RpcBackendOptions, optional): The options
@@ -192,7 +193,7 @@ if is_available():
         # and others might not have. As a result, a node calling
         # torch.distributed.autograd.backward() would run into errors since
         # other nodes might not have been initialized.
-        dist_autograd._init(rank)
+        dist_autograd._init(rank)  # 我们后续会讨论分布式自动微分引擎
 
         _set_profiler_node_id(rank)
         # Initialize RPC.
@@ -217,7 +218,7 @@ if is_available():
                 )
 
     def _init_rpc_backend(
-        backend=BackendType.TENSORPIPE,  # type: ignore[attr-defined]
+        backend=BackendType.TENSORPIPE,  # type: ignore[attr-defined] # 默认后端是TENSORPIPE
         store=None,
         name=None,
         rank=-1,
@@ -231,7 +232,7 @@ if is_available():
             raise RuntimeError("RPC is already initialized")
 
         # Initialize RPC.
-        rpc_agent = backend_registry.init_backend(
+        rpc_agent = backend_registry.init_backend( # 生成一个agent
             backend,
             store=store,
             name=name,
@@ -240,7 +241,7 @@ if is_available():
             rpc_backend_options=rpc_backend_options,
         )
 
-        api._init_rpc_states(rpc_agent)
+        api._init_rpc_states(rpc_agent) # 设定代理到当前上下文
 
     @api._require_initialized
     def _get_debug_info():

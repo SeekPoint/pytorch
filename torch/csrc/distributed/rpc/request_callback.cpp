@@ -9,6 +9,7 @@ namespace rpc {
 
 using namespace torch::distributed::autograd;
 
+// operator() 之中会调用 processMessage 处理消息。
 c10::intrusive_ptr<JitFuture> RequestCallback::operator()(
     Message& request,
     std::vector<c10::Stream> streams) const {

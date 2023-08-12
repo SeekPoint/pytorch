@@ -276,6 +276,21 @@ std::shared_ptr<RpcAgent> RpcAgent::getCurrentRpcAgent() {
   return agent;
 }
 
+/*于是目前拓展如下，以后进行 RPC 操作，都会通过 RpcAgent::currentRpcAgent_ 这个全局变量进行。
+
+RpcAgent::currentRpcAgent_
+      +
+      |
+      |
+      |
+      v
++-----+-----------+        +-----------------------+
+| TensorPipeAgent |        | RequestCallbackImpl   |
+|                 |        |                       |
+|         cb_ +----------> |                       |
+|                 |        |                       |
++-----------------+        +-----------------------+
+*/
 void RpcAgent::setCurrentRpcAgent(std::shared_ptr<RpcAgent> rpcAgent) {
   if (rpcAgent) {
     std::shared_ptr<RpcAgent> previousAgent;

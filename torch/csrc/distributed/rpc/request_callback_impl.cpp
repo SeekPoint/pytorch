@@ -252,6 +252,103 @@ void RequestCallbackImpl::handleRRefDelete(
   }
 }
 
+/*
+因为最终生成的是 RequestCallbackImpl，所以实际上，上图中间有一步 processRpcWithErrors 实际调用的是 RequestCallbackImpl 这里的函数 processRpcWithErrors，其就是增加了一些异常处理逻辑。
+
+逻辑图修改如下：
+
+ TensorPipeAgent      RequestCallback  RequestCallbackNoPython     RequestCallbackImpl
+        +                   +                 +                          +
+        |                   |                 |                          |
+        |                   |                 |                          |
+        v                   |                 |                          |
+    respond                 |                 |                          |
+        +                   |                 |                          |
+        |                   |                 |                          |
+        |                   |                 |                          |
+        v                   v                 v                          |
+cb_->operator()  +-->   operator()  +-->  processMessage                 |
+                                              +                          |
+                                              |                          |
+                                              |                          v
+                                              +----------------> deserializePythonRpcCommand
+                                              |                          +
+                                              |                          |
+                                              |                          |
+                                              |                          v
+                                              |
+                                              +----------------> processRpcWithErrors
+                                              |                          +
+                                              |                          |
+                                              |                          |
+                                              | <------------------------+
+                                              |
+                                              |
+                                              v
+                                          processRpc
+                                              +
+                                              |
+                                              |
+                                              v
+                                    processForwardAutogradReq
+
+如果结合之前的发送，我们拓展图例如下：
+
+当发送者需要在远端运行自动梯度计算时候，调用 rpc.rpc_sync。
+从 Python 调用到 C++ 世界，函数为 pyRpcBuiltin。
+调用 sendMessageWithAutograd，以此通知Receiver。
+会调用 RpcAgent::getCurrentRpcAgent() 来得到本地的 Agent。
+调用 current Agent 的 send 函数。
+send 函数发送 FORWARD_AUTOGRAD_REQ给 Receiver worker。
+respond 函数会调用 Receiver 之中 Agent 的回调函数 cb_。
+调用到 RequestCallbackImpl 的 processRpcWithErrors。
+然后调用 processRpc。
+最后调用到 processForwardAutogradReq，完成了基于RPC的分布式autograd的启动过程。
+                                                             +
+ rpc.rpc_sync                                 Sender         |     Receiver
+        +                                                    |
+        |                                                    |
+        | 1                                                  |
+        v                                                    |
+ _invoke_rpc_builtin                                         |
+        +                                                    |
+        |                                      Python        |
++----------------------------------------------------------+ |
+        |                                      C++           |      +----------------------------+
+        |  2                                                 |      | RequestCallbackImpl        |
+        v                                                    |      |                            |
+                                                             |   +----> processRpcWithErrors     |
+   pyRpcBuiltin                                              |   |  |             +              |
+        +                                                    |   |  |             | 9            |
+        |  3                                                 |   |  |             |              |
+        |                                                    |   |  |             v              |
+        v                                                    |   |  |         processRpc         |
+                                     4                       |   |  |             +              |
+sendMessageWithAutograd(RpcAgent::getCurrentRpcAgent())      |   |  |             | 10           |
+        +                                                    |   |  |             |              |
+        |                                                    |   |  |             v              |
+        |                                                    |   |  |  processForwardAutogradReq |
+        |   RpcAgent::currentRpcAgent_                       |   |  |                            |
+        |           +                                        |   |  +----------------------------+
+        |           |                                        |   |
+        | 5         |                                        |   |8     +-----------------+
+        |           v                                        |   |      | TensorPipeAgent |
+        |    +------+--------+                               |   |      |                 |
+        |    |TensorPipeAgent|   +-------------------+       |   +------------+ cb_       |
+        |    |               |   |RequestCallbackImpl|       |          |        ^        |
+        |    |      cb_ +------->+                   |       |          |      7 |        |
+        |    |               |   +-------------------+       |          |        |        |
+        |    |               |                          6    |          |        +        |
+        +--------> send   +----------------------------------+--------------> respond     |
+             |               |                   FORWARD_AUTOGRAD_REQ   |                 |
+             |               |                               +          |                 |
+             +---------------+                               |          +-----------------+
+                                                             +
+
+
+
+
+*/
 c10::intrusive_ptr<JitFuture> RequestCallbackImpl::processRpcWithErrors(
     RpcCommandBase& rpc,
     const MessageType& messageType,

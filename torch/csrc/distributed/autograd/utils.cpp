@@ -140,6 +140,56 @@ c10::intrusive_ptr<Message> getMessageWithAutograd(
   return std::move(*rpcWithAutograd).toMessage();
 }
 
+/*
+在 torch/csrc/distributed/autograd/utils.cpp 这里利用 agent 来进行发送 FORWARD_AUTOGRAD_REQ。
+
+后面在接收方，我们将会看到处理 FORWARD_AUTOGRAD_REQ 消息，因此发送和接受大致可以联系起来。
+
+
+
+发送流程如下，其中 sendMessageWithAutograd 会使用 RpcAgent::getCurrentRpcAgent() 得到 RpcAgent::currentRpcAgent_，就是得到了全局设置的代理，然后通过代理进行发送。
+
+  rpc.rpc_sync
+         +
+         |
+         |
+         v
+  _invoke_rpc_builtin
+         +
+         |                                               Python
++---------------------------------------------------------------+
+         |                                               C++
+         |
+         v
+
+    pyRpcBuiltin
+         +
+         |
+         |
+         v
+
+ sendMessageWithAutograd(RpcAgent::getCurrentRpcAgent())
+         +
+         |
+         |
+         |   RpcAgent::currentRpcAgent_
+         |           +
+         |           |
+         |           |
+         |           v
+         |     +-----+-----------+
+         |     | TensorPipeAgent |        +-----------------------+
+         |     |                 |        | RequestCallbackImpl   |
+         |     |       cb_ +------------> |                       |
+         |     |                 |        +-----------------------+
+         |     |                 |
+         |     |                 |
+         +-----------> send +-----------> Will send message to other worker
+               |                 |
+               |                 |
+               +-----------------+
+
+*/
 c10::intrusive_ptr<JitFuture> sendMessageWithAutograd(
     RpcAgent& agent,
     const WorkerInfo& dst,
@@ -147,7 +197,7 @@ c10::intrusive_ptr<JitFuture> sendMessageWithAutograd(
     bool forceGradRecording,
     const float rpcTimeoutSeconds,
     bool forceDisableProfiling) {
-  auto msg = getMessageWithAutograd(
+  auto msg = getMessageWithAutograd(  // 这里会与上下文交互，构建了 FORWARD_AUTOGRAD_REQ
       dst.id_,
       std::move(wrappedRpcMsg),
       MessageType::FORWARD_AUTOGRAD_REQ,
@@ -162,8 +212,9 @@ c10::intrusive_ptr<JitFuture> sendMessageWithAutograd(
         auto profilerConfig = torch::autograd::profiler::getProfilerConfig();
         auto msgWithProfiling = getMessageWithProfiling(
             std::move(msg),
-            rpc::MessageType::RUN_WITH_PROFILING_REQ,
+            rpc::MessageType::RUN_WITH_PROFILING_REQ,  //构建消息
             std::move(profilerConfig));
+        // 发送消息
         return agent.send(dst, std::move(msgWithProfiling), rpcTimeoutSeconds);
       }
       case torch::profiler::impl::ActiveProfilerType::KINETO:

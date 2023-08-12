@@ -50,7 +50,48 @@ std::unique_ptr<RpcCommandBase> RequestCallbackNoPython::
       "Python calls are not supported!");
   return rpc;
 }
+/*
+随后，会调用到 RequestCallbackNoPython::processMessage 之中。
 
+先调用 RequestCallbackImpl 中实现的 deserializePythonRpcCommand 来对 PythonUDF 反序列化。
+然后调用 processRpcWithErrors 来处理消息。
+
+具体如下：
+
+ TensorPipeAgent      RequestCallback  RequestCallbackNoPython     RequestCallbackImpl
+        +                   +                 +                          +
+        |                   |                 |                          |
+        |                   |                 |                          |
+        v                   |                 |                          |
+    respond                 |                 |                          |
+        +                   |                 |                          |
+        |                   |                 |                          |
+        |                   |                 |                          |
+        v                   v                 v                          |
+cb_->operator()  +-->   operator()  +-->  processMessage                 |
+                                              +                          |
+                                              |                          |
+                                              |                          v
+                                              +--------------->  deserializePythonRpcCommand
+                                              |
+                                              |
+                                              |
+                                              v
+
+                                      processRpcWithErrors
+                                              +
+                                              |
+                                              |
+                                              v
+                                          processRpc
+                                              +
+                                              |
+                                              |
+                                              v
+                                    processForwardAutogradReq
+
+
+*/
 c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processMessage(
     Message& request,
     std::vector<c10::Stream> streams) const {
@@ -62,8 +103,9 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processMessage(
   try {
     rrefContext.recordThreadLocalPendingRRefs();
     // Deserialize PythonUDF here to trigger RRef unpickling
+    // 调用 RequestCallbackImpl 中实现的  deserializePythonRpcCommand 来对 PythonUDF 反序列化
     std::unique_ptr<RpcCommandBase> rpc = deserializePythonRpcCommand(
-        deserializeRequest(request), request.type());
+        deserializeRequest(request), request.type()); // 解析请求
     auto rrefsReadyFuture = rrefContext.waitForThreadLocalPendingRRefs();
 
     auto retFuture = rrefsReadyFuture->thenAsync(
@@ -88,6 +130,7 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processMessage(
                     ->config());
           }
 
+          // 在这里
           auto retFuture =
               processRpcWithErrors(*rpc, messageType, std::move(streams));
 
@@ -530,7 +573,7 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processRpc(
     case MessageType::RREF_FORK_REQUEST: {
       return processRRefForkRequest(rpc);
     }
-    case MessageType::FORWARD_AUTOGRAD_REQ: {
+    case MessageType::FORWARD_AUTOGRAD_REQ: {  // 这里就和之前发送的对应上了
       return processForwardAutogradReq(rpc, std::move(streams));
     }
     case MessageType::BACKWARD_AUTOGRAD_REQ: {
