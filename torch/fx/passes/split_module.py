@@ -32,7 +32,6 @@ class Partition:
             f" partition dependents: {self.partition_dependents}"
         )
 
-
 # Creates subgraphs out of main graph
 @compatibility(is_backward_compatible=True)
 def split_module(

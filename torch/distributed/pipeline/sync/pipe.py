@@ -55,6 +55,7 @@ naive automatic balancing:
   balance = balance_by_time(partitions, model, sample)
 
   model = Pipe(model, balance, ...)
+  既然得到了 profile 的结果，下面就是对模型的各个层进行分割。如何分割可以参见下面注释中的使用示例，把balance 作为参数传递给 GPipe构造函数。
 """
 
 
@@ -305,6 +306,7 @@ class Pipe(Module):
         :class:`Pipe` is experimental and subject to change.
     """
 
+    #Gpipe 的 __init__中可以看到，使用了 split_module 函数进行分割：
     def __init__(
         self,
         module: nn.Sequential,
@@ -340,6 +342,7 @@ class Pipe(Module):
         if deferred_batch_norm:
             module = DeferredBatchNorm.convert_deferred_batch_norm(module, chunks)
 
+        # 对模型进行切分
         self.partitions, self.devices = _split_module(module)
         _verify_splitting(module, self.partitions, self.devices)
 
