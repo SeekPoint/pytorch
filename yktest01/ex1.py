@@ -1,11 +1,7 @@
 import torch
-
-from torch import  optim
-
-import torch
 import torch.nn as nn
 
-import torch.optim as optim
+import torch.optim as optim #from torch import  optim
 
 from torchviz import make_dot
 
