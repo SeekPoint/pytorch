@@ -79,7 +79,7 @@ PyObject* dist_autograd_init(PyObject* _unused, PyObject* noargs) {
               "_known_worker_ids",
               &DistAutogradContext::getKnownWorkerIds,
               py::call_guard<py::gil_scoped_release>());
-
+  //具体通过如下映射，我们可以看到 C++ 世界之中对应的方法，调用到了 DistAutogradContainer::getInstance().newContext()。
   module.def(
       "_new_context",
       []() -> const ContextPtr {
@@ -122,7 +122,55 @@ PyObject* dist_autograd_init(PyObject* _unused, PyObject* noargs) {
       },
       py::return_value_policy::reference,
       py::call_guard<py::gil_scoped_release>());
+  //我们再推导，看看如何设置 worker id，找到了如下，看来需要看看 python 世界的 _init 方法。
+  //来到 python 世界  def init_rpc(
+  //，可以看到，使用了 rank 来作为参数，而 rank 是每个 worker 唯一的，这样就保证了 worker ID 唯一，从而 消息 id 唯一。
+  /*
+  我们把这些逻辑关系总结下来：
 
+worker_id = rank;
+
+container.worker_id_ = worker_id;
+
+container.next_autograd_message_id_ = static_cast<int64_t>(worker_id) << kAutoIncrementBits
+然后 next_autograd_message_id_ 内部递增。
+
+int64_t DistAutogradContainer::newAutogradMessageId() {
+  // Check for overflow into workerId_ section.
+  TORCH_INTERNAL_ASSERT(next_autograd_message_id_ < max_id_);
+  return next_autograd_message_id_++;
+}
+所以，AutogradMessageId 是全局唯一的。我们用图例来看看：
+
++----------------------------------------------------------------------------------------+
+| worker                                                                                 |
+|                       +-------------------------------------+                          |
+|                       | DistAutogradContainer               |                          |
+|                       |                                     |                          |
+|                       |                                     |                          |
+|              init()   |                                     |                          |
+|      rank +--------------+----> worker_id_                  |                          |
+|                1      |  |                                  |   newAutogradMessageId() |
+|                       |  +----> next_autograd_message_id_+------------------+          |
+|                       |                                     |          2    |          |
+|                       +-------------------------------------+               |          |
+|                                                                             |          |
+|                                                                             |          |
+|                                                                             |          |
+|                                                                             |          |
+|                     +---------------------------------------------------------------+  |
+|                     | getMessageWithAutograd                                |       |  |
+|                     |                                                       |       |  |
+|                     |                                                       v       |  |
+|                     |                                                               |  |
+|                     |   AutogradMetadata autogradMetadata(contextId(), MessageId()) |  |
+|                     |                           4                           3       |  |
+|                     |                                                               |  |
+|                     +---------------------------------------------------------------+  |
+|                                                                                        |
++----------------------------------------------------------------------------------------+
+为了看看 autogradContextId 为什么可以保证唯一，我们需要先分析 DistAutogradContainer 和 DistAutogradContext。
+  */
   module.def(
       "_init",
       [](int64_t worker_id) { DistAutogradContainer::init(worker_id); },

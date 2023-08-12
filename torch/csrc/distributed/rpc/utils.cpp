@@ -146,7 +146,15 @@ std::unique_ptr<RpcCommandBase> deserializeRequest(const Message& request) {
     }
   }
 }
+/*
+5.2.2 处理消息
+processForwardAutogradReq 负责具体处理消息，其处理逻辑如下：
 
+虽然是收到了前向传播请求，但因为此处是接收端，后续需要进行反向传播，所以对deviceMap进行转置。
+使用 addRecvRpcBackward 将 rpc 消息 加入上下文。
+可能会有nested命令的可能，所以需要再调用一次processRpc。
+设置最原始的消息为处理完毕，进行相关操作。
+*/
 std::unique_ptr<RpcCommandBase> deserializeResponse(
     const Message& response,
     MessageType& wrappedMsgType) {

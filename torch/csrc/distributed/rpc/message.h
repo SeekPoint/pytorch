@@ -64,6 +64,8 @@ enum MessageType {
   RREF_ACK =
       0x0e | MessageTypeFlags::RESPONSE_TYPE, // ACK to internal RRef messages
 
+
+//上下文主要包括几种消息类型，比如：
   // Messages with autograd info
   FORWARD_AUTOGRAD_REQ = 0x0f | MessageTypeFlags::REQUEST_TYPE,
   FORWARD_AUTOGRAD_RESP = 0x10 | MessageTypeFlags::RESPONSE_TYPE,

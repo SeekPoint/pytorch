@@ -333,13 +333,14 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::
 
   // Need to reverse the device map for the backward pass of distributed
   // autograd.
+  // 对deviceMap进行转置
   DeviceMap reverseDeviceMap;
   for (const auto& mapEntry : rpcWithAutograd.deviceMap()) {
     reverseDeviceMap.insert({mapEntry.second, mapEntry.first});
   }
 
   // Attach 'recv' autograd function.
-  auto autogradContext = addRecvRpcBackward(
+  auto autogradContext = addRecvRpcBackward(  // 调用了 addRecvRpcBackward 加入上下文
       rpcWithAutograd.autogradMetadata(),
       rpcWithAutograd.tensors(),
       rpcWithAutograd.fromWorkerId(),
@@ -535,6 +536,15 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processRRefBackward(
   C10_THROW_ERROR(Error, "Python call not supported!");
 }
 
+/*
+5.2 接受
+我们略过 agent 的发送内部处理，转而看看 FORWARD_AUTOGRAD_REQ 的业务流程。
+
+5.2.1 接收消息 ---> 接收方
+生成 TensorPipeAgent 时候，把 RequestCallbackImpl 配置为回调函数。这是 agent 的统一响应函数。
+
+前面关于代理接收逻辑时候，我们也提到了，会进入以下函数，其中可以看到有对 processForwardAutogradReq 的处理逻辑。
+*/
 c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processRpc(
     RpcCommandBase& rpc,
     const MessageType& messageType,

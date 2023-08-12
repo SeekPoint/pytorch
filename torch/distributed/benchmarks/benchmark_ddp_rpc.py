@@ -176,6 +176,8 @@ def _run_trainer(emb_rref_list, rank):
         for indices, offsets, target in get_next_batch(rank):
             batch_size += len(target)
 
+            # 当分布式调用时候，python世界会生成一个context。
+            #这里是主动调用，send 端会调用这个方法
             with dist_autograd.context() as context_id:
                 output = model(indices, offsets)
                 loss = criterion(output, target)

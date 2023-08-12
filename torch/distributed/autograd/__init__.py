@@ -44,8 +44,9 @@ class context:
         >>>     loss = rpc.rpc_sync("worker1", torch.add, args=(t1, t2)).sum()
         >>>     dist_autograd.backward(context_id, [loss])
     '''
+    #当生成时，__enter__ 会调用 _new_context() 在C++生成一个context。
     def __enter__(self):
-        self.autograd_context = _new_context()
+        self.autograd_context = _new_context() # 这里生成一个上下文
         return self.autograd_context._context_id()
 
     def __exit__(self, type, value, traceback):

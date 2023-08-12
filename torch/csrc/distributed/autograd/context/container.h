@@ -8,7 +8,25 @@
 namespace torch {
 namespace distributed {
 namespace autograd {
+/*
+每个worker拥有唯一一个单例DistAutogradContainer，其负责：
 
+对于每一个自动微分过程存储其分布式上下文。
+一旦这个自动微分过程结束，就清除其数据。
+每个自动微分过程被赋予一个唯一的 autograd_context_id。在每个容器中，这个微分过程的上下文(DistAutogradContext) 依据这个autograd_context_id 来唯一确认。autograd_context_id 是一个 64 bit 的全局唯一id，前 16 bis 是 worker_id，后 48 位是在每个worker内部自动递增id。所以可见，一个Container 之中，是有多个Context的。
+
+此容器还负责维护全局唯一的消息id，用来关联发送/接收自动微分函数对。格式类似于autograd_context_id，是一个64位整数，前16位是工作者id，后48位是worker内部自动递增的。
+
+因为消息 id 和 上下文 id 的前16 位是 worker_id，也就是 rank id，再加上后48位内部自增，所以可以保证 消息 id 和 上下文 id 全局唯一。
+
+3.1 定义
+DistAutogradContainer 定义如下，其中：
+
+worker_id_ : 本 worker 的 ID，其实就是本 worker 的 rank。
+next_context_id_ ：自增的上下文ID，用来给每个自动微分过程赋予一个唯一的autograd_context_id。在一个传播链条上，其实只有第一个节点的 DistAutogradContainer 用到了 next_context_id_ 来生成 Context，后续节点的 DistAutogradContainer 都是依据第一个 DistAutogradContainer 的 context id 信息来在本地生成对应 context id 的 Context。
+next_autograd_message_id_ ：维护全局唯一的消息id，用来关联 发送/接收 自动微分函数对。此变量是在本节点发送时候会使用到。
+
+*/
 // Singleton class per worker which is responsible for storing the distributed
 // autograd context for each autograd pass and also cleans up data for an
 // autograd pass once its done.
@@ -114,7 +132,7 @@ class TORCH_API DistAutogradContainer {
     mutable std::mutex lock;
 
     // Map storing autograd contexts for this shard.
-    std::unordered_map<int64_t, ContextPtr> contexts;
+    std::unordered_map<int64_t, ContextPtr> contexts; // 这里存储了上下文指针
   };
 
   DistAutogradContainer() = delete;
@@ -141,7 +159,7 @@ class TORCH_API DistAutogradContainer {
 
   // Auto incrementing context id used to identify unique autograd passes.
   // Initialized with the first 16 bits being the worker_id.
-  std::atomic<int64_t> next_context_id_;
+  std::atomic<int64_t> next_context_id_; // 新增上下文id
 
   // Unique id to identify a worker in the distributed setting.
   int16_t worker_id_;
@@ -150,7 +168,7 @@ class TORCH_API DistAutogradContainer {
   bool initialized_;
 
   // Sharded autograd context map.
-  std::vector<ContextsShard> autograd_contexts_;
+  std::vector<ContextsShard> autograd_contexts_; // 存储上下文列表
 
   // Number of shards for the sharded autograd_contexts_ map.
   uint32_t num_shards_;

@@ -193,7 +193,7 @@ if is_available():
         # and others might not have. As a result, a node calling
         # torch.distributed.autograd.backward() would run into errors since
         # other nodes might not have been initialized.
-        dist_autograd._init(rank)  # 我们后续会讨论分布式自动微分引擎
+        dist_autograd._init(rank)  # 我们后续会讨论分布式自动微分引擎   # rank是全局唯一
 
         _set_profiler_node_id(rank)
         # Initialize RPC.

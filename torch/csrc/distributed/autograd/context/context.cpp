@@ -32,6 +32,35 @@ void DistAutogradContext::addKnownWorkerId(const rpc::worker_id_t workerId) {
   knownWorkerIds_.insert(workerId);
 }
 
+/*
+addSendFunction 就是往 sendAutogradFunctions_ 之中添加SendRpcBackward，后续可以按照 message id 来得到这个 SendRpcBackward。
+
+前面是从上下文构建的角度看，本次从上下文内容来看。
+
+此时发送端逻辑如下：
+
++--------------------------------------------------------------+    +-------------------+
+| worker                                                       |    |SendRpcBackward    |
+| +---------------------------------------------------------+  |    |                   |
+| | DistAutogradContext                                     |  |    |   input_metadata_ |
+| |                                                 +-------------> |                   |
+| |  contextId_ = context_id_1                      |       |  |    |   next_edges_     |
+| |                                                 +       |  |    |                   |
+| |  sendAutogradFunctions_ = [msg_id_1, SendRpcBackward_1] |  |    +-------------------+
+| |                                                         |  |
+| |                                                         |  |
+| |  recvAutogradFunctions_                                 |  |
+| |                                                         |  |
+| +---------------------------------------------------------+  |
+|                                                              |
++--------------------------------------------------------------+
+
+                                                                                  sender
++---------------------------------------------------------------------------------------+
+
+
+
+*/
 void DistAutogradContext::addSendFunction(
     const std::shared_ptr<SendRpcBackward>& func,
     int64_t autograd_message_id) {
@@ -44,6 +73,7 @@ void DistAutogradContext::addSendFunction(
   sendAutogradFunctions_.emplace(autograd_message_id, func);
 }
 
+//addRecvFunction 的添加操作如下，就是看看 recvAutogradFunctions_之中是否已经存在这个 message id 对应的算子，如果没有就添加 。
 void DistAutogradContext::addRecvFunction(
     std::shared_ptr<RecvRpcBackward>& func,
     int64_t autograd_message_id) {
@@ -61,6 +91,106 @@ DistAutogradContext::sendFunctions() const {
   std::lock_guard<std::mutex> guard(lock_);
   return sendAutogradFunctions_;
 }
+
+/*
+至此，逻辑拓展如下，在发送端和接收端都有一个 DistAutogradContext，其 id 都是 context_id_1。
+
+在 每个 DistAutogradContext 之内，均以 msg_id_1 作为key，一个是 SendRpcBackward，一个建立了 RecvRpcBackward。
+
+这就对应了设计之中提到的：
+
+每个自动微分过程被赋予一个唯一的 autograd_context_id，在容器中，这个微分过程的上下文(DistAutogradContext) 依据这个autograd_context_id 来唯一确认。autograd_context_id 是一个 64 bit 的全局唯一id，前 16 bis 是 worker_id，后 48 位是在每个worker内部自动递增id。所以可见，一个Container 之中，是有多个Context的。
+
+此容器还负责维护全局唯一的消息id，用来关联发送/接收自动微分函数对。格式类似于autograd_context_id，是一个64位整数，前16位是工作者id，后48位是worker内部自动递增的。
+
++----------------------------------------------------------------+
+| worker                                                         |    +-------------------+
+|                                                                |    |SendRpcBackward    |
+|   +---------------------------------------------------------+  |    |                   |
+|   | DistAutogradContext                                     |  |    |   input_metadata_ |
+|   |                                                 +-------------> |                   |
+|   |  contextId_ = context_id_1                      |       |  |    |   next_edges_     |
+|   |                                                 +       |  |    |                   |
+|   |  sendAutogradFunctions_ = [msg_id_1, SendRpcBackward_1] |  |    +-------------------+
+|   |                                                         |  |
+|   |  recvAutogradFunctions_                                 |  |
+|   |                                                         |  |
+|   +---------------------------------------------------------+  |
+|                                                                |
+|                             +                                  |
+|                             |                                  |
++----------------------------------------------------------------+
+                              |
+                              |
+                              |                                                     Sender
++-----------------------------------------------------------------------------------------+
+                              |                                                     Receiver
+                              |
+                              v
++-----------------------------+----------------------------------+
+| worker                                                         |
+|                                                                |    +-------------------+
+|   +---------------------------------------------------------+  |    |RecvRpcBackward    |
+|   | DistAutogradContext                                     |  |    |                   |
+|   |                                                         |  |    |                   |
+|   |   contextId_ = context_id_1                 +-----------------> |   input_metadata_ |
+|   |                                             |           |  |    |                   |
+|   |   sendAutogradFunctions_                    |           |  |    |   next_edges_     |
+|   |                                             +           |  |    |                   |
+|   |   recvAutogradFunctions_ = [msg_id_1, RecvRpcBackward_1]|  |    +-------------------+
+|   |                                                         |  |
+|   +---------------------------------------------------------+  |
+|                                                                |
++----------------------------------------------------------------+
+我们加入 Container，再拓展一下目前逻辑如下：
+
+每个worker 包括一个DistAutogradContainer。
+每个 DistAutogradContainer 包括若干个 DistAutogradContext，依据 context id 提取 DistAutogradContext。
+每个 DistAutogradContext 包括 sendAutogradFunctions_ 和 recvAutogradFunctions_，利用 msg id 来获取 SendRpcBackward 或者 RecvRpcBackward。
+这样这个反向传播链条就构建了出来。
+
++------------------------------------------------------------------------------------------------------------------------------------+
+| worker                                                                                                                             |
+|                                                                                                                                    |
+| +---------------------------------------+     +---------------------------------------------------------+    +-------------------+ |
+| | DistAutogradContainer                 |     | DistAutogradContext                                     |    |SendRpcBackward    | |
+| |                                       |     |                                                 +----------> |                   | |
+| |   worker_id_                          |     |  contextId_ = ctx_id_1                          |       |    |   input_metadata_ | |
+| |                                       |     |                                                 +       |    |                   | |
+| |   next_autograd_message_id_     +---------> |  sendAutogradFunctions_ = [msg_id_1, SendRpcBackward_1] |    |   next_edges_     | |
+| |                                 |     |     |                                                         |    |                   | |
+| |   next_context_id_              |     |     |  recvAutogradFunctions_                                 |    +-------------------+ |
+| |                                 +     |     |                                                         |                          |
+| |   autograd_contexts_[ctx_id_1 : ctx]  |     +---------------------------------------------------------+                          |
+| |                                       |                                                                                          |
+| +----------------------------+----------+                                                                                          |
+|                              |                                                                                                     |
++------------------------------------------------------------------------------------------------------------------------------------+
+                               |
+                               |
++-------------------------------------------------------------------------------------------------------------------------------------+
+                               |
+                               v
++------------------------------+-----------------------------------------------------------------------------------------------------+
+| worker                                                                                                                             |
+|                                                                                                                                    |
+| +---------------------------------------+     +---------------------------------------------------------+    +-------------------+ |
+| | DistAutogradContainer                 |     | DistAutogradContext                                     |    |RecvRpcBackward    | |
+| |                                       |     |                                                 +----------> |                   | |
+| |   worker_id_                          |     |  contextId_ = ctx_id_1                          |       |    |   input_metadata_ | |
+| |                                       |     |                                                 |       |    |                   | |
+| |   next_autograd_message_id_     +---------> |  sendAutogradFunctions_                         |       |    |   next_edges_     | |
+| |                                 |     |     |                                                 +       |    |                   | |
+| |   next_context_id_              |     |     |  recvAutogradFunctions_ = [msg_id_1, RecvRpcBackward_1] |    +-------------------+ |
+| |                                 +     |     |                                                         |                          |
+| |   autograd_contexts_[ctx_id_1 : ctx]  |     +---------------------------------------------------------+                          |
+| |                                       |                                                                                          |
+| +---------------------------------------+                                                                                          |
+|                                                                                                                                    |
++------------------------------------------------------------------------------------------------------------------------------------+
+
+至此，我们初步分析了上下文相关的类，下文我们把目前已经分析的内容结合起来，系统看看业务逻辑。
+*/
 
 std::unordered_map<int64_t, std::shared_ptr<RecvRpcBackward>>
 DistAutogradContext::recvFunctions() const {

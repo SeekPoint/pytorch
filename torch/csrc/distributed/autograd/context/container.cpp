@@ -14,7 +14,7 @@ constexpr int kNumCleanupContextRetries = 20;
 
 constexpr int64_t kInvalidContextId = -1;
 
-// Each thread has a single autograd_context_id valid at any point in time.
+// Each thread has a single autograd_context_id valid at any point in time.  每一个线程都有一个autograd_context_id。
 static thread_local int64_t current_context_id_ = kInvalidContextId;
 
 // Lock to ensure DistAutogradContainer is initialized only once.
@@ -32,7 +32,12 @@ DistAutogradContainer::DistAutogradContainer(uint32_t num_shards)
   // to work.
   TORCH_INTERNAL_ASSERT((num_shards & (num_shards - 1)) == 0);
 }
+/*
+然后看如何初始化 next_autograd_message_id_？从 DistAutogradContainer 的 init 函数中可以知道，
+原来是依据 worker_id 来生成 next_autograd_message_id_。work_id 是 init 函数所得到的参数
 
+Init 方法构建了 DistAutogradContainer，主要就是利用 worker_id 对本地成员变量进行相关赋值
+*/
 DistAutogradContainer& DistAutogradContainer::init(int64_t worker_id) {
   std::lock_guard<std::mutex> guard(dist_container_init_lock_);
 
@@ -103,22 +108,33 @@ DistAutogradContainer& DistAutogradContainer::getInstanceInternal() {
       new DistAutogradContainer(computeNumShards());
   return *container;
 }
+/*
+autogradMessageId 是由 rank 间接生成的，然后在内部进行递增，所以可以保证全局唯一。
 
+我们从后往前推导。
+
+先看 newAutogradMessageId 是如何生成消息 id，原来是在 DistAutogradContainer 之中的成员变量 next_autograd_message_id_ 递增得到。
+*/
 int64_t DistAutogradContainer::newAutogradMessageId() {
   // Check for overflow into workerId_ section.
   TORCH_INTERNAL_ASSERT(next_autograd_message_id_ < max_id_);
   return next_autograd_message_id_++;
 }
+/*
+我们首先看看如何构建上下文。
 
+4.3.1 getOrCreateContext
+getOrCreateContext 函数是用来得到上下文，如果已经有，就直接获取，如果没有，就新构建一个。这是一个被动调用，recv 端会用到这个。
+*/
 ContextPtr DistAutogradContainer::getOrCreateContext(int64_t context_id) {
   auto& shard = getShard(context_id);
   std::lock_guard<std::mutex> guard(shard.lock);
-  auto it = shard.contexts.find(context_id);
+  auto it = shard.contexts.find(context_id); // 根据这个context id来查找
   if (it != shard.contexts.end()) {
-    return it->second;
+    return it->second; // 找到就返回
   }
 
-  auto& context =
+  auto& context =  // 如果没有，就构建一个 context
       shard.contexts
           .emplace(
               std::piecewise_construct,
@@ -133,13 +149,14 @@ rpc::worker_id_t DistAutogradContainer::getWorkerId() const {
   return worker_id_;
 }
 
+//newContext 就是生成了一个DistAutogradContext，其中通过 Container 的成员变量 next_context_id_ 的递增来指定下一个上下文的id。
 const ContextPtr DistAutogradContainer::newContext() {
   TORCH_CHECK(
       current_context_id_ == kInvalidContextId,
       "Already have an autograd context id for this thread.");
 
-  auto context_id = next_context_id_++;
-  current_context_id_ = context_id;
+  auto context_id = next_context_id_++; // 递增
+  current_context_id_ = context_id;  // 在这里设置了本地线程的 current_context_id_
 
   // Check for overflow into workerId_ section.
   TORCH_INTERNAL_ASSERT(context_id < max_id_);

@@ -77,6 +77,23 @@ Worker 1 和 worker 2 之上的 _LocalOptimizer 分别获得对本地 _local_par
                                                    +--------------------------------------+
 
 */
+
+
+/*
+0x04 DistAutogradContext
+DistAutogradContext 存储在一个worker之上的每一个分布式autograd的相关信息，其在分布式 autograd 之中封装前向和后向传播，累积梯度，这避免了多个worker在彼此的梯度上互相影响。
+
+由前面可知道，contextId_ 是全局唯一。
+
+4.1 定义
+这里仅仅给出 DistAutogradContext 成员变量，忽略其成员函数。其中成员变量最主要的有三个：
+
+contextId_ 是上下文 id。
+sendAutogradFunctions_ 是一个 map 类型变量，会收集所有发送请求对应的反向传播算子 SendRpcBackward。
+recvAutogradFunctions_ 是一个 map 类型变量，会收集所有接受送请求对应的反向传播算子 RecvRpcBackward。
+关于 SendRpcBackward 和 RecvRpcBackward，我们后续会结合引擎进行分析。
+
+*/
 class TORCH_API DistAutogradContext {
  public:
   using GradCallback = std::function<bool(torch::Tensor&)>;
