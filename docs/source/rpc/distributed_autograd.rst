@@ -46,6 +46,15 @@ record appropriate gradients for all tensors that require gradients.
 
 Autograd recording during the forward pass
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PyTorch 在前向传播期间构建 autograd 图，该图用于执行后向传播。有关更多详细信息，请参阅 autograd 如何编码历史记录。
+
+对于分布式 autograd，我们需要在前向传播期间跟踪所有 RPC，以确保正确执行后向传播。为此，当执行 RPC 时候，我们把 send和recv functions 附加到autograd图之上。
+
+该send函数附加到 RPC 的发起源节点之上，其输出边指向 RPC 输入张量的 autograd 函数。在向后传播期间，send函数的输入是从目标接收的，是对应recv函数的输出。
+该recv函数附加到 RPC 的接受目标节点之上，其输入从某些运算符得到，这些运算符使用输入张量在RPC接受目标上执行。在后向传播期间，recv函数的输出梯度将被发送到源节点之上，并且作为send方法的输入。
+每send-recv对被分配一个全局唯一的autograd_message_id 以唯一地标识该send-recv对。这对于在向后传播期间查找远程节点上的相应函数很有用。
+对于RRef，每当我们调用torch.distributed.rpc.RRef.to_here() 时，我们都为涉及的张量添加了一个适当的send-recv对。
+例如，这就是我们上面示例的 autograd 图的样子（为简单起见，t5.sum() 被排除在外）
 
 PyTorch builds the autograd graph during the forward pass and this graph is
 used to execute the backward pass. For more details see
@@ -85,6 +94,17 @@ unique :class:`torch.distributed.autograd.context` and this context has a
 globally unique ``autograd_context_id``. This context is created on each node
 as needed.
 
+
+每个使用分布式 autograd 的前向和后向传播都被分配了一个唯一的torch.distributed.autograd.context，并且这个上下文具有一个全局唯一的autograd_context_id 。如果有需要，在每个节点上都会创建上下文。
+
+上下文的作用如下：
+
+运行分布式反向传播的多个节点可能会在同一个张量上累积梯度并且存储在张量的.grad之上。在我们运行优化器之前，张量的.grad可能累积了来自各种分布式反向传播的梯度。这类似于把torch.autograd.backward()在本地进行多次调用。为了提供一种把每个反向传播梯度分离开的方法，在每个反向传播过程里，梯度将被累积在torch.distributed.autograd.context 之中。
+在前向传播期间，我们在上下文中存储每个 autograd 传播的send和recv函数。这确保我们在 autograd 图中保存对适当节点的引用以使其保持活动状态。除此之外，这也使得在向后传播期间很容易查找到对应的send和recv函数。
+一般来说，我们也使用这个上下文来存储每个分布式 autograd 传播的一些元数据。
+从用户的角度来看，autograd 上下文设置如下：
+
+
 This context serves the following purpose:
 
 1. Multiple nodes running distributed backward passes might accumulate
@@ -114,6 +134,8 @@ From the user's perspective the autograd context is setup as follows:
     loss = model.forward()
     dist_autograd.backward(context_id, loss)
 
+
+需要注意的是，模型的前向传播必须在分布式autograd上下文管理器中调用，因为需要一个有效的上下文来确保：所有的send和recv方法被存储起来，并且在所有参与节点之上执行后向传播。
 It is important to note that your model's forward pass must be invoked within
 the distributed autograd context manager, as a valid context is needed in
 order to ensure that all ``send`` and ``recv`` functions are stored properly
@@ -146,6 +168,10 @@ This is what the autograd graph for the code above would look like:
 .. image:: ../_static/img/distributed_autograd/local_dependencies.png
   :scale: 80%
 
+作为反向传播的一部分，autograd 引擎执行的第一步是计算 autograd 图中每个节点的依赖项数量。这有助于 autograd 引擎知道图中的节点何时准备好了可以执行。括号内为数字add(1)和mul(0)表示依赖关系的数量。如您所见，这意味着在向后传播期间，add 节点需要 1 个输入，mul节点不需要任何输入（换句话说，不需要执行）。本地 autograd 引擎通过从根节点（在本例中是d）遍历图来计算这些依赖关系。
+
+实际上，Autograd 图中的某些节点可能不会在向后传播中执行。这一事实对分布式 autograd 提出了挑战。考虑这段使用 RPC 的代码。
+
 The first step the autograd engine performs as part of the backward pass is
 computing the number of dependencies for each node in the autograd graph. This
 helps the autograd engine know when a node in the graph is ready for execution.
@@ -176,6 +202,10 @@ The associated autograd graph for the code above would be:
 
 .. image:: ../_static/img/distributed_autograd/distributed_dependencies.png
 
+计算此分布式 autograd 图的依赖项更具挑战性，并且需要一些开销（在计算或网络通信方面）。
+对于性能敏感的应用，我们可以通过假设每个send和recv函数都是反向传播的有效成分来避免大量开销（大多数应用不会执行未使用的 RPC）。这简化了分布式 autograd 算法并且效率更高，但代价是应用程序需要了解这些限制。这种算法称为FAST模式算法，下面详细介绍。
+在一般情况下， 作为向后传播的一部分，可能不需要每个send和recv函数都是有效的。为了解决这个问题，我们提出了一种SMART 模式算法，此算法将在后面的部分中描述。请注意，目前仅实现了FAST模式算法。
+
 Computing dependencies of this distributed autograd graph is much more
 challenging and requires some overhead (either in terms of computation or
 network communication).
@@ -203,6 +233,16 @@ dependency of 1 when we run a backward pass. In other words, we assume we'll
 receive a gradient over RPC from another node.
 
 The algorithm is as follows:
+
+我们从具有反向传播根的worker开始（所有根都必须是本地的）。
+查找当前Distributed Autograd Context 的所有send函数 。
+从提供的根和我们检索到的所有send函数开始，我们在本地计算依赖项 。
+计算依赖项后，使用提供的根来启动本地 autograd 引擎。
+当 autograd 引擎执行该recv函数时，该recv 函数通过 RPC 将输入梯度发送到适当的worker。每个recv函数都知道目标 worker id，因为它被记录为前向传播的一部分。通过autograd_context_id和 autograd_message_id 该recv函数被发送到远程主机。
+当远程主机收到这个请求时，我们使用 autograd_context_id和autograd_message_id来查找适当的send函数。
+如果这是worker第一次收到对给定 autograd_context_id的请求，它将按照上面的第 1-3 点所述在本地计算依赖项。
+然后将在第6点接受到的send方法插入队列，以便在该worker的本地 autograd 引擎上执行。
+最后，我们不是在 Tensor的.grad之上累积梯度，而是在每个Distributed Autograd Context之上分别累积梯度 。梯度存储在Dict[Tensor, Tensor]之中 ，Dict[Tensor, Tensor]基本上是从 Tensor 到其关联梯度的映射，并且可以使用 get_gradients() API检索该映射 。
 
 1. We start from the worker which has the roots for the backward pass
    (all roots must be local).
@@ -274,6 +314,16 @@ The distributed autograd graph with dependencies would be as follows (t5.sum() e
 
 .. image:: ../_static/img/distributed_autograd/distributed_dependencies_computed.png
 
+应用于上述示例的FAST 模式算法如下：
+
+在Worker 0上，我们从根loss和send1开始计算依赖关系。 结果，send1对Worker 0的依赖数为 1，mul对Worker 0的依赖数为 1。
+现在，我们在Worker 0上启动本地 autograd 引擎。 我们首先执行mul函数，将其输出作为t4的梯度，累积存储在 autograd 上下文中。 然后，我们执行recv2，它将这些梯度发送到Worker 1。
+由于这是Worker 1第一次知道有关此反向传播的信息，因此它将进行依赖关系计算，并且相应地标记send2，add和recv1的依赖性。
+接下来，在Worker 1的本地 autograd 引擎上将send2插入队列，该引擎将依次执行add和recv1。
+当执行recv1时，它将梯度发送到Worker 0。
+由于Worker 0已经计算了此向后传播的依赖性，因此它仅仅在本地将send1插入队列并且执行。
+最后，t1，t2和t4的梯度会累积在分布式 Autograd 上下文中。
+
 The `FAST mode algorithm`_ applied to the above example would be as follows:
 
 1. On ``Worker 0`` we start from the roots ``loss`` and ``send1`` to compute
@@ -302,6 +352,13 @@ you can refer to **Distributed Autograd Algorithm Smart mode** section in the
 
 Distributed Optimizer
 ^^^^^^^^^^^^^^^^^^^^^
+该DistributedOptimizer操作如下：
+
+获取要优化的远程参数（RRef）列表。这些参数也可以是包含在本地 RRef的本地参数。
+将一个Optimizer类作为本地优化器，该优化器将在所有不同的RRef拥有者之上运行。
+分布式优化器在每个工作节点上创建一个本地Optimizer实例，并且对于每一个Optimizer保存一个RRef。
+当调用torch.distributed.optim.DistributedOptimizer.step()时，分布式优化器使用 RPC 在适当的远程工作者上远程执行所有本地优化器。必须为 torch.distributed.optim.DistributedOptimizer.step() 提供一个分布式autogradcontext_id。 本地优化器使用context_id 在相应上下文中存储梯度。
+如果多个并发分布式优化器正在更新一个 worker 上的同一批参数，这些更新将通过锁来进行序列操作。
 
 The :class:`~torch.distributed.optim.DistributedOptimizer` operates as follows:
 
