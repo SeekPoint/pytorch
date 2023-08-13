@@ -37,7 +37,7 @@ def broadcast(tensor, devices=None, *, out=None):
     else:
         return torch._C._broadcast_out(tensor, out)
 
-
+#broadcast_coalesced 会跳转到 C++世界。
 def broadcast_coalesced(tensors, devices, buffer_size=10485760):
     """Broadcasts a sequence tensors to the specified GPUs.
     Small tensors are first coalesced into a buffer to reduce the number

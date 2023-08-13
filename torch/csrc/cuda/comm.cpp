@@ -46,8 +46,48 @@ struct unique_type_checker {
 //
 // Broadcast a source tensor (CPU or CUDA) to a list of CUDA devices, or CUDA
 // tensors on one or more devices.
-
+//最终调用到 _broadcast_out_impl，把源张量 (CPU or CUDA) 广播到一个CUDA设备列表上，其调用了nccl::broadcast(nccl_list)。
 // no checks
+
+
+/*
+
+至此，我们已经把数据和模型都分布到其他 GPU 之上。我们把目前的前向图先构建出来，大家可以有一个清晰的理解，replicate 调用了Broadcast.forward，同时往其context 存储了input_device和num_inputs。接下来可以进行前行传播。
+
++----------------------------------------------------------------------------------------+
+| DataParallel.forward                                                                   |
+|                                                                                        |
+|                                                                                        |
+|              replicate +--------------->   parallel_apply             gather           |
+|                                                                                        |
++----------------------------------------------------------------------------------------+
+
+     +---------------------------+
+     | Broadcast                 |
+     |                           |
+     |                           |
+     |                           |
+     |          forward()  +----------->
+     |                           |
+     |                           |
+     |  +---------------------+  |
+     |  | ctx                 |  |
+     |  |       input_device  |  |
+     |  |                     |  |
+     |  |       num_inputs    |  |
+     |  |                     |  |
+     |  +---------------------+  |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     +---------------------------+
+
+因为篇幅所限，下一篇我们从并行操作（前向传播）开始继续分析。
+
+*/
 static inline std::vector<Tensor>& _broadcast_out_impl(
     const Tensor& tensor,
     std::vector<Tensor>& out_tensors) {
@@ -59,7 +99,7 @@ static inline std::vector<Tensor>& _broadcast_out_impl(
     nccl_list.emplace_back(out_tensor);
   }
   if (nccl::is_available(nccl_list)) {
-    nccl::broadcast(nccl_list);
+    nccl::broadcast(nccl_list);  // 这里调用了 NCCL 操作
   } else {
 #else
   {
@@ -108,6 +148,8 @@ std::vector<Tensor> broadcast(const Tensor& tensor, IntArrayRef devices) {
               at::Device(DeviceType::CUDA, device)))); // preserve memory format
     }
   }
+
+  // 继续调用操作
   _broadcast_out_impl(tensor, diff_device_dst_tensors);
   // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   std::vector<Tensor> dst_tensors;
@@ -124,7 +166,15 @@ std::vector<Tensor> broadcast(const Tensor& tensor, IntArrayRef devices) {
   TORCH_INTERNAL_ASSERT(it == diff_device_dst_tensors.end());
   return dst_tensors;
 }
+/*
+具体代码位于 torch/csrc/cuda/comm.cpp。我们研究一下其注释。
 
+    broadcast_coalesced 会把变量分发给所有GPU。在broadcast_coalesced中，多个变量可以合并成一个大变量，然后广播到其他设备，然后会根据原始形状进行拆分（split）。
+
+    拆分（split）时，视图操作将使所有变量一起广播以共享一个版本计数器，因为它们都是大变量的视图。但是，该大变量会立即被丢弃，并且所有这些变量根本不共享存储。
+
+    例如，当两个缓冲区在“DataParallel”中一起广播，其中一个在“forward”期间执行in-place操作，而另一个在backward中被使用，autograd引擎将发出抱怨。因此，我们在广播后重新包装这些变量，并为它们提供单独的版本计数器。
+*/
 // NOTE [ Version Counter in comm.*_coalesced ]
 //
 // broadcast_coalesced
@@ -157,6 +207,13 @@ std::vector<Tensor> broadcast(const Tensor& tensor, IntArrayRef devices) {
 //
 // Similarly for reduce_add_coalesced, when the output are newly created
 // Variables.
+/*
+broadcast_coalesced 方法的具体参数解释如下：
+
+    tensors 必须在同一个设备，CPU 或者 GPU；
+    devices 即是要拷贝到的设备；
+    buffer_size 则是最大的buffer。这里用到 buffer 将小张量合并到缓冲区以减少同步次数；
+*/
 tensor_list2d broadcast_coalesced(
     TensorList tensors,
     IntArrayRef devices,
@@ -186,8 +243,8 @@ tensor_list2d broadcast_coalesced(
     std::vector<at::Tensor> results;
     if (chunk.options().is_sparse()) {
       auto flat_tuple = torch::utils::flatten_sparse_tensors(chunk.tensors);
-      auto broadcast_indices = broadcast(flat_tuple.first, devices);
-      auto broadcast_values = broadcast(flat_tuple.second, devices);
+      auto broadcast_indices = broadcast(flat_tuple.first, devices); //这里进行广播
+      auto broadcast_values = broadcast(flat_tuple.second, devices); //这里进行广播
       results.reserve(devices.size());
       for (size_t i = 1, num_devices = devices.size(); i < num_devices; ++i) {
         device_guard.set_index(devices[i]);
@@ -201,7 +258,7 @@ tensor_list2d broadcast_coalesced(
         }
       }
     } else {
-      auto results = broadcast(
+      auto results = broadcast(   // 这里进行广播
           torch::utils::flatten_dense_tensors(chunk.tensors), devices);
       for (size_t i = 1, num_devices = devices.size(); i < num_devices; ++i) {
         device_guard.set_index(devices[i]);
@@ -311,6 +368,12 @@ std::vector<at::Tensor>& scatter_out(
   return out_tensors;
 }
 
+'''
+在 scatter 之中可以看到，scatter就是把数据分布到各个GPU之上，逻辑如下：
+
+    首先调用 split_with_sizes 或者chunk 把tensor分割成 chunks。
+    其次把 chunks 分布到各个GPU之上，具体是通过 to 分发完成的。
+'''
 std::vector<at::Tensor> scatter(
     const at::Tensor& tensor,
     at::IntArrayRef devices,
@@ -329,11 +392,15 @@ std::vector<at::Tensor> scatter(
         chunk_sizes->size());
   }
   dim = at::maybe_wrap_dim(dim, tensor);
+
   // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
+  // 首先把tensor分割成 chunks
   std::vector<at::Tensor> chunks = chunk_sizes
       ? tensor.split_with_sizes(/*split_sizes=*/*chunk_sizes, /*dim=*/dim)
       : tensor.chunk(/*chunks=*/devices.size(), /*dim=*/dim);
   at::cuda::OptionalCUDAStreamGuard cuda_guard;
+
+  // 其次把 chunks 分布到各个GPU之上
   for (const auto i : c10::irange(chunks.size())) {
     const auto device_index = static_cast<int16_t>(devices[i]);
     if (device_index != tensor.get_device()) {
@@ -355,14 +422,14 @@ std::vector<at::Tensor> scatter(
           device_index >= 0,
           "Expected non-negative device index, but got ",
           device_index);
-      chunks[i] = chunks[i].to(
+      chunks[i] = chunks[i].to(  // 拷贝
           {DeviceType::CUDA, device_index},
           /*non_blocking=*/true,
           /*copy=*/false,
           /*memory_format=*/at::MemoryFormat::Preserve);
     }
   }
-  return chunks;
+  return chunks;  // 返回结果
 }
 
 // ***************** Gather *******************

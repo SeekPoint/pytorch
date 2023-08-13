@@ -14,7 +14,11 @@ from torch._utils import (
 )
 
 __all__ = ['DataParallel', 'data_parallel']
+'''
+虽然输入数据是均等划分并且并行分配，但是output loss每次都会在第一块GPU聚合相加计算，所以第一块GPU的内存负载和使用率会大于其他显卡。
 
+_check_balance 函数会检查负载是否平衡， 如果内存或者处理器 max/min > 0.75 会有警告。
+'''
 def _check_balance(device_ids):
     imbalance_warn = """
     There is an imbalance between your GPUs. You may want to exclude GPU {} which
@@ -122,17 +126,28 @@ class DataParallel(Module):
     # TODO: update notes/cuda.rst when this class handles 8+ GPUs well
 
     def __init__(self, module, device_ids=None, output_device=None, dim=0):
+        '''
+        __init__ 三个输入参数定义如下：
+
+            module ： 模型，
+            device_ids ：训练的device，
+            output_device ：保存输出结果的device。默认是在device_ids[0]，即第一块卡。
+        '''
         super().__init__()
         torch._C._log_api_usage_once("torch.nn.parallel.DataParallel")
+
+        # 得到可用的GPU
         device_type = _get_available_device_type()
         if device_type is None:
             self.module = module
             self.device_ids = []
             return
 
+        # 没有输入的情况下，使用所有可见的GPU
         if device_ids is None:
             device_ids = _get_all_device_indices()
 
+        # 把GPU列表上第一个作为输出，也会作为master
         if output_device is None:
             output_device = device_ids[0]
 
@@ -142,22 +157,44 @@ class DataParallel(Module):
         self.output_device = _get_device_index(output_device, True)
         self.src_device_obj = torch.device(device_type, self.device_ids[0])
 
+        # 检查负载均衡
         _check_balance(self.device_ids)
 
+        # 单卡就直接使用
         if len(self.device_ids) == 1:
             self.module.to(self.src_device_obj)
 
+    '''
+    0x04 前向传播
+        DataParallel并行计算只存在在前向传播过程之中。
+        
+        4.1 总述
+        之前示例之中已经用 cuda() 函数来把模型放到 GPU[0] 之上，GPU[0] 这里已经有了模型的parameters 和 buffers。
+        
+        model=model.cuda() 
+        所以forward函数之中，就不用作这一步，而是从分发模型和数据开始，需要注意的是：每次前向传播的时候都会分发模型。具体分为几个步骤。
+        
+            验证：遍历module的parameters和buffers，看看是否都在GPU[0]之上，如果不在，报错。
+            分发（(Scatter）输入数据：将输入数据根据其第一个维度（一般是 batch 大小）划分多份，传送到多个 GPU；
+            复制（Replicate）模型：将模型分别拷贝到多个 GPU；
+            并行应用（parallel_apply）：在多个模型之上并行进行前向传播。因为 GPU device_ids[0] 和 base parallelized module 共享存储，所以在device[0] 上的 in-place 更新也会被保留下来，其他的GPU则不会。
+            收集（Gather）：收集从多个 GPU 上传送回来的数据；
+    '''
     def forward(self, *inputs, **kwargs):
         with torch.autograd.profiler.record_function("DataParallel.forward"):
+            # 如果机器上没有GPU，则直接用CPU运行
             if not self.device_ids:
                 return self.module(*inputs, **kwargs)
 
+            # 遍历module的parameters和buffers，看看是否都在GPU[0]之上，如果不在，报错
             for t in chain(self.module.parameters(), self.module.buffers()):
                 if t.device != self.src_device_obj:
                     raise RuntimeError("module must have its parameters and buffers "
                                        "on device {} (device_ids[0]) but found one of "
                                        "them on device: {}".format(self.src_device_obj, t.device))
+            # 现在GPU[0]上有了模型，开始训练
 
+            # 首先分发输入
             inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
             # for forward function without any inputs, empty list and dict will be created
             # so the module can be executed on one device which is the first one in device_ids
@@ -165,15 +202,21 @@ class DataParallel(Module):
                 inputs = ((),)
                 kwargs = ({},)
 
+            # 如果只有单卡，直接使用
             if len(self.device_ids) == 1:
                 return self.module(*inputs[0], **kwargs[0])
+
+            # 分发模型
             replicas = self.replicate(self.module, self.device_ids[:len(inputs)])
+            # 并行训练
             outputs = self.parallel_apply(replicas, inputs, kwargs)
+            # 把前向传播的结果收集到master
             return self.gather(outputs, self.output_device)
 
-    def replicate(self, module, device_ids):
+    def replicate(self, module, device_ids): #replicate 只是转发，我们还需要接着看。
         return replicate(module, device_ids, not torch.is_grad_enabled())
 
+    #scatter 实际就是 scatter_kwargs 的封装，所以我们直接看 scatter_kwargs。
     def scatter(self, inputs, kwargs, device_ids):
         return scatter_kwargs(inputs, kwargs, device_ids, dim=self.dim)
 

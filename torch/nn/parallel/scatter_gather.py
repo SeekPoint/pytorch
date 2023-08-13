@@ -15,7 +15,8 @@ def _is_namedtuple(obj):
         isinstance(obj, tuple) and hasattr(obj, "_asdict") and hasattr(obj, "_fields")
     )
 
-
+#从注释中可以知道，tensor 会切分成大致相等的块，然后在给定的GPU之间分配。就是将一个 batch 数据近似等分成更小的 batch。
+# 对于其他类型的变量，会根据不同类型进行不同操作，比如调用 scatter_map 对其内部进行递归处理。
 def scatter(inputs, target_gpus, dim=0):
     r"""
     Slices tensors into approximately equal chunks and
@@ -24,14 +25,19 @@ def scatter(inputs, target_gpus, dim=0):
     """
     def scatter_map(obj):
         if isinstance(obj, torch.Tensor):
+            # 针对张量会调用Scatter.apply处理
             return Scatter.apply(target_gpus, None, dim, obj)
         if _is_namedtuple(obj):
+            # 调用 scatter_map 对其子模块进行递归处理。
             return [type(obj)(*args) for args in zip(*map(scatter_map, obj))]
         if isinstance(obj, tuple) and len(obj) > 0:
+            # 调用 scatter_map 对其子模块进行递归处理。
             return list(zip(*map(scatter_map, obj)))
         if isinstance(obj, list) and len(obj) > 0:
+            # 调用 scatter_map 对其子模块进行递归处理。
             return [list(i) for i in zip(*map(scatter_map, obj))]
         if isinstance(obj, dict) and len(obj) > 0:
+            # 调用 scatter_map 对其子模块进行递归处理。
             return [type(obj)(i) for i in zip(*map(scatter_map, obj.items()))]
         return [obj for targets in target_gpus]
 
@@ -49,16 +55,22 @@ def scatter(inputs, target_gpus, dim=0):
 
 def scatter_kwargs(inputs, kwargs, target_gpus, dim=0):
     r"""Scatter with support for kwargs dictionary"""
+    # 分发input
     inputs = scatter(inputs, target_gpus, dim) if inputs else []
+
+    # 分发kwargs
     kwargs = scatter(kwargs, target_gpus, dim) if kwargs else []
+
+    # 用空项补齐，这样可以让 inputs 和 kwargs 长度相等
     if len(inputs) < len(kwargs):
         inputs.extend(() for _ in range(len(kwargs) - len(inputs)))
     elif len(kwargs) < len(inputs):
         kwargs.extend({} for _ in range(len(inputs) - len(kwargs)))
+
+    # 返回 tuple
     inputs = tuple(inputs)
     kwargs = tuple(kwargs)
     return inputs, kwargs
-
 
 def gather(outputs, target_device, dim=0):
     r"""

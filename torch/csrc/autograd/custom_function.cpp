@@ -536,6 +536,7 @@ void AutogradContext::mark_dirty(const variable_list& inputs) {
   }
 }
 
+//其中，mark_non_differentiable 定义在 torch/csrc/autograd/custom_function.cpp，这里会在 AutogradContext 配置非微分的变量。
 void AutogradContext::mark_non_differentiable(const variable_list& outputs) {
   non_differentiable_.clear();
   non_differentiable_.reserve(outputs.size());

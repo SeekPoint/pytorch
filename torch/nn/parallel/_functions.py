@@ -6,7 +6,8 @@ from torch.autograd import Function
 from torch._utils import _get_device_index
 from typing import List, Optional
 
-
+#使用 Broadcast 过度一下的原因是：因为张量不是 detached，所以除了广播之外，还需要在上下文中设置哪些不需要梯度。
+# 在某些情况下，用户自定义的Function可能需要知道此情况。
 class Broadcast(Function):
 
     @staticmethod
@@ -19,9 +20,15 @@ class Broadcast(Function):
         if len(inputs) == 0:
             return tuple()
         ctx.num_inputs = len(inputs)
+
+        # input 放在 device[0]
         ctx.input_device = inputs[0].get_device()
+
+        # 和 detach 的情形一样
         outputs = comm.broadcast_coalesced(inputs, ctx.target_gpus)
         non_differentiables = []
+
+        # 在上下文中设置哪些不需要梯度
         for idx, input_requires_grad in enumerate(ctx.needs_input_grad[1:]):
             if not input_requires_grad:
                 for output in outputs:
@@ -81,7 +88,13 @@ class Gather(Function):
             scattered_grads = tuple(g[0] for g in scattered_grads)
         return (None, None) + scattered_grads
 
+'''
+前面提到了 Scatter.apply 处理张量，我们就接着看看。Scatter 拓展了 Function，逻辑如下：
 
+    如果 cuda 可用，则得到 streams 列表，这样可以在后台流进行 CPU 到 GPU 的拷贝。
+    调用 comm.scatter 进行分发。
+    调用 wait_stream 和 record_stream 对拷贝流进行同步。
+'''
 class Scatter(Function):
 
     @staticmethod
@@ -90,17 +103,20 @@ class Scatter(Function):
         ctx.dim = dim
         ctx.input_device = input.get_device() if input.device.type != "cpu" else -1
         streams = None
+        # 对于cuda，进行处理
         if torch.cuda.is_available() and ctx.input_device == -1:
             # Perform CPU to GPU copies in a background stream
             streams = [_get_stream(device) for device in target_gpus]
+
+        # 调用C++进行操作
         outputs = comm.scatter(input, target_gpus, chunk_sizes, ctx.dim, streams)
         # Synchronize with the copy stream
         if streams is not None:
             for i, output in enumerate(outputs):
                 with torch.cuda.device(target_gpus[i]):
                     main_stream = torch.cuda.current_stream()
-                    main_stream.wait_stream(streams[i])
-                    output.record_stream(main_stream)
+                    main_stream.wait_stream(streams[i])  # 同步
+                    output.record_stream(main_stream)   # 同步
         return outputs
 
     @staticmethod

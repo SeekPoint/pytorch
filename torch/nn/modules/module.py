@@ -2467,6 +2467,117 @@ class Module:
 
         return sorted(keys)
 
+    '''
+    4.3.3 共享拷贝
+    在 PyTorch 之中，有浅拷贝和深拷贝之分。
+    
+    假定模型内部是一系列参数矩阵，model这个对象实际上是指向各个参数矩阵。
+    
+    浅拷贝(shadow copy) 则只是拷贝最外层的数值和指针，不拷贝更深层次的对象，就是只拷贝了父对象。model.state_dict()也是浅拷贝，如果令param=model.state_dict()，那么当你修改param，相应地也会修改model的参数。
+    与之对应，深拷贝(deepcopy)：拷贝数值、指针和指针指向的深层次内存空间，即拷贝了父对象及其子对象。
+    比如：
+    
+    import torch
+    import copy
+    
+    # a引用指向某块内存空间
+    a = torch.nn.Linear(in_features=5, out_features=1, bias=True)
+    # 浅拷贝相当于拷贝一个引用，所以他们指向的内存空间是一样的
+    b = copy.copy(a)
+    
+    # state_dict is shadow copy
+    p = a.state_dict()
+    print(id(a.state_dict()) == id(p)) # False，这两个不相等
+    
+    # 通过引用p去修改内存空间
+    print(a.weight)
+    p['weight'][0][0] = 8.8888
+    
+    # 可以看到a指向的内存空间也被修改了
+    print(a.weight)
+    输出如下：
+    
+    False
+    Parameter containing:
+    tensor([[-0.2253,  0.0802,  0.3984, -0.1208,  0.3796]], requires_grad=True)
+    Parameter containing:
+    tensor([[ 8.8888,  0.0802,  0.3984, -0.1208,  0.3796]], requires_grad=True)
+    具体回到我们的分析，在 module类中，有 _replicate_for_data_parallel 方法，其用来返回一个副本，这些副本和原始模型共享存储，就是浅拷贝。
+    
+    
+    可以认为，在设置操作之前，拷贝如下：
+
++---------------------------------------------------------------+
+|                               +----------------------+        |
+| CPU                           | Module               |        |
+|                               |                      |        |
+|                               |     _parameters      |        |
+|                               |                      |        |
+|                    +--------------> _buffers  <-------------+ |
+|                    |          |                      |      | |
+|                    |     +------->  _modules  <----------+  | |
+|                    |     |    |                      |   |  | |
+|                    |     |    +----------------------+   |  | |
+| +---------------------+  |    +----------------------+   |  | |
+| | module_copies[0] |  |  |    | module_copies[1]     |   |  | |
+| |                  |  |  |    |                      |   |  | |
+| |    _parameters   |  |  |    |     _parameters      |   |  | |
+| |                  |  |  |    |                      |   |  | |
+| |    _buffers +----+  |  |    |     _buffers +--------------+ |
+| |                     |  |    |                      |   |    |
+| |    _modules  +-------->+    |     _modules  +--------->+    |
+| |                     |       |                      |        |
+| +---------------------+       +----------------------+        |
++---------------------------------------------------------------+
+
+  +---------------------+       +----------------------+
+  | GPU 0               |       | GPU 1                |
+  |                     |       |                      |
+  |     _parameters     |       |      _parameters     |
+  |                     |       |                      |
+  |     _buffers        |       |      _buffers        |
+  |                     |       |                      |
+  |                     |       |                      |
+  |                     |       |                      |
+  +---------------------+       +----------------------+
+
+在设置操作之后，则如下：
+
+   +-----------------------------------------------------------------+
+   | CPU                             +----------------------+        |
+   |                                 | Module               |        |
+   |                                 |                      |        |
+   |                                 |     _parameters      |        |
+   |                                 |                      |        |
+   |                                 |     _buffers         |        |
+   |                                 |                      |        |
+   |                                 |     _modules         |        |
+   |                                 |                      |        |
+   |                                 +----------------------+        |
+   |   +---------------------+       +----------------------+        |
+   |   | module_copies[0]    |       | module_copies[1]     |        |
+   |   |                     |       |                      |        |
++---------+ _parameters      |       |     _parameters +-----------+ |
+|  |   |                     |       |                      |      | |
+|  |   |    _buffers +------------+  |     _buffers +-----------+  | |
+|  |   |                     |    |  |                      |   |  | |
+|  |   |    _modules         |    |  |     _modules         |   |  | |
+|  |   |                     |    |  |                      |   |  | |
+|  |   +---------------------+    |  +----------------------+   |  | |
+|  +-----------------------------------------------------------------+
+|                                 |                             |  |
+|      +---------------------+    |  +----------------------+   |  |
+|      | GPU 0               |    |  | GPU 1                |   |  |
+|      |                     |    |  |                      |   |  |
++--------->  _parameters     |    |  |      _parameters <----------+
+       |                     |    |  |                      |   |
+       |     _buffers  <----------+  |      _buffers   <--------+
+       |                     |       |                      |
+       |                     |       |                      |
+       |                     |       |                      |
+       +---------------------+       +----------------------+
+
+    '''
     def _replicate_for_data_parallel(self):
         replica = self.__new__(type(self))
         replica.__dict__ = self.__dict__.copy()
@@ -2474,8 +2585,8 @@ class Module:
         # replicas do not have parameters themselves, the replicas reference the original
         # module.
         replica._parameters = OrderedDict()
-        replica._buffers = replica._buffers.copy()
-        replica._modules = replica._modules.copy()
+        replica._buffers = replica._buffers.copy() # 浅拷贝
+        replica._modules = replica._modules.copy() # 浅拷贝模型内部的子模块
         replica._is_replica = True  # type: ignore[assignment]
 
         return replica
