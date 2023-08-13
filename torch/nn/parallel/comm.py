@@ -103,7 +103,7 @@ def reduce_add(inputs, destination=None):
             result.add_(other.to(device=destination_device, non_blocking=True))
     return result
 
-
+#看注释就是：从多个 GPU 来相加梯度，代码之中就是归并相加。
 def reduce_add_coalesced(inputs, destination=None, buffer_size=10485760):
     """Sums tensors from multiple GPUs.
 
@@ -129,6 +129,7 @@ def reduce_add_coalesced(inputs, destination=None, buffer_size=10485760):
     # process sparse ones first since they may have different sizes on different gpus
     for tensor_at_gpus in zip(*inputs):
         if all(t.is_sparse for t in tensor_at_gpus):
+            # 进行归并
             result = reduce_add(tensor_at_gpus, destination)  # this will be sparse too
             output.append(result)
             ref_order.append(tensor_at_gpus[0])
@@ -140,6 +141,7 @@ def reduce_add_coalesced(inputs, destination=None, buffer_size=10485760):
     # now the dense ones, which have consistent sizes
     for chunks in zip(*itrs):
         flat_tensors = [_flatten_dense_tensors(chunk) for chunk in chunks]  # (num_gpus,)
+        # 进行归并
         flat_result = reduce_add(flat_tensors, destination)
         for t in _unflatten_dense_tensors(flat_result, chunks[0]):
             # The unflattened tensors do not share storage, and we don't expose

@@ -36,20 +36,103 @@ model = torch.nn.DaraParallel(ToyModel);
 optimizer = torch.optim.SGD(model.parameters(), 1.0e-5,
                             momentum=0.01,
                             weight_decay=0.01)
+'''
+0x02 计算损失
+现在，我们已经把梯度收集到 device[0] 之上，现在我们开始进行反向传播，其整体逻辑如上图所示。首先是在 device[0] 计算损失。其实这步计算损失算是前向计算和后向传播的中间环节，这里把它算成是反向传播的开端，如下图。
 
-for batch_idx, (data, label) in pbar:
+
+我们找出来示例代码看看，里面关键的几点：
+
+数据已经放到了默认GPU，即GPU 0上。
+prediction 是gather到 GPU 0 的前向计算输出。
+使用 loss = criterion(prediction,target_var) 在默认GPU之上计算loss。
+使用 loss.backward() 开始反向传播。
+
+3.4 更新模型参数
+
+这部分功能是：更新梯度参数。进行梯度下降，并更新主GPU上的模型参数。
+
+另外，由于模型参数仅在主GPU上更新，而其他从属GPU此时并不是同步更新的，所以需要将更新后的模型参数复制到剩余的从属 GPU 中，以此来实现并行。这就是在下一次for循环之中进行，以此循环反复
+
+
+
+
+0x04 总结
+我们总结一下流程，起初数据和模型被放入到默认GPU，就是 GPU 0，然后迭代如下：
+
+scatter 会把数据分发到其他 GPU。
+replicate 会把模型分发到其他 GPU。
+parallel_apply 会启动多个线程进行前向计算。
+gather 会把计算输出收集到 GPU 0。
+GPU 0 会计算损失。
+把梯度 scatter 到其他 GPU。
+模型调用 backward 计算。
+把梯度归并到 GPU 0。
+optimizer.step 更新模型。
+具体对应下图之中的数字。
+
+                     +-----+                   +-------+
+                     |GPU1 |                   | GPU1  |
+main thread          +-----+                   +-------+
+ +-----> Forward----> scatter +--------------> replicate------->  parallel_apply  +-------->  gather +---------+
+                        +                           +                     +                                    |
+                      1 |                         2 |                   3 |                                    |
+                        |                           |                     |                                    |
+                        |  +---------+----------+---+                     |                                    |
+                        |  |         |          |                         |                                    |
+                        +---------+----------+  |               +--------------------+                         |
+                        |  |      |  |       |  |               |         |          |                         |
+                        |  | 2    |  | 2     |  | 2       thread|1     thread 2    thread 3                    |
+                      1 |  |    1 |  |     1 |  |               |         |          |                         |
+                        |  v      |  v       |  v               |         |          |                         |
+                        v         v          v                  v         v          v                         |
+                     +--+---+  +--+---+   +--+---+           +--+---+  +--+---+   +--+---+    +-------+        |
+                     | GPU1 |  | GPU2 |   | GPU3 |           | GPU1 |  | GPU2 |   | GPU3 |    | GPU1  |        |
+                     +------+  +------+   +------+           +--+---+  +-+----+   +---+--+    +-+-+--++        |
+                                                                |        |            |         ^ ^  ^         |
+                                                                |        |            |   4     | |  |         |
+                                                                |        |            ----------^ |  |         |
+                                                                |        |                4       |  |         |
+                                                                |        +------------------------+  |         |
+                                                                |                                    |         |
+                                                                +------------------------------------+         |
+        +------------------------------------------------------------------------------------------------------+
+        |                               +------+
+        |                               | GPU1 |
+        |                               +------+                                                                     main thread
+        +-> loss = criterion(...)+-----> scatter   +-------------->  model.backward() +---------->  reduce gradient +-------> optimizer.step
+                     +                      +                               +                          +------+         9
+                     | 5                    | 6                             | 7                        | GPU1 |
+                     |                      |                               |                          +--+---+
+                     |              v---------------v             +--------------------+                  ^
+                     |              |       |       |             |         |          |                  | 8
+                     |              |       |       |         thread 1    thread 2   thread 3             |
+                     |              |       |       |             +         |          |           +-------------+
+                     |              |       |       |             |         |          |           |      |      |
+                     v              v       v       v             v         v          v           |      |      |
+                  +--+---+      +---+-+  +--+--+  +-+---+      +--+--+  +---+--+    +--+--+     +--+--+ +-+--+ +-+---+
+                  | GPU1 |      | GPU1|  | GPU2|  |GPU3 |      | GPU1|  | GPU2 |    |GPU3 |     | GPU1| |GPU2| | GPU3|
+                  +------+      +-----+  +-----+  +-----+      +-----+  +------+    +-----+     +-----+ +----+ +-----+
+
+
+'''
+for batch_idx, (data, label) in pbar: # 6. 下一次迭代会继续从分发开始
     if args.cuda:
-        data, label = data.cuda(), label.cuda();  # 数据放到了默认GPU
+        data, label = data.cuda(), label.cuda();  # 1. 数据已经放到了默认GPU上
     data_v = Variable(data)
     target_var = Variable(label)
 
-    prediction = model(data_v, target_var, args)  # 多线程并行前向传播
+    prediction = model(data_v, target_var, args)  # 多线程并行前向传播  # 2. prediction 是gather到 GPU 0 的前向计算输出
+    # 到目前为止，我们完成了DataParallel.forward()
+    #这里的prediction 预测结果是由两个gpu合并过的，并行计算只存在于前向传播里
+    #前向传播每个gpu计算量为 batch_size/len(device_ids),等前向传播完了将结果聚合到主gpu里
+
     criterion = nn.CrossEntropyLoss()
-    loss = criterion(prediction, target_var)  # 在默认GPU之上计算loss
+    loss = criterion(prediction, target_var)  # 3. 在默认GPU之上计算loss
 
     optimizer.zero_grad()
-    loss.backward()  # 多线程并行后向传播
-    optimizer.step()  # 更新参数
+    loss.backward()  # 多线程并行后向传播   # 4. 开始反向传播
+    optimizer.step()  # 更新参数  # 5. 更新模型
 
 '''
 0x01 前文回顾

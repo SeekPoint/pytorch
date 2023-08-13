@@ -373,6 +373,57 @@ std::vector<at::Tensor>& scatter_out(
 
     首先调用 split_with_sizes 或者chunk 把tensor分割成 chunks。
     其次把 chunks 分布到各个GPU之上，具体是通过 to 分发完成的。
+
+scatter 的作用就是把tensor进行split，然后分发给各个设备的流。
+
+
+3.2 并行后向传播
+现在梯度已经分发到各个 GPU，接下来正式进入并行后向传播，这部分作用是：在各个GPU之上并行运行后向传播，计算参数梯度。对应下图：
+
+
+
+这部分调用到了原始模型的 backward，具体如下图中的数值 4：
+
++--------------------------------------------------------------------------------------+
+| DataParallel.forward                                                                 |
+|                                                                                      |
+|               1                               2                           3          |
+|           replicate +--------------->   parallel_apply +--------------> gather       |
+|                                                                                      |
++--------------------------------------------------------------------------------------+
+
+  +---------------------------+       +-------------------+       +--------------------+
+  | Broadcast                 |       | module            |       |Gather              |
+  |                           |       |                   |       |                    |
+  |                           |       |                   |       |                    |
+  |              1            |       |         2         |       |         3          |
+  |          forward()  +-----------> |      forward() +--------> |      forward()     |
+  |                           |       |                   |       |                    |
+  |                           |       |                   |       |                    |
+  |  +---------------------+  |       |                   |       | +----------------+ |
+  |  | ctx                 |  |       |                   |       | |ctx             | |
+  |  |       input_device  |  |       |                   |       | |     input_gpus | |
+  |  |                     |  |       |                   |       | |                | |
+  |  |       num_inputs    |  |       |                   |       | |     input_sizes| |
+  |  |                     |  |       |                   |       | |                | |
+  |  +---------------------+  |       |                   |       | |     dim        | |
+  |                           |       |                   |       | +----------------+ |
+  |                           |       |                   |       |                    |
+  |                           |       |                   |       |                    |
+  |                           | <---------+  backward()   | <---------+ backward()     |
+  |                           |       |          4        |       |         3          |
+  |                           |       |                   |       |                    |
+  +---------------------------+       +-------------------+       +--------------------+
+
++--------------------------------------------------------------------------------------+
+| loss.backward()                                                                      |
+|                                                4                          3          |
+|                                     <------------------+  <--------------------+     |
+|                                                                                      |
+|                                                                                      |
++--------------------------------------------------------------------------------------+
+
+
 '''
 std::vector<at::Tensor> scatter(
     const at::Tensor& tensor,
@@ -394,7 +445,7 @@ std::vector<at::Tensor> scatter(
   dim = at::maybe_wrap_dim(dim, tensor);
 
   // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
-  // 首先把tensor分割成 chunks
+  // 首先把tensor分割成 chunks   // 把tensor进行split
   std::vector<at::Tensor> chunks = chunk_sizes
       ? tensor.split_with_sizes(/*split_sizes=*/*chunk_sizes, /*dim=*/dim)
       : tensor.chunk(/*chunks=*/devices.size(), /*dim=*/dim);
@@ -422,6 +473,7 @@ std::vector<at::Tensor> scatter(
           device_index >= 0,
           "Expected non-negative device index, but got ",
           device_index);
+      // 发送给各个设备的流
       chunks[i] = chunks[i].to(  // 拷贝
           {DeviceType::CUDA, device_index},
           /*non_blocking=*/true,
@@ -433,7 +485,7 @@ std::vector<at::Tensor> scatter(
 }
 
 // ***************** Gather *******************
-//
+//_gather_out_impl 执行了具体的gather 操作，就是把 输入的tensors 拷贝到 目标 tensor 之上，即拷贝到 GPU0 之上。
 // Gather a list of CUDA tensors on one or more devices to a target tensor or
 // device, either CPU or CUDA.
 
@@ -450,7 +502,7 @@ static inline at::Tensor& _gather_out_impl(
   }
   auto chunks =
       out_tensor.split_with_sizes(/*split_sizes=*/chunk_sizes, /*dim=*/dim);
-  for (const auto i : c10::irange(tensors.size())) {
+  for (const auto i : c10::irange(tensors.size())) {  // 拷贝到GPU 0 之上
     chunks[i].copy_(tensors[i], /*non_blocking=*/out_tensor.is_cuda());
   }
   return out_tensor;
@@ -511,10 +563,11 @@ at::Tensor& gather_out(
   return _gather_out_impl(tensors, out_tensor, dim);
 }
 
+//gather 函数调用了 _gather_out_impl 来完成拷贝操作。
 at::Tensor gather(
     at::TensorList tensors,
     int64_t dim,
-    c10::optional<int32_t> destination_index) {
+    c10::optional<int32_t> destination_index) {  // destination_index 就是 device[0] 的index
   TORCH_CHECK(!tensors.empty(), "Expected at least one tensor to gather from");
   int64_t total_size = 0;
   auto& first = tensors.front();
@@ -561,14 +614,17 @@ at::Tensor gather(
   }
   expected_size[dim] = total_size;
   at::Device device(DeviceType::CPU);
+
+  // 根据 index 得到输出的目标设备
   if (!destination_index || *destination_index != -1) {
+    // device 就是 GPU 0 这个设备
     device = at::Device(
         DeviceType::CUDA, destination_index ? *destination_index : -1);
   }
-
+  //首先，构建一个空的目标tensor建立在目标设备之上，命名为result
   at::Tensor result =
       at::empty(expected_size, first.options().device(device), memory_format);
-  return _gather_out_impl(tensors, result, dim);
+  return _gather_out_impl(tensors, result, dim); // 然后对result进行gather
 }
 
 } // namespace cuda

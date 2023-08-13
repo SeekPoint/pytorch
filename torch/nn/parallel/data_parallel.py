@@ -179,6 +179,12 @@ class DataParallel(Module):
             复制（Replicate）模型：将模型分别拷贝到多个 GPU；
             并行应用（parallel_apply）：在多个模型之上并行进行前向传播。因为 GPU device_ids[0] 和 base parallelized module 共享存储，所以在device[0] 上的 in-place 更新也会被保留下来，其他的GPU则不会。
             收集（Gather）：收集从多个 GPU 上传送回来的数据；
+            
+    目前，我们已经使用 Scatter 函数将数据从 device[0] 分配并复制到不同的卡，
+    用 Replicate 函数将模型从 device[0] 复制到不同的卡，这样各个卡都有了同样的模型和不同的数据，然后分别调用 forward 计算损失和梯度。
+    也就是 parallel_apply 部分。
+
+    现在要做的就是把分布式计算的梯度合并到 device[0]，就是 self.output_device。
     '''
     def forward(self, *inputs, **kwargs):
         with torch.autograd.profiler.record_function("DataParallel.forward"):
@@ -194,7 +200,7 @@ class DataParallel(Module):
                                        "them on device: {}".format(self.src_device_obj, t.device))
             # 现在GPU[0]上有了模型，开始训练
 
-            # 首先分发输入
+            # 首先分发输入  分发数据
             inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
             # for forward function without any inputs, empty list and dict will be created
             # so the module can be executed on one device which is the first one in device_ids
@@ -208,9 +214,12 @@ class DataParallel(Module):
 
             # 分发模型
             replicas = self.replicate(self.module, self.device_ids[:len(inputs)])
+
             # 并行训练
             outputs = self.parallel_apply(replicas, inputs, kwargs)
+
             # 把前向传播的结果收集到master
+            # 收集到 devices[0]
             return self.gather(outputs, self.output_device)
 
     def replicate(self, module, device_ids): #replicate 只是转发，我们还需要接着看。
