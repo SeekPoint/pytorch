@@ -717,6 +717,7 @@ class DistributedDataParallel(Module):
             output = tree_unflatten(output_placeholders, treespec)
         return output
 
+    #_rebuild_buckets 函数也可以直接调用，比如如下情况，就是在整个训练期间内在 forward 调用了一次。
     def forward(self, *inputs, **kwargs):
         self.pre_forward(*inputs, **kwargs)
         with torch.autograd.profiler.record_function("DistributedDataParallel.forward"):
@@ -1237,6 +1238,28 @@ class DistributedDataParallel(Module):
             )
         self.reducer._set_ddp_runtime_logging_sample_rate(sample_rate)
 
+    '''
+    0x03 静态图
+3.1 缘由
+虽然 PyTorch 是动态图，但是用户可以明确地让DDP知道训练图是静态的，有如下情况时候可以设定：
+
+已使用和未使用的参数集在整个训练循环中不变，在这种情况下，用户是否将find_unsued_parameters设置为true并不重要。
+
+图形的训练方式在整个训练循环过程中不会改变（意味着不存在依赖于迭代的控制流）。当图被设置为静态时，DDP将支持以前不支持的case，比如：
+
+可重入的反向传播。
+多次activation checkpointing。
+activation checkpointing 并且find_unused_parameters = true。
+并不是所有的输出张量都用于损失计算。。
+在前向函数之外有一个模型参数。
+当find_unsued_parameters=true时或者存在未使用的参数，可能会提高性能，因为DDP在每个迭代之内不会搜索网络来检查未使用的参数。
+3.2 使用
+_set_static_graph 可以配置静态图，此API应在DistributedDataParallel构造之后，并且在训练循环开始之前调用。并且，也应该以同样的方式对所有的rank 进行调用。例如：
+
+ddp_model = DistributedDataParallel(model)
+ddp_model._set_static_graph()
+for i in range(n):
+    '''
     def _set_static_graph(self):
         """
         It is recommended to set static graph in the DDP constructor, which will
@@ -1249,7 +1272,7 @@ class DistributedDataParallel(Module):
             )
             return
         self.static_graph = True
-        self.reducer._set_static_graph()
+        self.reducer._set_static_graph()  # 调用 Reducer 进行配置
         assert self.logger is not None
         self.logger._set_static_graph()
         if self.find_unused_parameters:

@@ -135,6 +135,7 @@ class TORCH_API Reducer {
   // Returns true if we should rebuild buckets, else false. We only rebuild
   // buckets once after the first iteration and never rebuild them if
   // find_unused_parameters_.
+  //  因为 PyTorch 是动态生成计算图，所以需要相应重建桶。但是只有设置了静态图 并且 第一次迭代之后才会重建，如果设置 find_unused_parameters_，就不重建
   inline bool should_rebuild_buckets() const {
     return (static_graph_ || !find_unused_parameters_) && !has_rebuilt_bucket_;
   }

@@ -1140,7 +1140,8 @@ class DistributedDataParallel(Module, Joinable):
             # call _rebuild_buckets before the peak memory usage increases
             # during forward computation.
             # This should be called only once during whole training period.
-            if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+            ## 在这里进行直接调用
+            if torch.is_grad_enabled() and self.reducer._rebuild_buckets():  # 设定
                 logger.info(
                     "Reducer buckets have been rebuilt in this iteration."
                 )
@@ -1307,6 +1308,66 @@ class DistributedDataParallel(Module, Joinable):
         locally_used_param_map = self.reducer._get_local_used_map()
         self.process_group.allreduce(locally_used_param_map)
 
+    #再比如 Join 方法也可以直接调用进行重建。
+    '''
+    0x05 Join
+Join 是为了解决训练数据不均匀的问题，就是允许某些输入较少的worker（其已经完成Join操作）可以继续和那些尚未结束的worker继续执行集合通信，就是一个欺骗操作(Shadow)。
+
+5.1 缘起
+支撑DDP背后的是几个集合通信库的all-reduce操作，其完成了各个worker之间的梯度同步。而当训练数据在 ranks 之间的输入是不均匀（uneven）的，就会导致DDP会挂起。因为集合通信要求在进程组中的所有rank都参与，因此如果一个rank的输入少，其他ranks会hang或者报错（取决于后端），而且任何类在执行同步集合通信时，在每次迭代都会遇到这个问题。
+
+因此，DDP 给出了一个 "Join" API，Join是一个上下文管理器，在每个rank的训练循环之中使用。数据量少的 rank 会提前耗尽输入，这时它将给集合通信一个假象，从而会构建一个虚拟（dummy）的 all-reduce，以便在数据不足时候与其他 ranks 匹配。具体如何制造这个假象是由注册hook指定。
+
+其大致思路如下：
+
+                +----------------------------+
+                |             Data           |
+                |   +--------+   +--------+  |
+                |   |        |   | Empty  |  |
+                |   |        |   |        |  |
+                |   +-----+--+   +--------+  |
+                |         |                  |
+                |         |                  |
+                +----------------------------+
+                          |
+                          |
+        +------------+    |               +------------+
+        |            |    |               |            |
++---->  |    Model   |    |               |   Model    | <-----+
+|       |            |    |               |            |       |
+|       +------+-----+    |               +------+-----+       |
+|              |          |                      |             |
+|              |          |                      |             |
+|              v          |                      v             |
+|       +------+-----+    |             +--------+----------+  |
+|       |  Forward   +<---+             | _JoinHook         |  |
+|       |  (local)   |                  |                   |  |
+|       +------+-----+                  |                   |  |
+|              |                        |                   |  |
+|              |                        |                   |  |
+|              v                        | +---------------+ |  |
+|       +------+-----+                  | | main_hook     | |  |
+|       |  Backward  |                  | |               | |  |
+|       |  (local)   |                  | |               | |  |
+|       +------+-----+                  | |               | |  |
+|              |                        | |               | |  |
+|              |                        | |               | |  |
+|              v                        | |               | |  |
+|       +------+-----+                  | |               | |  |
+|       | All-Reduce |     Sync grads   | |   All-Reduce  | |  |
+|       |            | <--------------> | |   (Dummy)     | |  |
+|       +------+-----+                  | |               | |  |
+|              |                        | +---------------+ |  |
+|              |                        +-------------------+  |
+|              v                                 |             |
+|     +--------+-------+                         |             |
+|     | Update Weights |                         |             |
+|     |                |                         |             |
+|     +--------+-------+                         |             |
+|              |                                 |             |
+|              |                                 |             |
++--------------+                                 +-------------+
+    '''
     def join(
         self,
         divide_by_initial_world_size: bool = True,
