@@ -80,6 +80,7 @@ namespace autograd {
 
 
 
+
 */
 //accumulateGrad 实际就是：
 //先累积梯度。
@@ -155,8 +156,69 @@ struct TORCH_API AccumulateGrad : public Node {
   // update_grad: Function that is used to update grad for the variable.
   //              The argument to the function is a Tensor which
   //              is used to set a new value for the grad.
+
+  /*
+  具体可以如下图所示，左边是数据结构，右面是算法流程，右面的序号表示执行从上至下，执行过程之中会用到左边的数据结构，算法与数据结构的调用关系由横向箭头表示。
+
+分布式引擎调用execute_graph_task_until_ready_queue_empty来执行具体的 GraphTask。
+Engine::evaluate_function 会调用 GraphTask 之中的 ExecInfo。
+然后会访问 GradCaptureHook，调用hook，hook 的 operator函数会调用到 autogradContext_->accumulateGrad。
+autogradContext_ 会执行 accumulateGrad，对 hook（DistAccumulateGradCaptureHook）之中保存的 accumulateGrad_ 做操作。
+AccumulateGrad::accumulateGrad 会完成最终的梯度更新操作。
+                                     DATA STRUCTURE   +  ALGORITHM
+                                                      |
++-----------------------------------------------+     |
+| GraphTask                                     |     |  DistEngine::execute_graph_task_until_ready_queue_empty
+|                                               |     |      +                |
+|   unordered_map<Node*, ExecInfo> exec_info_   |     |      |                |
+|                            +                  | <----------+                |
+|                            |                  |     |                       |
++-----------------------------------------------+     |                       | 1
+                             |                        |                       |
+                             |                        |                       |
+                             v                        |                       |
+       +---------------------+------------------+     |                       v
+       | ExecInfo                               | <-------------+  Engine::evaluate_function
+       |                                        |     |                       +
+       |       < vector<Capture> > captures_    |     |                       |
+       |                   +                    |     |                       |
+       |                   |                    |     |                       | 2
+       +----------------------------------------+     |                       |
+                           |                          |                       v
+                           |                          |
+                           v                          |      +--+ captured_grad = (*hook)(captured_grad)
+       +-------------------+--------------------+     |      |                +
+       | Capture                                |     |      |                |
+       |                                        |     |      |                |
+       |   vector< <GradCaptureHook> > hooks_ <--------------+                | 3
+       |                   +                    |     |                       |
+       +----------------------------------------+     |                       v
+                           |                          |
+                           |                          |   +--+ autogradContext_->accumulateGrad(
+                           v                          |   |         accumulateGrad_-> variable, inputGrads[0], 3)
+       +-------------------+--------------------+     |   |                   +
+       | DistAccumulateGradCaptureHook          |     |   |                   |
+       |                                        |     |   |                   |
+       |      ContextPtr autogradContext_    <------------+                   | 4
+       |                                        |     |   |                   |
+       |      AccumulateGrad accumulateGrad_ <------------+                   v
+       |                          +             |     |
+       +----------------------------------------+     |   +-+ new_grad = AccumulateGrad::callHooks(variable, grad)
+                                  |                   |   |                   +
+                                  |                   |   |                   |
+                                  v                   |   |                   | 5
+              +-------------------+------+            |   |                   v
+              | AccumulateGrad           |            |   |
+              |                          |            |   |      AccumulateGrad::accumulateGrad(
+              |      Variable variable <------------------+------+   variable, old_grad, new_grad,)
+              |                          |            |
+              +--------------------------+            +
+
+
+
+*/
   template <typename T>
-  static void accumulateGrad(
+  static void accumulateGrad(   // 这里会进行具体的累积梯度
       const Variable& variable,
       at::Tensor& variable_grad,
       const at::Tensor& new_grad,

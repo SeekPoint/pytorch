@@ -1059,6 +1059,21 @@ evaluate_function 方法完成了反向计算的逻辑，总体逻辑如下：
     最终结果保存在 captured_vars_[capture.output_idx_] 之中。
 
 
+
+
+2.3 evaluate_function
+上面代码之中，实际上会调用原生引擎的 evaluate_function 来完成操作。
+
+我们看看如何使用 exec_info_，如果没有设置为需要执行，则就不处理。在此处，我们可以看到 上文提到的recvBackwardEdges 如何与 exec_info_ 交互。
+
+遍历 recvBackwardEdges，对于每个 recvBackward，在 GraphTask.exec_info_ 之中对应项之上设止为需要执行。
+
+具体代码如下，这里会：
+
+针对 AccumulateGrad 来累积梯度。
+调用 RecvRpcBackward 来向反向传播下游发送消息。
+
+具体结合到分布式引擎，就是当引擎发现某一个 Node 是 RecvRpcBackward，就调用其 apply 函数。
 */
 void Engine::evaluate_function(
     std::shared_ptr<GraphTask>& graph_task,
@@ -1108,6 +1123,7 @@ void Engine::evaluate_function(
         for (const auto& hook :
              capture.DO_NOT_USE_DEPRECATED_get_capture_hooks()) {
           // 这里使用了 hook 进行后置操作
+          ////这里调用 hook，就是 DistAccumulateGradCaptureHook 的 operator()，captured_grad 就是累积的梯度
           captured_grad = (*hook)(captured_grad);
         }
         if (opt_parent_stream) {
@@ -1118,6 +1134,7 @@ void Engine::evaluate_function(
     }
     if (!fn_info.needed_) {
       // Skip execution if we don't need to execute the function.
+      // 如果没有设置需要执行，则直接返回。recvBackward 会设置需要执行
       return;
     }
   }
@@ -1125,6 +1142,7 @@ void Engine::evaluate_function(
 // 执行后向计算 // 进行反向计算
 //这部分是反向传播的复杂之处。
 //现在调用 call_function，得到了后向传播的输出，记录到了 outputs 之中。
+// 这里就是调用 recvBackward  // 这里就是调用 recvBackward.apply 函数
   auto outputs = call_function(graph_task, func, inputs);
 
 // 如果不需要保持计算图，则本节点释放变量
@@ -1403,6 +1421,18 @@ auto Engine::execute(
   }
 
 // 构建一个GraphTask
+//对于普通引擎也会设置一个 cpu 专用 queue。
+/*
+2.5 小结
+对于分布式引擎，与普通引擎在计算部分主要不同之处为：
+
+如果是 RecvRpcBackward 则会给对应的下游节点发送 RPC 消息。
+
+如果是 AccumulateGrad，则在上下文累积梯度。
+
+所以我们接下来看看具体这两部分如何处理。
+
+*/
   auto graph_task = std::make_shared<GraphTask>(
       /* keep_graph */ keep_graph,
       //用来指定一次反向计算后是否释放资源。资源就是在前向过程中建立起来的资源。

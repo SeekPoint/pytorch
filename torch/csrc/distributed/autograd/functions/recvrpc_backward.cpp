@@ -64,10 +64,16 @@ rpcAgent+>send(Message)  +-------------------------------------------->
                                                                 +
 
 
+
+torch/csrc/distributed/autograd/functions/recvrpc_backward.cpp 定义了其 apply 函数，其作用就是：
+
+把传入的梯度 grads 放入outputGrads，因为要输出给下一环节。
+构建 PropagateGradientsReq，这就是 BACKWARD_AUTOGRAD_REQ。
+发送 RPC 给下一环节。
 */
 variable_list RecvRpcBackward::apply(variable_list&& grads) { // 调用Node
   std::vector<Variable> outputGrads;
-  for (const auto i : c10::irange(grads.size())) {
+  for (const auto i : c10::irange(grads.size())) {  // 下面就是把传入的梯度 grads 放入outputGrads
     const auto& grad = grads[i];
     if (grad.defined()) {
       outputGrads.emplace_back(grad);
@@ -94,7 +100,7 @@ variable_list RecvRpcBackward::apply(variable_list&& grads) { // 调用Node
 
   // Send the gradients over to the appropriate node.
   auto rpcAgent = rpc::RpcAgent::getCurrentRpcAgent();
-  auto jitFuture = rpcAgent->send(  // 发送出去，就是给后向传播过程的下一个节点
+  auto jitFuture = rpcAgent->send(  // 发送出去，就是给后向传播过程的下一个节点  // 发送 RPC
       rpcAgent->getWorkerInfo(fromWorkerId_),
       std::move(gradCall).toMessage(),   // 这里调用了PropagateGradientsReq::toMessageImpl
       rpc::kUnsetRpcTimeout,

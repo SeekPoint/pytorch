@@ -79,6 +79,7 @@ void launch_no_thread_state(std::function<void()> fn) {
 }
 } // namespace internal
 
+//at::launch 位于 aten/src/ATen/ParallelThreadPoolNative.cpp，这里会在线程之中调用传入的 func。
 void launch(std::function<void()> func) {
   // NOLINTNEXTLINE(modernize-avoid-bind)
   internal::launch_no_thread_state(std::bind([](

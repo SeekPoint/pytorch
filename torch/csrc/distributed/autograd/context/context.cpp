@@ -199,8 +199,8 @@ DistAutogradContext::recvFunctions() const {
 }
 
 void DistAutogradContext::accumulateGrad(
-    const torch::autograd::Variable& variable,
-    const torch::Tensor& grad,
+    const torch::autograd::Variable& variable,  // variable就是目标变量
+    const torch::Tensor& grad,                  // grad就是梯度，需要累积到variable之上
     size_t num_expected_refs) {
   TORCH_INTERNAL_ASSERT(grad.defined());
   TORCH_INTERNAL_ASSERT(variable.requires_grad());
@@ -306,6 +306,7 @@ void DistAutogradContext::recordGradEvent(c10::Device device) {
   }
 }
 
+//最后，分布式引擎会调用 clearAndWaitForOutstandingRpcsAsync 来等待处理完成。
 c10::intrusive_ptr<c10::ivalue::Future> DistAutogradContext::
     clearAndWaitForOutstandingRpcsAsync() {
   std::unique_lock<std::mutex> lock(lock_);

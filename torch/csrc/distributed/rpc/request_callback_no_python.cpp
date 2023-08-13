@@ -414,6 +414,17 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::
 一个是被动调用 DistEngine::getInstance().executeSendFunctionAsync，就是 worker 1（当然，worker 0 的 send 也对应了一个被动调用）。
 现在从上至下/自下而上两种查找反向传播的发起源头，都归结到了 DistEngine，所以我们下一篇就介绍 DistEngine。
 
+
+在 processBackwardAutogradReq 之中会：
+
+    获取 DistAutogradContainer。
+    获取 上下文。
+    调用 executeSendFunctionAsync 进行引擎处理。
+由此，我们可以看到有两个途径进入引擎：
+
+    一个是示例代码显式主动调用 backward，进而调用到 DistEngine::getInstance().execute，就是 worker 0。
+    一个是被动调用 DistEngine::getInstance().executeSendFunctionAsync，就是 worker 1。
+
 */
 c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::
     processBackwardAutogradReq(
@@ -568,7 +579,10 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processRRefBackward(
 我们接下来看看接收方如何处理反向传播，我们再次回到 worker 1，就是图上的 send 节点如何接受反向传播消息。
 
 3.2.1 接受消息
-在生成 TensorPipeAgent 时候，把 RequestCallbackImpl 配置为回调函数。这是 agent 的统一响应函数。前面关于代理接收逻辑时候，我们也提到了，会进入 RequestCallbackNoPython::processRpc 函数。其中可以看到有对 BACKWARD_AUTOGRAD_REQ 的处理逻辑。
+在生成 TensorPipeAgent 时候，把 RequestCallbackImpl 配置为回调函数。
+这是 agent 的统一响应函数。
+前面关于代理接收逻辑时候，我们也提到了，会进入 RequestCallbackNoPython::processRpc 函数。
+其中可以看到有对 BACKWARD_AUTOGRAD_REQ 的处理逻辑。
 
 这种是 RPC 的正常流程。
 

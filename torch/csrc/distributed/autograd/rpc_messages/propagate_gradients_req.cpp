@@ -26,6 +26,8 @@ PropagateGradientsReq::PropagateGradientsReq(
 
 3.1.2.1 BACKWARD_AUTOGRAD_REQ
 在 torch/csrc/distributed/autograd/rpc_messages/propagate_gradients_req.cpp 之中 PropagateGradientsReq::toMessageImpl 会调用到 BACKWARD_AUTOGRAD_REQ。
+
+其 toMessageImpl 指明了本消息是 BACKWARD_AUTOGRAD_REQ。
 */
 c10::intrusive_ptr<Message> PropagateGradientsReq::toMessageImpl() && {
   std::vector<at::IValue> ivalues;
@@ -50,7 +52,7 @@ c10::intrusive_ptr<Message> PropagateGradientsReq::toMessageImpl() && {
   return c10::make_intrusive<Message>(
       std::move(payload),
       std::move(tensorTable),
-      MessageType::BACKWARD_AUTOGRAD_REQ); // 这里会用到
+      MessageType::BACKWARD_AUTOGRAD_REQ); // 这里会用到  // 这里指明了消息类型。
 }
 
 std::unique_ptr<PropagateGradientsReq> PropagateGradientsReq::fromMessage(
