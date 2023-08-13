@@ -15,10 +15,18 @@ from torch.distributed import FileStore, PrefixStore, Store, TCPStore
 
 from .constants import default_pg_timeout
 
+'''
+0x03 Store
+我们给出一个正式的概念。Store 是分布式包（distributed package）所提供的分布式键值存储，所有的 workers 都会访问这个存储以共享信息以及初始化分布式包 。用户可以通过显式创建存储来作为init_method的替代。目前有 3 种键值存储：TCPStore， FileStore，和HashStore。
 
+我们接着上节继续看 handler 概念。
+
+3.1 _rendezvous_handlers
+在 PyTorch 定义了一个全局变量 _rendezvous_handlers，用来保存如何返回 store 的方法，可以认为是工厂方法。
+'''
 _rendezvous_handlers = {}
 
-
+#注册代码如下，就是往全局变量之中插入handler。
 def register_rendezvous_handler(scheme, handler):
     """Registers a new rendezvous handler.
 
@@ -88,7 +96,17 @@ def _rendezvous_helper(url: str, rank: int, world_size_opt: Optional[int], **kwa
         raise RuntimeError("No rendezvous handler for {}://".format(result.scheme))
     return _rendezvous_handlers[result.scheme](url, **kwargs)
 
+'''
+2.3 rendezvous
+上面代码之中提到了 rendezvous，我们就来看看这个概念。
 
+在我们可以运行集合算法之前，参与的进程需要找到彼此并交换信息才能够进行通信。我们称这个过程为rendezvous。rendezvous过程的结果是一个三元组，其中包含一个共享键/值存储（store），进程的等级（rank）和参与进程的总数。如果内置的rendezvous方法都不适用于您的执行环境，那么您可以选择注册自己的rendezvous处理程序。在调用rendezvous函数时，选择一个唯一的名称并使用URL方案来标识它。
+
+rendezvous 方法就是依据参数，选择不同的handler来处理。
+
+
+rendezvous 具体就是依据 init_method 来选择一个 _rendezvous_handler，然后 _rendezvous_handler 返回了 store。
+'''
 def rendezvous(url: str, rank: int = -1, world_size: int = -1, **kwargs):
     if not isinstance(url, str):
         raise RuntimeError("`url` must be a string. {}: {}".format(type(url), url))
@@ -110,7 +128,15 @@ def _create_store_from_options(backend_options, rank):
 def _rendezvous_error(msg):
     return ValueError("Error initializing torch.distributed using " + msg)
 
+'''
+3.2 handlers
+如果仔细看 handlers 的代码，就会发现其就是返回了不同的 store，比如 _tcp_rendezvous_handler具体就是使用各种信息建立 TCPStore，然后返回。
 
+以下代码均删除非关键代码。
+
+3.2.1 _file_rendezvous_handler
+这里返回了FileStore。
+'''
 def _file_rendezvous_handler(url: str, **kwargs):
     def _error(msg):
         return _rendezvous_error("file:// rendezvous: " + msg)
@@ -177,7 +203,7 @@ def _create_c10d_store(hostname, port, rank, world_size, timeout) -> Store:
             hostname, port, world_size, start_daemon, timeout, multi_tenant=True
         )
 
-
+#这里返回了 TCPStore。
 def _tcp_rendezvous_handler(
     url: str, timeout: timedelta = default_pg_timeout, **kwargs
 ):
@@ -204,7 +230,7 @@ def _tcp_rendezvous_handler(
     # If this configuration is invalidated, there is nothing we can do about it
     raise RuntimeError("Unable to perform re-rendezvous using tcp:// method")
 
-
+#居然也返回了 TCPStore，但是其会从环境变量中提取需要的信息。
 def _env_rendezvous_handler(
     url: str, timeout: timedelta = default_pg_timeout, **kwargs
 ):
@@ -249,7 +275,15 @@ def _env_rendezvous_handler(
     # If this configuration is invalidated, there is nothing we can do about it
     raise RuntimeError("Unable to perform re-rendezvous using env:// method")
 
-
+#handler 如下，你会发现，其实 handler 就是对应了初始化的三种方法：
 register_rendezvous_handler("tcp", _tcp_rendezvous_handler)
 register_rendezvous_handler("env", _env_rendezvous_handler)
 register_rendezvous_handler("file", _file_rendezvous_handler)
+
+'''
+2.4 小结
+从目前分析结果来看，我们得到了如下结论：
+
+init_method 最终还是落到了 store 之上，store才是起作用的实体。
+参与的进程需要找到彼此并交换信息才能够进行通信。这个过程被称为rendezvous。
+'''

@@ -165,6 +165,7 @@ class FileStore(Store):
 class HashStore(Store):
     def __init__(self): ...
 
+#在 Python 世界之中，就是简单的设定了 host 和 port。
 class TCPStore(Store):
     def __init__(
         self,

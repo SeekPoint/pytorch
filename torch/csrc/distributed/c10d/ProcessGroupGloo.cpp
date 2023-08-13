@@ -727,13 +727,14 @@ std::shared_ptr<::gloo::transport::Device> ProcessGroupGloo::
 }
 #endif
 
+//在 ProcessGroupGloo 之中有具体使用，比如在PrefixStore之上生成了一个GlooStore，利用 PrefixStore 建立网络等等。
 ProcessGroupGloo::ProcessGroupGloo(
     const c10::intrusive_ptr<Store>& store,
     int rank,
     int size,
     c10::intrusive_ptr<Options> options)
     : Backend(rank, size),
-      store_(new GlooStore(store)),
+      store_(new GlooStore(store)),   // 在PrefixStore之上生成了一个GlooStore
       options_(options),
       stop_(false),
       collectiveCounter_(0) {
@@ -757,8 +758,10 @@ ProcessGroupGloo::ProcessGroupGloo(
   contexts_.reserve(options->devices.size());
   for (const auto i : c10::irange(options->devices.size())) {
     auto context = std::make_shared<::gloo::rendezvous::Context>(rank_, size_);
+    // 又生成了一个PrefixStore
     auto store = ::gloo::rendezvous::PrefixStore(std::to_string(i), *store_);
     context->setTimeout(options->timeout);
+    // 利用 PrefixStore 建立网络
     context->connectFullMesh(store, options->devices[i]);
     contexts_.push_back(std::move(context));
   }
@@ -2853,12 +2856,12 @@ void ProcessGroupGloo::setSequenceNumberForGroup() {
     auto seq = 1 + rand();
     sequenceNum_ = c10d::SequenceNum(seq);
     std::vector<char> values = c10d::toVec<char>(seq, kBytes);
-    store_->set(kSeqNumStoreKey, values);
+    store_->set(kSeqNumStoreKey, values); // 存value
   } else {
     // Read rank 0's sequence number from store.
     sequenceNum_ = c10d::SequenceNum();
-    store_->wait({kSeqNumStoreKey}, options_->timeout);
-    std::vector<char> values = store_->get(kSeqNumStoreKey);
+    store_->wait({kSeqNumStoreKey}, options_->timeout); // 等待
+    std::vector<char> values = store_->get(kSeqNumStoreKey); // 取value
     uint64_t num = c10d::fromVec<char>(values);
     sequenceNum_->set(num);
   }

@@ -752,7 +752,88 @@ def get_backend(group: Optional[ProcessGroup] = None) -> str:
     assert pg_store is not None
     return pg_store[0]
 
+'''
+0x01 回顾
+1.1 基本概念
+关于分布式通信，PyTorch 提供的几个概念是：进程组，后端，初始化，Store。
 
+进程组 ：DDP是真正的分布式训练，可以使用多台机器来组成一次并行运算的任务。为了能够让 DDP 的各个worker之间通信，PyTorch 设置了进程组这个概念。
+后端 ：后端这个概念是一个逻辑上的概念。本质上后端是一种IPC通信机制。
+初始化 : 虽然有了后端和进程组的概念，但是如何让 worker 在建立进程组之前发现彼此？ 这就需要一种初始化方法来告诉大家传递一个信息：如何联系到其它机器上的进程。
+Store : 可以认为是分布式键值存储，利用这个存储就可以在组中的进程之间共享信息以及初始化分布式包 （通过显式创建存储来作为init_method的替代）。
+1.2 初始化进程组
+在调用任何 DDP 其他方法之前，需要使用torch.distributed.init_process_group()进行初始化。该方法会初始化默认分布式进程组和分布式包。此方法会阻塞，直到所有进程都加入，函数定义如下：
+
+init_process_group ( backend , 
+                       init_method = None , 
+                       timeout = default_pg_timeout , 
+                       world_size =- 1 , 
+                       rank =- 1 , 
+                       store = None , 
+                       group_name = '' , 
+                       pg_options = None )
+初始化进程组有两种主要方法：
+
+明确指定 store，rank 和 world_size。
+指定 init_method（一个 URL 字符串），它指示在哪里/如何发现对等点。
+如果两者都没有指定，init_method则假定为“env://”。因此大家可以看到，store 和 init_method 是互斥的。
+
+init_process_group 的参数具体如下：
+
+后端 – 要使用的后端。有效值包括mpi，gloo，和nccl。该字段应作为小写字符串（例如"gloo"）给出，也可以通过Backend属性（例如Backend.GLOO）访问 。如果在nccl后端每台机器上使用多个进程，则每个进程必须对其使用的每个 GPU 具有独占访问权限，因为在进程之间共享 GPU 可能会导致死锁。
+init_method – 指定如何初始化进程组的 URL。如果未指定init_method或store指定，则默认为“env://” 。与 store互斥。
+world_size – 参与作业的进程数。如果store指定，则 world_size 为必需。
+rank – 当前进程的等级（它应该是一个介于 0 和world_size-1之间的数字）。如果store指定，则 rank 为必需。
+store – 所有 worker 都可以访问的键/值存储，用于交换连接/地址信息。与init_method 互斥。
+timeout – 针对进程组执行的操作超时。默认值等于 30 分钟。这适用于gloo后端。对于nccl，这仅在环境变量NCCL_BLOCKING_WAIT 或NCCL_ASYNC_ERROR_HANDLING设置为 1 时 适用。
+group_name – 组名。
+pg_options ( Process Group Options , optional ) – 进程组选项，指定在构建特定进程组期间需要传入哪些附加选项。
+
+
+
+0x02 初始化
+2.1 初始化方法
+目前DDP模块支持三种初始化方式：
+
+Environment variable initialization
+Shared file-system initialization：init_method='file:///mnt/nfs/sharedfile'
+TCP initialization ：init_method='tcp://10.1.1.20:23456'
+环境变量
+
+此方法将从环境变量中读取配置，是允许完全自定义获取信息的方式。通过在所有机器上设置以下四个环境变量，所有进程都可以正常连接到master（就是 rank 0 进程）以获取其他进程的信息，并最终与它们握手。
+
+MASTER_PORT：rank 0 进程的机器上的端口。
+MASTER_ADDR：rank 0 进程的机器上的 IP 地址。
+WORLD_SIZE: 进程总数，因此master知道要等待多少worker。
+RANK: 每个进程的rank，所以进程会知道自己是否是master。
+共享文件系统
+
+共享文件系统要求所有进程都可以访问共享文件系统，并将通过共享文件协调它们。这意味着每个进程都将打开文件，写入其信息，并等待每个进程都这样做。之后，所有所需的信息都将可供所有流程使用。为了避免竞争条件，文件系统必须通过fcntl支持锁定 。
+
+dist.init_process_group(
+    init_method='file:///mnt/nfs/sharedfile',
+    rank=args.rank,
+    world_size=4)
+TCP
+
+TCP 初始化方式是通过提供rank 0进程的IP和端口来实现的，在这里，所有worker都可以连接到等级为 0 的进程并交换有关如何相互联系的信息。
+
+dist.init_process_group(
+    init_method='tcp://10.1.1.20:23456',
+    rank=args.rank,
+    world_size=4)
+    
+
+
+3.4 小结
+从目前分析结果来看，我们拓展结论如下：
+
+init_method 最终还是落到了 store 之上，store才是起作用的实体。
+参与的进程需要找到彼此并交换信息才能够进行通信。这个过程被称为rendezvous。
+rendezvous 其实就是返回了某一种store 以供后续通信使用。
+在进程组之中，会使用 store 来构建通信，等待，存取等。
+我们接下来选择 TCPStore进行相信分析。    
+'''
 def init_process_group(
     backend: Union[str, Backend] = None,
     init_method: Optional[str] = None,
@@ -882,6 +963,20 @@ def init_process_group(
     else:
         # backward compatible API
         if store is None:
+            '''
+            2.2 init_method VS store
+                我们很好奇，为什么要有 init_method 和 store 这两个参数？
+                
+                通过看 init_process_group 代码我们可以发现以下规律。
+                
+                当 MPI 时候， init_method 没有用处。
+                
+                在非 MPI 后端时候，如果没有 store 参数，则使用 init_method 构建一个store。
+                
+                所以最终还是落到了 store 之上，store才是其作用的实体。
+            '''
+
+            # 如果没有store，还是要用init_method构建一个store。
             rendezvous_iterator = rendezvous(
                 init_method, rank, world_size, timeout=timeout
             )
@@ -892,6 +987,7 @@ def init_process_group(
             # different systems (e.g. RPC) in case the store is multi-tenant.
             store = PrefixStore("default_pg", store)
 
+        #我们继续看如何使用 store。在 init_process_group 代码之中，接下来就使用了 store 来初始化进程组。
         default_pg = _new_process_group_helper(
             world_size,
             rank,
@@ -919,7 +1015,7 @@ def init_process_group(
         # default devices and messes up NCCL internal state.
         _store_based_barrier(rank, store, timeout)
 
-
+#_new_process_group_helper 之中得到了 store 参数之后，据此生成了一个 prefix_store，然后再根据这个 pre_store 来生成了 ProcessGroupGloo。
 def _new_process_group_helper(
     group_size,
     group_rank,
@@ -966,9 +1062,11 @@ def _new_process_group_helper(
         if global_rank not in global_ranks_in_group:
             return GroupMember.NON_GROUP_MEMBER
 
+    # 这里会使用store
     prefix_store = PrefixStore(f"{group_name}/", store)
     base_pg_options = ProcessGroup.Options(backend=str(backend))
     base_pg_options._timeout = timeout
+    ## 使用PrefixStore构建进程组
     pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size, base_pg_options)
     backend_config = BackendConfig(backend)
     for device, backend_str in backend_config.get_device_backend_map().items():
@@ -976,7 +1074,7 @@ def _new_process_group_helper(
         # a single store can be reused by multiple groups.
         backend_prefix_store = PrefixStore(f"{device}/", prefix_store)
 
-        if backend_str == Backend.MPI:
+        if backend_str == Backend.MPI:  # 没有使用store
             if not is_mpi_available():
                 raise RuntimeError(
                     "Distributed package doesn't have MPI built in."
@@ -1007,6 +1105,7 @@ def _new_process_group_helper(
                 pg_options._timeout = timeout
 
             backend_class = ProcessGroupNCCL(backend_prefix_store, group_rank, group_size, pg_options)
+            # 使用PrefixStore构建进程组
             backend_type = ProcessGroup.BackendType.NCCL
         elif backend_str == Backend.UCC and is_ucc_available():
             # TODO: once UCC plugin is fully deprecated, remove

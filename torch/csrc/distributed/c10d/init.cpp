@@ -1098,6 +1098,21 @@ Arguments:
     timeout (timedelta, optional): Timeout used by the store during initialization and for methods such as :meth:`~torch.distributed.store.get` and :meth:`~torch.distributed.store.wait`. Default is timedelta(seconds=300)
     wait_for_worker (bool, optional): Whether to wait for all the workers to connect with the server store. This is only applicable when world_size is a fixed value. Default is True.
 
+0x04 TCPStore
+TCPStore 是基于 TCP 的分布式键值存储实现。服务器存储/保存数据，而存储客户端可以通过 TCP 连接到服务器存储并执行诸如set()插入键值对、get()检索键值对等操作。系统中应该有一个初始化完毕的TCPStore存储服务器，因为存储客户端将等待这个存储服务以建立连接。
+
+TCPStore 的参数如下：
+
+host_name ( str ) – 主机名或 IP 地址。存储服务器在其上运行。
+port ( int ) – 存储服务器在这个端口上侦听传入请求。
+world_size ( int , optional ) – 用户总数。
+world_size = 客户端数 + 1，1 代表服务器。
+默认值为 -1（负值表示不固定的用户数）。
+is_master ( bool , optional ) – 初始化存储服务器时为真，初始化存储客户端时为假。默认值为假。
+timeout ( timedelta , optional ) – store在初始化期间，以及get()和 wait()方法使用的超时时间。默认为 timedelta(seconds=300)。
+wait_for_worker ( bool , optional ) – 是否等待所有worker与存储服务器连接。这仅在 world_size 为固定值时适用。默认值为真。
+
+
 Example::
     >>> import torch.distributed as dist
     >>> from datetime import timedelta

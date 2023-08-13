@@ -158,7 +158,21 @@ enum class WatchResponseType : uint8_t {
   KEY_DELETED,
   KEY_CALLBACK_REGISTERED
 };
+/*
 
+4.2.6 TCPStoreMasterDaemon
+这里的 std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_; 是真实的 kv。
+
+所以，TCPStoreMasterDaemon 就是负责对 kv 的操作，比如存取。
+
+
+
+TCPStoreMasterDaemon 就是等待在 socket 之上，即 masterListenSocket_ 是 listen 在 masterPort 之上。
+
+tcpStoreMasterDaemon_ 使用 tcputil::addPollfd(fds, storeListenSocket_, POLLIN) 来监听 masterListenSocket_。
+tcpStoreMasterDaemon_本身成为一个master，就是为整个 TCPStore提供服务的 server。
+key-value 就是std::unordered_map<std::string, std::vector<uint8_t>> tcpStore。
+*/
 // Separate thread that is only launched on master
 class TCPStoreMasterDaemon : public BackgroundThread {
  public:
@@ -212,18 +226,19 @@ TCPStoreMasterDaemon::~TCPStoreMasterDaemon() {
   dispose();
 }
 
+//queryFds 会根据 socket 监听结果而调用不同业务。
 void TCPStoreMasterDaemon::queryFds(std::vector<struct pollfd>& fds) {
   // Skipping the fds[0] and fds[1],
   // fds[0] is master's listening socket
   // fds[1] is control pipe's reading fd, it is not for Windows platform
   for (size_t fdIdx = CONNECT_SOCKET_OFFSET; fdIdx < fds.size(); ++fdIdx) {
-    if (fds[fdIdx].revents == 0) {
+    if (fds[fdIdx].revents == 0) { // 收到了消息
       continue;
     }
 
     // Now query the socket that has the event
     try {
-      query(fds[fdIdx].fd);
+      query(fds[fdIdx].fd); // 处理业务
     } catch (...) {
       // There was an error when processing query. Probably an exception
       // occurred in recv/send what would indicate that socket on the other
@@ -268,6 +283,7 @@ void TCPStoreMasterDaemon::queryFds(std::vector<struct pollfd>& fds) {
 // type of query | size of arg1 | arg1 | size of arg2 | arg2 | ...
 // or, in the case of wait
 // type of query | number of args | size of arg1 | arg1 | ...
+//从 socket 之中读取消息，依据消息内容来进行相关业务处理。
 void TCPStoreMasterDaemon::query(int socket) {
   QueryType qt;
   tcputil::recvBytes<QueryType>(socket, &qt, 1);
@@ -315,7 +331,7 @@ void TCPStoreMasterDaemon::wakeupWaitingClients(const std::string& key) {
     waitingSockets_.erase(socketsToWait);
   }
 }
-
+//如果key 有变化，就通知客户端。
 void TCPStoreMasterDaemon::sendKeyUpdatesToClients(
     const std::string& key,
     const enum WatchResponseType& type,
@@ -328,7 +344,7 @@ void TCPStoreMasterDaemon::sendKeyUpdatesToClients(
     tcputil::sendVector<uint8_t>(socket, newData);
   }
 }
-
+//此处是处理添加 value 的业务。
 void TCPStoreMasterDaemon::setHandler(int socket) {
   std::string key = tcputil::recvString(socket);
   std::vector<uint8_t> newData = tcputil::recvVector<uint8_t>(socket);
@@ -408,7 +424,7 @@ void TCPStoreMasterDaemon::addHandler(int socket) {
          : sendKeyUpdatesToClients(
                key, WatchResponseType::KEY_UPDATED, oldData, newData);
 }
-
+//出处处理获取 value 的业务。
 void TCPStoreMasterDaemon::getHandler(int socket) const {
   std::string key = tcputil::recvString(socket);
   auto data = tcpStore_.at(key);
@@ -471,6 +487,8 @@ void TCPStoreMasterDaemon::waitHandler(int socket) {
   }
 }
 
+//此处添加了想要监控的 key。
+//对于WATCH_KEY，给对应的key添加了一个socket，作为以后发送通知的对象。
 void TCPStoreMasterDaemon::watchHandler(int socket) {
   std::string key = tcputil::recvString(socket);
 
@@ -590,6 +608,7 @@ void TCPStoreMasterDaemon::run() {
 }
 #endif
 
+//这个 daemon 进程只是用来处理 watchKey。
 // Separate thread that is launched on all instances (including master)
 // Right now only handles callbacks registered from watchKey()
 class TCPStoreWorkerDaemon : public BackgroundThread {
@@ -628,6 +647,7 @@ class TCPStoreWorkerDaemon : public BackgroundThread {
   bool callbackRegisteredData_ = false;
 };
 
+//其构建函数只是建立一个线程。
 // TCPStoreListener class methods
 TCPStoreWorkerDaemon::TCPStoreWorkerDaemon(Socket&& listenSocket)
     : BackgroundThread{std::move(listenSocket)} {
@@ -674,7 +694,16 @@ void TCPStoreWorkerDaemon::callbackHandler(int socket) {
   keyToCallbacks_.at(key)(currentValue, newValue);
 }
 
-#ifdef _WIN32
+/*
+4.2.5.2 运行
+其运行分为 windows 和 其他系统，但是主要就是收到了业务key，然后进行相关业务处理。
+
+Master 执行注册。Master 接到 WATCH_KEY 消息之后，调用 watchHandler，使用 watchedSockets_[key].push_back(socket) 来配置，告诉自己，如果这个 key 有变化，就给这个 socket 发消息。
+Master通知Worker。在 TCPStoreMasterDaemon::setHandler 之中，如果设置了新 value 之后，调用 sendKeyUpdatesToClients，其会遍历 watchedSockets_[key]，如果有 socket，就给 socket 发送消息变化通知。
+Worker执行callback。所以如果 key 有变化，就在 tcpStoreWorkerDaemon_ 之中调用了这个 callback。
+*/
+
+#ifdef _WIN32  // 这里是windows系统
 void TCPStoreWorkerDaemon::run() {
   std::vector<struct pollfd> fds;
   tcputil::addPollfd(fds, storeListenSocket_.handle(), POLLIN);
@@ -704,7 +733,7 @@ void TCPStoreWorkerDaemon::run() {
     }
 
     // valid request, perform callback logic
-    callbackHandler(fds[0].fd);
+    callbackHandler(fds[0].fd); // 业务处理
   }
 }
 #else
@@ -748,7 +777,7 @@ void TCPStoreWorkerDaemon::run() {
     }
 
     // valid request, perform callback logic
-    callbackHandler(fds[1].fd);
+    callbackHandler(fds[1].fd); // 业务处理
   }
 }
 #endif
@@ -975,6 +1004,12 @@ void TCPCallbackClient::setCallback(
 
 using detail::Socket;
 
+/*
+我们从构建函数可以看到：
+
+对于存储服务器角色，主要就是启动了 tcpStoreMasterDaemon_，注意在启动了 daemon 之后，server 就进入了等待worker状态，不会启动接下来代码中的 tcpStoreWorkerDaemon_。
+对于存储客户端，则启动了 tcpStoreWorkerDaemon_。
+*/
 // TCPStore class methods
 TCPStore::TCPStore(
     const std::string& masterAddr,
@@ -999,7 +1034,7 @@ TCPStore::TCPStore(std::string host, const TCPStoreOptions& opts)
       numWorkers_{opts.numWorkers} {
   Socket::initialize();
 
-  if (opts.isServer) {
+  if (opts.isServer) { // 如果设置了是server，就在masterPort上监听
     server_ = detail::TCPServer::start(opts);
 
     addr_.port = server_->port();
@@ -1007,10 +1042,11 @@ TCPStore::TCPStore(std::string host, const TCPStoreOptions& opts)
     addr_.port = opts.port;
   }
 
+  //// worker 会与 master port 建立联系
   client_ = detail::TCPClient::connect(addr_, opts);
 
   if (opts.waitWorkers) {
-    waitForWorkers();
+    waitForWorkers();  // server 等待 worker
   }
 
   callbackClient_ = detail::TCPCallbackClient::connect(addr_, opts);
@@ -1018,6 +1054,7 @@ TCPStore::TCPStore(std::string host, const TCPStoreOptions& opts)
 
 TCPStore::~TCPStore() = default;
 
+//server 会使用如下函数来等待 worker.
 void TCPStore::waitForWorkers() {
   if (numWorkers_ == c10::nullopt) {
     return;
@@ -1089,7 +1126,14 @@ bool TCPStore::deleteKey(const std::string& key) {
   auto numDeleted = client_->receiveValue<std::int64_t>();
   return numDeleted == 1;
 }
+/*
+4.2.5.1 watchKey
+Client Store 使用watchKey(const std::string& key, WatchKeyCallback callback) 的作用是往master注册监听key：
 
+Worker 请求注册。使用 tcpStoreWorkerDaemon_->setCallback(regKey, callback) 来为 tcpStoreWorkerDaemon_ 的 std::unordered_map<std::string, WatchKeyCallback> keyToCallbacks_ 之上添加一个 callback。
+Worker 发送请求。通过 listenSocket_ 给 master 发消息 (key, WATCH_KEY)，告诉master，如果 key 的 value 有变化，就调用这个 callback。
+然后使用 waitForCallbackRegistration 等待注册完成。
+*/
 void TCPStore::watchKey(const std::string& key, WatchKeyCallback callback) {
   const std::lock_guard<std::mutex> lock(activeOpLock_);
   callbackClient_->setCallback(keyPrefix_ + key, callback);

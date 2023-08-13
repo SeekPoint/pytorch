@@ -176,7 +176,7 @@ def launch(args):
         )
     run(args)
 
-
+#launch.py 位于 torch/distributed/launch.py，但是实际上，它的大部分功能都被转移到了 torch/distributed/run.py 之中
 def main(args=None):
     warnings.warn(
         "The module torch.distributed.launch is deprecated\n"
