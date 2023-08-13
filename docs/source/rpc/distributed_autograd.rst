@@ -248,15 +248,17 @@ receive a gradient over RPC from another node.
 
 The algorithm is as follows:
 
-我们从具有反向传播根的worker开始（所有根都必须是本地的）。
-查找当前Distributed Autograd Context 的所有send函数 。
-从提供的根和我们检索到的所有send函数开始，我们在本地计算依赖项 。
-计算依赖项后，使用提供的根来启动本地 autograd 引擎。
-当 autograd 引擎执行该recv函数时，该recv 函数通过 RPC 将输入梯度发送到适当的worker。每个recv函数都知道目标 worker id，因为它被记录为前向传播的一部分。通过autograd_context_id和 autograd_message_id 该recv函数被发送到远程主机。
-当远程主机收到这个请求时，我们使用 autograd_context_id和autograd_message_id来查找适当的send函数。
-如果这是worker第一次收到对给定 autograd_context_id的请求，它将按照上面的第 1-3 点所述在本地计算依赖项。
-然后将在第6点接受到的send方法插入队列，以便在该worker的本地 autograd 引擎上执行。
-最后，我们不是在 Tensor的.grad之上累积梯度，而是在每个Distributed Autograd Context之上分别累积梯度 。梯度存储在Dict[Tensor, Tensor]之中 ，Dict[Tensor, Tensor]基本上是从 Tensor 到其关联梯度的映射，并且可以使用 get_gradients() API检索该映射 。
+    我们从具有反向传播根的worker开始（所有根都必须是本地的）。
+    查找当前Distributed Autograd Context 的所有send函数 。
+    从提供的根和我们检索到的所有send函数开始，我们在本地计算依赖项 。
+        这部分是和普通引擎最大区别之一
+
+    计算依赖项后，使用提供的根来启动本地 autograd 引擎。
+    当 autograd 引擎执行该recv函数时，该recv 函数通过 RPC 将输入梯度发送到适当的worker。每个recv函数都知道目标 worker id，因为它被记录为前向传播的一部分。通过autograd_context_id和 autograd_message_id 该recv函数被发送到远程主机。
+    当远程主机收到这个请求时，我们使用 autograd_context_id和autograd_message_id来查找适当的send函数。
+    如果这是worker第一次收到对给定 autograd_context_id的请求，它将按照上面的第 1-3 点所述在本地计算依赖项。
+    然后将在第6点接受到的send方法插入队列，以便在该worker的本地 autograd 引擎上执行。
+    最后，我们不是在 Tensor的.grad之上累积梯度，而是在每个Distributed Autograd Context之上分别累积梯度 。梯度存储在Dict[Tensor, Tensor]之中 ，Dict[Tensor, Tensor]基本上是从 Tensor 到其关联梯度的映射，并且可以使用 get_gradients() API检索该映射 。
 
 1. We start from the worker which has the roots for the backward pass
    (all roots must be local).

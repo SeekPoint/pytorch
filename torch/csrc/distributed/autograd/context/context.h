@@ -200,6 +200,13 @@ class TORCH_API DistAutogradContext {
   std::unordered_set<rpc::worker_id_t> knownWorkerIds_;
 
   // Map from autograd_message_id to appropriate 'send' autograd function.
+  /*
+  1.2 SendRpcBackward
+    被动调用引擎是从 SendRpcBackward 开始的。SendRpcBackward 是前向传播之中发送行为对应的反向传播算子。
+    DistAutogradContext 存储在一个worker之上的每一个分布式autograd的相关信息，
+    其在分布式 autograd 之中封装前向和后向传播，累积梯度，这避免了多个worker在彼此的梯度上互相影响。
+    在上下文 DistAutogradContext 之中有个成员变量，记录了本 worker 所有发送行为对应的反向传播算子。
+  */
   std::unordered_map<int64_t, std::shared_ptr<SendRpcBackward>>
       sendAutogradFunctions_;
 

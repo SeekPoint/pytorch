@@ -322,6 +322,8 @@ gradient_edge方法作用是返回通过Variable的 grad_fn_构建的Edge实例�
         使用grad_accumulator来构建一个 Edge返回。
 代码如下，需要注意的是，output_nr是当前variable在前向计算时是第几个输出，对于单输出的算子比如add或者mul来说，output_nr一般都是0，但对于多输出的算子比如split，则output_nr可能是0,1,2...。
 
+
+gradient_edge 在本文下面会用到，就是利用一个Variable的梯度和前向传播的输出来构建一个Edge。
 */
 Edge gradient_edge(const Variable& self) {
   // If grad_fn is null (as is the case for a leaf node), we instead

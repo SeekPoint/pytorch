@@ -432,10 +432,10 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::
       autogradContext->retrieveSendFunction(autogradMetadata.autogradMessageId);
 
   // Attach the gradients to the send function.
-  sendFunction->setGrads(gradientsCall.getGrads());  // 设置梯度
+  sendFunction->setGrads(gradientsCall.getGrads());  // 设置梯度  // 这里设置，就是把RPC传来的梯度赋值
 
   // Now execute the autograd graph using the "distributed engine."
-  auto execFuture = DistEngine::getInstance().executeSendFunctionAsync(  // 调用引擎
+  auto execFuture = DistEngine::getInstance().executeSendFunctionAsync(  // 调用引擎  // 这里使用了 grads_
       autogradContext, sendFunction, gradientsCall.retainGraph());
 
   // Our response is satisfied when the rpcs come back.

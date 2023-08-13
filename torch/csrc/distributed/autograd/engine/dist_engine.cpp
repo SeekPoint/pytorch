@@ -74,6 +74,7 @@ class DistAccumulateGradCaptureHook
   ContextPtr autogradContext_;
 };
 
+//globalCpuThread 是工作线程，其就是从 ready queue 里面弹出 NodeTask，然后执行。
 void DistEngine::globalCpuThread(
     const std::shared_ptr<ReadyQueue>& ready_queue) {
   while (true) {
@@ -110,13 +111,20 @@ void DistEngine::globalCpuThread(
 DistEngine::DistEngine()
     : initializedContextIds_(),
       engine_(Engine::get_default_engine()),
-      global_cpu_ready_queue_(std::make_shared<ReadyQueue>()),
-      global_cpu_thread_(
+      global_cpu_ready_queue_(std::make_shared<ReadyQueue>()),  // 这里构建了
+      global_cpu_thread_(  // 这里构建了
           &DistEngine::globalCpuThread,
           this,
           global_cpu_ready_queue_) {
   // Note [GPU to CPU continuations]
   // ~~~~~~~~~~~~~~~~~~~~~~~~~~
+  以下是 GPU to CPU continuations 的翻译和理解。
+//
+//Continuations 最初应该是在schema语言里面接触过的，后来也看过不少语言用到，这个概念没有找到一个很好的延续概念，暂时使用"延续"这个翻译。
+//
+//为了执行GPU任务的延续（continuations），所以需要初始化一个单独的CPU线程来处理。分布式引擎的多线程结构仅适用于CPU任务。如果我们有CPU->GPU->CPU这样的任务顺序，分布式 autograd 就没有线程来执行最后一个CPU任务。为了解决这个问题，我们引入了一个全局CPU线程来处理这种情况，它将负责执行这些CPU任务。
+//
+//CPU线程有自己的就绪队列（ready_queue），它用作DistEngine的所有GraphTask的CPU就绪队列（cpu_ready_queue）。这确保所有GPU到CPU的延续（continuations）都在此线程上排队。全局CPU线程只需将任务从全局队列中取出，并在JIT线程上调用"execute_graph_task_until_ready_queue_empty"，以执行相应的任务。
   // Initialize a single CPU thread to execute continuations from GPU
   // tasks. The multithreaded structure for the distributed engine works
   // well only for CPU tasks. If we have an order of tasks like
@@ -129,9 +137,10 @@ DistEngine::DistEngine()
   // simply dequeues tasks from the global queue and calls
   // "execute_graph_task_until_ready_queue_empty" on a JIT thread to execute the
   // appropriate task.
-  global_cpu_thread_.detach();
+  global_cpu_thread_.detach();  // detach之后就独立运行了
 }
 
+//析构函数之中有如下，就是为了引擎结束而做对这两个成员变量做了相关操作。
 DistEngine::~DistEngine() {
   // Ensure we shutdown the CPU thread.
   TORCH_ASSERT_NO_GIL_WITHOUT_PYTHON_DEP();
@@ -139,12 +148,25 @@ DistEngine::~DistEngine() {
   global_cpu_thread_.join();
 }
 
+//引擎使用了单例模式，这样每个 worker 之中就只有一个单例在运行。
 DistEngine& DistEngine::getInstance() {
   // Leaky singleton to avoid module destructor race.
   static DistEngine* engine = new DistEngine();
   return *engine;
 }
 
+/*
+我们接下来看看如何做验证工作。
+
+validateRootsAndRetrieveEdges 被用来验证节点和边的有效性，具体逻辑是：
+
+    验证根节点的有效性，获取根节点的边。
+    看看根节点是否为空。
+    根节点是否需要计算梯度。
+    根节点是否有梯度函数。
+    计算梯度的边，生成相应的梯度。
+    调用 validate_outputs 来验证输出。
+*/
 void DistEngine::validateRootsAndRetrieveEdges(
     const variable_list& roots,
     edge_list& rootEdges,
@@ -157,7 +179,7 @@ void DistEngine::validateRootsAndRetrieveEdges(
   for (const auto& root : roots) {
     TORCH_CHECK(root.requires_grad(), "requires_grad not set on root");
     TORCH_CHECK(
-        root.numel() == 1,
+        root.numel() == 1,   // python numel()函数：返回数组中元素的个数
         root.name(),
         " is not a scalar, all roots need to be scalar");
     TORCH_CHECK(
@@ -179,6 +201,16 @@ void DistEngine::validateRootsAndRetrieveEdges(
 ExecInfo.Capture.GradCaptureHook 是要对梯度再做后续处理。
 但是这个使用却是主要在分布式状态下，是因为分布式引擎有一个累积梯度的需要，
 这个必须在正常梯度操作之后的后置处理中完成。
+
+在哪里往 global_cpu_ready_queue_ 插入？
+在 DistEngine::computeDependencies 里面会有插入。
+首先，每个 GraphTask 都把 global_cpu_ready_queue_ 设置为 cpu_ready_queue。GraphTask构造函数这里参数在调用时候传入的是 global_cpu_ready_queue_。
+
+
+所以，如果 GraphTask 最后返回需要 CPU 运行时候，就统一用这个。
+
+
+计算依赖分为两大部分，第一部分是做准备工作，第二部分是计算依赖关系，第三部分是根据依赖关系来得到需要计算哪些函数。
 */
 void DistEngine::computeDependencies(
     const ContextPtr& autogradContext,
@@ -196,10 +228,13 @@ void DistEngine::computeDependencies(
     temp_roots[i] = rootEdges[i].function.get();
   }
 
+  // 第一部分，准备工作
+  // 1. 生成一个GraphTask
   // Build the graph task and graph root.
   // NOTE: we don't need to build and pass a cpu_ready_queue to GraphTask
   // as we use execute_graph_task_until_ready_queue_empty, which will build
   // a separate ReadyQueue for each call.
+  // 不需要给 GraphTask 传一个cpu_ready_queue，因为我们后面使用execute_graph_task_until_ready_queue_empty，在那里会给每一个调用建立一个独立的ReadyQueue
   auto graphTask = std::make_shared<GraphTask>(
       /* keep_graph */ retainGraph,
       /* create_graph */ false,
@@ -210,46 +245,50 @@ void DistEngine::computeDependencies(
 
   // Run BFS to traverse the graph locally. The roots of the graph are
   // GraphRoot and all send functions for this autograd context.
-  std::unordered_set<Node*> seen;
-  std::queue<Node*> queue;
-  queue.push(static_cast<Node*>(graphRoot.get()));
+  std::unordered_set<Node*> seen; // 记录已经访问过的节点
+  std::queue<Node*> queue; // 一个 Node 类型的 queue
+  queue.push(static_cast<Node*>(graphRoot.get())); // 插入根对应的Node
 
   auto sendFunctions = autogradContext->sendFunctions();
 
+  // 2. 获取出边列表
   // Add all the send functions to the queue as roots.
-  for (const auto& mapEntry : sendFunctions) {
+  // 普通状态下，root节点内在反向传播时候，已经有了next edges，但是分布式模式下，出边是在sendFunctions之中
+  // Add all the send functions to the queue as roots.
+  for (const auto& mapEntry : sendFunctions) {   // sendFunctions就是出边，之前在 addSendFunction之中被添加
     // Increment 'outstanding_tasks_' for GraphTask for each send_function
     // since we want the local autograd engine to wait for all of them.
-    graphTask->outstanding_tasks_++;
-    queue.push(mapEntry.second.get());
+    graphTask->outstanding_tasks_++;  // 出边增加
+    queue.push(mapEntry.second.get());  // 后续用queue来处理，插入的是 SendRpcBackward
   }
 
   bool might_use_cuda = at::globalContext().hasCUDA();
   bool will_use_cuda = false;
 
+// 第二部分，遍历图，计算依赖关系，此时 queue 里面是 root 和 若干 SendRpcBackward
   edge_list recvBackwardEdges;
   // Traverse the graph.
-  auto& dependencies = graphTask->dependencies_;
-  while (!queue.empty()) {
-    auto fn = queue.front();
+  auto& dependencies = graphTask->dependencies_;  // 获取依赖关系
+  while (!queue.empty()) {  // 遍历所有发送边
+    auto fn = queue.front();  // 得到发送边
     queue.pop();
 
     if (might_use_cuda && !will_use_cuda) {
       will_use_cuda = fn->stream(c10::DeviceType::CUDA).has_value();
     }
 
-    for (const auto& edge : fn->next_edges()) {
-      if (auto nextFn = edge.function.get()) {
-        dependencies[nextFn] += 1;
-        const bool wasInserted = seen.insert(nextFn).second;
-        if (wasInserted) {
+    for (const auto& edge : fn->next_edges()) {  // 遍历Node（根节点或者SendRpcBackward）的next_edges
+      if (auto nextFn = edge.function.get()) {  // 得到一个边
+        dependencies[nextFn] += 1;  // 对应的节点依赖度加一
+        const bool wasInserted = seen.insert(nextFn).second;  // 是否已经访问过
+        if (wasInserted) {  // 如果true，是插入了，就说明之前没有访问过，否则插不进去，是false
           // Seeing this function for the first time.
-          queue.push(nextFn);
+          queue.push(nextFn);  // 既然之前没有访问过，就插入到queue
 
-          if (nextFn->next_edges().empty()) {
+          if (nextFn->next_edges().empty()) {  // 如果这个边本身没有输出边，说明是叶子节点
             TORCH_INTERNAL_ASSERT(
                 dynamic_cast<AccumulateGrad*>(nextFn) ||
-                dynamic_cast<RecvRpcBackward*>(nextFn));
+                dynamic_cast<RecvRpcBackward*>(nextFn));  // 叶子节点有两种
             // We have found a leaf node which should be either AccumulateGrad
             // or RecvRpcBackward. Record the function
             // to ensure we don't execute it and instead accumulate the grads on
@@ -265,9 +304,9 @@ void DistEngine::computeDependencies(
             // functions are valid in the backward pass), and as a result all of
             //  its ancestors need to be executed as well.
             if (dynamic_cast<RecvRpcBackward*>(nextFn)) {
-              recvBackwardEdges.emplace_back(edge);
+              recvBackwardEdges.emplace_back(edge);   // 特殊处理
             }
-            outputEdges.emplace_back(edge);
+            outputEdges.emplace_back(edge);  // 最终输出边
           }
         }
       }
@@ -279,6 +318,10 @@ void DistEngine::computeDependencies(
     // so graphTask::exec_post_processing can sync them with leaf_streams.
     graphTask->stash_current_streams();
   }
+
+  // 此时，recvBackwardEdges 里面是RecvRpcBackward，outputEdges 里面是 AccumulateGrad
+
+  // 以下是第三部分，根据依赖关系找到需要计算那些functions
 
   // Now lets compute which functions need to be executed. The algorithm is as
   // follows:
@@ -299,33 +342,38 @@ void DistEngine::computeDependencies(
     // original graphRoot.
     edge_list edges;
     // Create some dummy edges (input_nr not important for init_to_execute).
-    for (const auto& mapEntry : sendFunctions) {
-      edges.emplace_back(mapEntry.second, 0);
+    for (const auto& mapEntry : sendFunctions) {  // 遍历
+      edges.emplace_back(mapEntry.second, 0);   // 得到出边列表
     }
 
     // Add the original graphRoot as an edge.
-    edges.emplace_back(graphRoot, 0);
+    edges.emplace_back(graphRoot, 0);  // root也加入出边列表
 
     // Create a dummy GraphRoot and run init_to_execute with it.
-    GraphRoot dummyRoot(edges, {});
+    GraphRoot dummyRoot(edges, {});  // 建立一个虚拟Root
+
+    // 如果出边不为空，则会调用 init_to_execute  对GraphTask进行初始化
     graphTask->init_to_execute(
         dummyRoot, outputEdges, /*accumulate_grad=*/false, /*min_topo_nr=*/0);
+
+    // exec_info_ 的数据结构是std::unordered_map<Node*, ExecInfo>
     for (auto& mapEntry : graphTask->exec_info_) {
       auto& execInfo = mapEntry.second;
-      if (!execInfo.captures_) {
-        continue;
+      if (!execInfo.captures_) {  // 看看此张量是否在所求梯度的张量路径上
+        continue;  // 如果不在路径之上，就跳到下一个张量
       }
       auto fn = mapEntry.first;
       // There may be nodes other than 'AccumulateGrad', e.g. RecvRPCBackward,
       // to be captured.
       if (auto accumulateGradFn = dynamic_cast<AccumulateGrad*>(fn)) {
-        for (auto& capture : *execInfo.captures_) {
+        // 如果是叶子节点
+        for (auto& capture : *execInfo.captures_) {  // 遍历张量路径上的节点
           // Capture hooks are technically deprecated, but as an exception below
           // is the single and only instance of capture hooks usage that we
           // support. See NOTE [Deprecated capture hooks] for more context.
           // 在这里添加 hook
           capture.DO_NOT_USE_DEPRECATED_register_capture_hook(
-              std::make_unique<DistAccumulateGradCaptureHook>(
+              std::make_unique<DistAccumulateGradCaptureHook>(  // 给张量插入Hook
                   std::dynamic_pointer_cast<AccumulateGrad>(
                       accumulateGradFn->shared_from_this()),
                   autogradContext));
@@ -334,6 +382,7 @@ void DistEngine::computeDependencies(
     }
 
     // Mark all 'RecvRPCBackward' as needing execution.
+    // RecvRPCBackward需要执行
     for (const auto& recvBackwardEdge : recvBackwardEdges) {
       graphTask->exec_info_[recvBackwardEdge.function.get()].needed_ = true;
     }
@@ -344,6 +393,7 @@ void DistEngine::computeDependencies(
   graphTask->owner_ = torch::autograd::CPU_DEVICE;
 
   // Let autograd context take ownership of the GraphTask.
+  // 上下文里面设置了 GraphTask  // 设定在上下文之中
   autogradContext->setGraphTask(std::move(graphTask));
 }
 
@@ -457,6 +507,7 @@ c10::intrusive_ptr<c10::ivalue::Future> DistEngine::
   return accumulateGradFuture;
 }
 
+//executeSendFunctionAsync 就会用 sendFunction->getGrads() 提取梯度，进行操作。
 c10::intrusive_ptr<c10::ivalue::Future> DistEngine::executeSendFunctionAsync(
     const ContextPtr& autogradContext,
     const std::shared_ptr<SendRpcBackward>& sendFunction,
@@ -469,7 +520,7 @@ c10::intrusive_ptr<c10::ivalue::Future> DistEngine::executeSendFunctionAsync(
   const auto& send_backward_stream =
       sendFunction->stream(c10::DeviceType::CUDA);
   if (send_backward_stream) {
-    for (const auto& grad : sendFunction->getGrads()) {
+    for (const auto& grad : sendFunction->getGrads()) {   // 这里有获取
       const auto guard = c10::impl::VirtualGuardImpl{c10::DeviceType::CUDA};
       const auto default_stream = guard.getStream(grad.device());
       if (send_backward_stream != default_stream) {
@@ -561,7 +612,29 @@ c10::intrusive_ptr<c10::ivalue::Future> DistEngine::executeSendFunctionAsync(
     return fut;
   }
 }
+/*
+总体执行是在 DistEngine::execute 之中完成，具体分为如下步骤：
 
+    使用 contextId 得到前向的上下文。
+    使用 validateRootsAndRetrieveEdges 进行验证。
+    构造一个GraphRoot，用它来驱动后向传播，可以认为是一个虚拟根。
+    使用 computeDependencies 计算依赖。
+    使用 runEngineAndAccumulateGradients 进行反向传播计算。
+    使用 clearAndWaitForOutstandingRpcsAsync 等待 RPC 完成。
+可以看到，与普通引擎相比较，分布式多了一个计算root边和生成边上梯度信息的过程。因为在普通前向传播过程之中，这些是已经配置好的，但是在分布式计算之中，前向传播是没有计算这些，所以需要在反向传播之前计算出来。
+
+
+4.3 VS 普通 engine
+我们和普通引擎进行对比一下校验部分。
+
+普通Engine 之中只调用了 validate_outputs。
+
+因此，对于校验部分，DistEngine 可以总结为：
+
+做校验。
+根据 roots 来计算root对应的边和生成对应梯度。
+再用validate_outputs验证输出。
+*/
 void DistEngine::execute(
     int64_t contextId,
     const variable_list& roots,
@@ -576,6 +649,7 @@ void DistEngine::execute(
   variable_list grads;
   validateRootsAndRetrieveEdges(roots, rootEdges, grads);
 
+  //// 构造一个GraphRoot，用它来驱动后向传播，可以认为是一个虚拟根
   std::shared_ptr<Node> graphRoot =
       std::make_shared<GraphRoot>(rootEdges, grads);
   edge_list outputEdges;
@@ -587,7 +661,7 @@ void DistEngine::execute(
     TORCH_INTERNAL_ASSERT(
         initializedContextIds_.find(autogradContext->contextId()) ==
         initializedContextIds_.end());
-
+    // 计算依赖
     computeDependencies(
         autogradContext, rootEdges, grads, graphRoot, outputEdges, retainGraph);
 
@@ -600,7 +674,7 @@ void DistEngine::execute(
   // This needs to be blocking and as a result we wait for the future to
   // complete.
   runEngineAndAccumulateGradients(autogradContext, graphRoot, outputEdges)
-      ->waitAndThrow();
+      ->waitAndThrow(); // 反向传播计算
 
   // Wait for all of the outstanding rpcs to complete.
   autogradContext->clearAndWaitForOutstandingRpcsAsync()->waitAndThrow();

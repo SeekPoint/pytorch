@@ -8,6 +8,7 @@ namespace autograd {
 constexpr auto kDistAutogradBackwardProfilingKey =
     "torch::distributed::autograd::backward";
 
+//引擎入口在 backward 函数中有调用，从 DistEngine::getInstance().execute 进入到引擎，由前文可知，这里是主动调用引擎。
 void backward(
     int64_t context_id,
     const variable_list& roots,

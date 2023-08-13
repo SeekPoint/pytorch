@@ -1,0 +1,165 @@
+5.2 第一部分 准备工作
+5.2.1 实现
+因为这里是计算本地的依赖关系，所以遍历需要从 root 和 本地的 SendRpcBackward 开始计算。我们先要先做一些准备工作：
+
+首先生成一个GraphTask，但是不需要给 GraphTask 传一个cpu_ready_queue，因为我们后面使用execute_graph_task_until_ready_queue_empty，在那里会给每一个调用 建立一个独立的ReadyQueue。
+其次用 seen 来记录已经访问过的节点。
+构建一个 Node 类型的 queue，把根节点插入到queue。
+然后从上下文之中拿到出边Functions，放入到 sendFunctions 之中。
+sendFunctions就是出边，之前在 addSendFunction之中被添加。
+普通状态下，root节点内在反向传播时候，已经有了next edges，但是分布式模式下，出边是在sendFunctions之中。
+遍历出边 sendFunctions，构建出边列表，对于 sendFunctions 中的每一项：
+GraphTask 出边数目增加 graphTask->outstanding_tasks_++。
+在 queue 之中插入 sendFunctions 中的 SendRpcBackward。
+最后，queue 里面是 root 和 若干 SendRpcBackward。
+5.2.2 相关
+实现之中，使用了部分函数或者成员变量，我们选取重点进行介绍。
+
+5.2.2.1 sendFunctions
+sendFunctions 是获取了上下文的sendAutogradFunctions_，这是一个 std::unordered_map<int64_t, std::shared_ptr>。
+
+std::unordered_map<int64_t, std::shared_ptr<SendRpcBackward>>
+DistAutogradContext::sendFunctions() const {
+  std::lock_guard<std::mutex> guard(lock_);
+  return sendAutogradFunctions_;
+}
+sendFunctions就是出边，之前在 addSendFunction之中被添加，addSendRpcBackward 会调用 addSendFunction。
+
+5.2.2.2 outstanding_tasks_
+利用 graphTask->outstanding_tasks_++ 把GraphTask 出边数目增加。
+
+GraphTask
+outstanding_tasks_ 是 GraphTask 的成员变量。
+
+outstanding_tasks_ ：用来记录当前任务数目，如果数目为0，则说明任务结束了。 如果这个数量不为0，则此GraphTask依然需要运行。
+vania engine
+在 vania engine 之中就有 outstanding_tasks_。
+
+是待处理 NodeTask的数量，用来判断该GrapTask是否还需要执行，如果数目为0，则说明任务结束了。
+
+当 GraphTask 被创建出来时候，此数值为0。
+如果有一个NodeTask被送入到 ReadyQueue，则outstanding_tasks_ 增加 1。
+如果在工作线程作执行一次 evaluate_function(task)后，outstanding_tasks的值减1。
+如果这个数量不为0，则此GraphTask依然需要运行。
+bool GraphTask::completed() {
+  return outstanding_tasks_.load() == 0 ||
+      (exit_on_error_ && has_error_.load());
+}
+NodeTask任务增加时候 outstanding_tasks_ 就加一。
+
+dist engine
+在计算依赖时候，遍历 sendFunctions，上下文有几个SendRpcBackward，就把 outstanding_tasks_ 就加几，每多一条出边，就意味着多了一个计算过程。
+
+std::unordered_map<int64_t, std::shared_ptr<SendRpcBackward>>
+DistAutogradContext::sendFunctions() const {
+  std::lock_guard<std::mutex> guard(lock_);
+  return sendAutogradFunctions_;
+}
+而执行时候，void DistEngine::execute_graph_task_until_ready_queue_empty 和 Engine::thread_main 都会减少 outstanding_tasks_。
+
+5.3 第二部分 计算依赖
+第二部分是遍历图，计算依赖关系。
+
+5.3.1 实现
+此时 queue 里面是 root 和 若干 SendRpcBackward，所以接下来就是从 queue 之中不停弹出Node 进行计算。具体逻辑是：
+
+遍历所有发送边（从 queue 之中不停弹出Node ），对于每个Node，遍历Node（根节点或者SendRpcBackward）的next_edges：
+如果可以得到一个边，则：
+对应的节点依赖度加一。
+如果之前没有访问过，就插入到queue。
+如果这个边本身没有输出边，说明是叶子节点，叶子节点有两种：AccumulateGrad 或者 RecvRpcBackward。
+对于 recvBackwardEdges.emplace_back(edge) 做特殊处理。
+插入到最终输出边 outputEdges，注意，RecvRpcBackward 也插入到这里。
+这之后，局部变量 recvBackwardEdges 里面是RecvRpcBackward，outputEdges 里面是 AccumulateGrad 和 RecvRpcBackward。
+
+5.3.2 叶子节点的种类
+有两种叶子节点，所以需要分开处理。
+
+AccumulateGrad : 普通叶子节点，就是本地叶子节点。
+RecvRpcBackward : 在正向图中，是RPC接收节点。
+从设计文档之中，有如下对应："
+
+我们发现了一个叶节点，它应该是AccumulateGrad或RecvRpcBackward。我们记录函数以确保我们不执行它，而是在autograd上下文中累积梯度。这些函数将作为"输出"参数传入到vanilla autograd引擎。
+
+我们没有在RecvRpcBackward上下文积累任何梯度。RecvRpcBackward被添加为输出边，以指示它是叶节点，这有助于正确计算本地autograd graph的依赖关系。将RecvRpcBackward放在"outputEdges"中意味着需要执行此函数（与我们对快速模式的假设一致，即所有send/recv函数在向后传播中都有效），因此也需要执行其所有祖先函数。
+
+比如，对于 work 1, recv 就是叶子节点，是一个RecvRpcBackward，它需要把梯度传递给 worker 0。对于 worker 0，上面的子图，t1, t2 也是叶子节点，都是AccumulateGrad。
+
+
+
+5.4 第三部分 得到Functions
+这部分根据依赖关系找到需要计算那些functions。
+
+5.4.1 算法
+现在让我们计算需要执行哪些函数。算法如下：
+
+创建一个虚拟GraphRoot，它指向此上下文和原始GraphRoot的所有"发送"函数。使用outputEdges和虚拟GraphRoot来运行"init_to_execute"。这确保我们根据需要标记适当的函数：如果它们只能从本地特定的"发送"函数访问，而不需要从提供的根访问。
+对于"outputEdges"中指向"RecvRpcBackward"的所有边，根据执行需要标记这些函数。原因是"init_to_execute"会将这些标记为不需要。但"RecvRpcBackward"的独特之处在于，我们将其用作图中的叶节点来准确计算所需的执行操作，但与AccumageGrad不同，我们确实需要执行此函数。
+具体就是：
+
+RecvRpcBackward 需要执行。
+AccumulateGrad 需要累积梯度。
+5.4.2 实现
+此时，recvBackwardEdges 里面是RecvRpcBackward，outputEdges 里面是 AccumulateGrad 和 RecvRpcBackward。我们需要根据这些信息来标识后续如何执行。具体实现是：
+
+先计算 AccumulateGrad，如果 outputEdges 不为空，则把 outputEdges 的信息插入到 GraphTask.exec_info_ 之中：
+
+构建一个 edge_list edges，就是出边列表。
+遍历 sendFunctions，得到输出列表，加入到 edges。
+root也加入出边列表。
+建立一个虚拟Root。
+如果出边不为空，则会调用 init_to_execute 对GraphTask进行初始化。
+遍历 GraphTask 的 exec_info，exec_info_ 的数据结构是std::unordered_map<Node*, ExecInfo> 。
+看看此张量是否在所求梯度的张量路径上。
+如果不在路径之上，就跳到下一个张量。
+拿到 exec_info_ 的 Node。
+如果 Node 是叶子节点。
+遍历张量路径上的节点。
+给张量插入Hook。这里是关键，就是 AccumulateGrad 对应的张量加上了 Hook，用来后续累积梯度。
+遍历 recvBackwardEdges，对于每个 recvBackward，在 GraphTask.exec_info_ 之中对应项之上设止为 "需要执行"。
+
+至此，依赖项处理完毕，所有需要计算的函数信息都位于 GraphTask.exec_info_ 之上，我们在下一篇来看看如何执行。
+
+5.5 小结
+我们总结一下计算依赖的逻辑：
+
+computeDependencies 开始计算依赖。
+从 DistAutogradContext 之中获取 sendAutogradFunctions_，把 SendRpcBackward 都放入到 sendFunctions。普通状态下，root节点内在反向传播时候，已经有了next edges，但是分布式模式下，出边是在sendFunctions之中，所以要提取出来，放入下面的 queue。
+遍历 sendFunctions，把 Node 加入到 queue，此时 queue 之中是 root 和 一些 SendRpcBackward。
+遍历 Queue 进行处理，处理结果是两个局部变量 edge_list。 recvBackwardEdges 里面是RecvRpcBackward，outputEdges 里面是 AccumulateGrad 和 RecvRpcBackward，我们需要根据这些信息来标识后续如何执行。
+遍历 recvBackwardEdges 和 outputEdges，把相关信息加入到GraphTask.exec_info_，至此，依赖项处理完毕，所有需要计算的函数信息都位于 GraphTask.exec_info_ 之上。
+AccumulateGrad 被加入了 Hook，用来后续累积梯度。
+RecvRpcBackward 被设置了需要执行。
+                                        computeDependencies
+                                                +
++---------------------------+                   | 1
+| DistAutogradContext       |                   |
+|                           |                   v
+|                           |  2
+|  sendAutogradFunctions_ +-------> map<int,SendRpcBackward> > sendFunctions
+|                           |
++---------------------------+                   +
+                                                |
+                                                | 3
+                                                v
+
+                                        queue<Node*> queue
+
+                                                +
+                                                | 4
+                                                |
+                                                |
+                                                v
+
+             recvBackwardEdges = [RecvRpcBackward 1, RecvRpcBackward 2, ...]
+
+             outputEdges = [RecvRpcBackward 1, RecvRpcBackward 2,
+                                    AccumulateGrad 1, AccumulateGrad 2, ...]
+
+                                                +
+                                                |
+                                                | 5
+                                                v
+
+                                       GraphTask.exec_info_
+

@@ -871,6 +871,18 @@ void set_device(int device) {
   worker_device = device;
 }
 
+/*
+其定义在 torch/csrc/autograd/engine.cpp，原生引擎和分布式引擎都会调用。validate_outputs 之中包含了大量的验证代码。
+
+    如果梯度数量与边数目不同，则退出。
+    遍历梯度，对于每个梯度：
+        获取对应的边，如果边无效，则去下一个梯度。
+        使用input_metadata 获取输入信息。
+        如果梯度没有定义，也去下一个梯度。
+        如果梯度尺寸与输入形状不同，则退出。
+        对梯度的设备，元数据的设备进行一系列判断。
+
+*/
 void validate_outputs(
     const edge_list& edges,
     variable_list& grads,
@@ -916,6 +928,8 @@ void validate_outputs(
         grad.scalar_type()) {
       grad = grad.to(c10::typeMetaToScalarType(metadata.options().dtype()));
     }
+
+    // 如果梯度尺寸与输入形状不同，则退出
     if (grad.dtype() != metadata.dtype()) {
       std::stringstream ss;
       ss << "invalid gradient at index " << i << " - expected dtype ";

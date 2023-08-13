@@ -39,6 +39,9 @@ using torch::distributed::rpc::WorkerInfo;
 调用 collect_next_edges 和 set_next_edges 为 SendRpcBackward 添加后续边，这些函数我们在前面系列中有分析。
 调用 add_input_metadata 添加输入元数据。
 调用 addSendFunction 往上下文添加 grad_fn。
+
+在前向传播过程之中，addSendRpcBackward 会构建一个SendRpcBackward，
+会把其前向传播输入边作为反向传播的输出边设置在 SendRpcBackward 之中。
 */
 void addSendRpcBackward(
     const ContextPtr& autogradContext,
@@ -53,16 +56,17 @@ void addSendRpcBackward(
       [](const torch::Tensor& t) { return t.requires_grad(); });
 
   // Attach the appropriate autograd edges.
-  auto grad_fn = std::make_shared<SendRpcBackward>();
+  auto grad_fn = std::make_shared<SendRpcBackward>();  // 构建了 SendRpcBackward
   grad_fn->set_next_edges(  // 这里会设置其输出边
       torch::autograd::collect_next_edges(tensors_with_grad));
 
   // Add the appropriate input metadata for the grad_fn.
   for (const auto& tensor : tensors_with_grad) {
-    grad_fn->add_input_metadata(tensor);
+    grad_fn->add_input_metadata(tensor);  // 添加边 SendRpcBackward
   }
 
   // Record the send autograd function in our current context.
+  // 插入到上下文
   autogradContext->addSendFunction(grad_fn, autogradMetadata.autogradMessageId);
 }
 

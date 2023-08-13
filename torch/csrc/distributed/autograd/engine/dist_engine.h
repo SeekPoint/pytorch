@@ -24,6 +24,7 @@ class BackwardPassCleanupGuard;
 // Unlike the vanilla autograd engine, the distributed autograd engine
 // accumulates the gradients in the appropriate DistAutogradContext. This avoids
 // multiple trainer nodes stomping on each others gradients.
+// DistEngine 的定义如下，为了更好讲解，下面删除了部分代码：
 class TORCH_API DistEngine {
  public:
   // Retrieve the singleton instance.
@@ -148,7 +149,9 @@ class TORCH_API DistEngine {
   torch::autograd::Engine& engine_;
 
   // Ready queue used by the CPU thread in distributed engine.
-  // See Note [GPU to CPU continuations]
+  // See Note [GPU to CPU continuations
+  // 每个 GraphTask都把 global_cpu_ready_queue_ 设置为自己的 cpu_ready_queue_
+  // 代码中定义了两个 CPU 全局相关成员变量，具体如下，均注明需要看 [GPU to CPU continuations] 这个注释
   std::shared_ptr<torch::autograd::ReadyQueue> global_cpu_ready_queue_;
 
   // See Note [GPU to CPU continuations]
