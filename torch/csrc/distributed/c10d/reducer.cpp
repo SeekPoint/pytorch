@@ -86,6 +86,7 @@ std::vector<at::Tensor> extractTensors(const c10::IValue& result) {
 
 } // namespace
 
+//其次，在 Reducer 构建函数之中，会把进程组配置给 Reducer 的成员变量 process_group_ 之上。
 Reducer::Reducer(
     std::vector<at::Tensor> params,
     std::vector<std::vector<size_t>> bucket_indices,
@@ -98,7 +99,7 @@ Reducer::Reducer(
     std::unordered_map<size_t, std::string> param_names,
     int64_t first_bucket_bytes_cap)
     : params_(std::move(params)),
-      process_group_(std::move(process_group)),
+      process_group_(std::move(process_group)), // 在这里
       expect_sparse_gradients_(std::move(expect_sparse_gradients)),
       expect_autograd_hooks_(false),
       require_finalize_(false),
@@ -886,6 +887,11 @@ c10::intrusive_ptr<c10::ivalue::Future> Reducer::run_allreduce_hook(
   return allreduce_hook.runHook(grad_bucket);
 }
 
+/*
+最后，当需要对梯度做 all-reduce 时候，则会调用 process_group_->allreduce(tensors) 进行处理。
+
+现在，我们就知道如何使用进程组了
+*/
 void Reducer::all_reduce_bucket(Bucket& bucket) {
   auto variables_for_bucket = get_variables_for_bucket(next_bucket_, bucket);
   // TODO(@pietern): Ensure proper synchronization with the CUDA events

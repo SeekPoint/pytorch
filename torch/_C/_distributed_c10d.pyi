@@ -412,6 +412,7 @@ class ProcessGroupNCCL(ProcessGroup):
     def _group_end() -> None: ...
     ...
 
+#我们以 ProcessGroupMPI 为例来看看，可以看到ProcessGroupMPI的基类是ProcessGroup。
 class ProcessGroupUCC(ProcessGroup):
     def __init__(
         self,

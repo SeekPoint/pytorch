@@ -688,7 +688,7 @@ def is_torchelastic_launched() -> bool:
     """
     return os.getenv("TORCHELASTIC_RUN_ID") is not None
 
-
+#PyTorch 对各种 process group 做了封装，这样用户就可以调用 GroupMember.WORLD 来完成各种操作，但是用户是无感的。
 def _get_default_group():
     """
     Getting the default process group created by init_process_group
@@ -833,6 +833,15 @@ init_method 最终还是落到了 store 之上，store才是起作用的实体�
 rendezvous 其实就是返回了某一种store 以供后续通信使用。
 在进程组之中，会使用 store 来构建通信，等待，存取等。
 我们接下来选择 TCPStore进行相信分析。    
+
+
+从 init_process_group 源码之中看，几种构建实现在细节上有所不同，我们只是看gloo和mpi。
+
+gloo利用 rendezvous 设置了master地址。
+
+MPI不需要 rendezvous，而是利用mpirun启动。
+
+两种方法都生成了一个 ProcessGroup 赋值给 default_pg，然后用 default_pg 设置 GroupMember.WORLD。
 '''
 def init_process_group(
     backend: Union[str, Backend] = None,
@@ -956,10 +965,10 @@ def init_process_group(
                 "MPI runtime.".format(world_size, rank)
             )
 
-        default_pg = _new_process_group_helper(
+        default_pg = _new_process_group_helper(  # 生成了一个 ProcessGroup 赋值给 default_pg
             -1, -1, [], backend, None, group_name=group_name, timeout=timeout
         )
-        _update_default_pg(default_pg)
+        _update_default_pg(default_pg)  # 用 default_pg 设置 GroupMember.WORLD
     else:
         # backward compatible API
         if store is None:
@@ -998,7 +1007,7 @@ def init_process_group(
             group_name=group_name,
             timeout=timeout,
         )
-        _update_default_pg(default_pg)
+        _update_default_pg(default_pg)  # 用 default_pg 设置 GroupMember.WORLD
 
     _world.pg_group_ranks[GroupMember.WORLD] = {i: i for i in range(GroupMember.WORLD.size())}  # type: ignore[attr-defined, index]
     _backend = _world.pg_map[GroupMember.WORLD][0]  # type: ignore[index]
@@ -1014,7 +1023,48 @@ def init_process_group(
         # Use store based barrier here since barrier() used a bunch of
         # default devices and messes up NCCL internal state.
         _store_based_barrier(rank, store, timeout)
+'''
+目前流程如下：
 
+                                  +
+                                  |
+                                  |
+                                  v
+                          init_process_group
+                                  +
+                                  |
+                                  |
+                     +------------+-------------+
+                     |                          |
+                     |                          |
+                     v                          v
+                Backend.MPI        Backend.GLOO & Backend.NCCL
+                     +                          +
+                     |                          |
+                     |                          |
+                     |                          v
+                     |                  store = rendezvous()
+                     |                          +
+                     |                          |
+                     |                          |
+                     +------------+-------------+
+                                  |
+                                  |
+                                  v
+
+                       _new_process_group_helper
+                                  +
+                                  |
+                                  |
+                                  |
+       +------------------------------------------------------+
+       |                          |                           |
+       |                          |                           |
+       v                          v                           v
+
+ProcessGroupMPI         ProcessGroupGloo(store)        ProcessGroupNCCL(store)
+'''
+#各种后端都会使用 _new_process_group_helper 进行具体构建，_new_process_group_helper 其实就是调用了不同的C++实现，比如 ProcessGroupGloo, ProcessGroupMPI, ProcessGroupNCCL。
 #_new_process_group_helper 之中得到了 store 参数之后，据此生成了一个 prefix_store，然后再根据这个 pre_store 来生成了 ProcessGroupGloo。
 def _new_process_group_helper(
     group_size,
@@ -3249,7 +3299,7 @@ def all_to_all_single(
     else:
         work.wait()
 
-
+#又比如，在 torch/distributed/distributed_c10d.py 之中如下方法可以看到 all_to_all 和 all_gather 之类的函数，其注释有很详细的用法（这里因为篇幅所限略去），大家有兴趣可以自行学习。
 @exception_handler
 def all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=False):
     """

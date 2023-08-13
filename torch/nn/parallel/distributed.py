@@ -767,7 +767,11 @@ class DistributedDataParallel(Module, Joinable):
         if self.logger is not None:
             self.logger.set_error_and_log(f"{str(err_type)}: {err_msg}")
         raise err_type(err_msg)
-
+    '''
+    既然知道了进程组的本质，我们接下来看看如何使用进程组。
+    
+    首先，在 _ddp_init_helper 之中会生成 dist.Reducer，进程组会作为 Reducer 的参数之一传入。
+    '''
     def _ddp_init_helper(
         self,
         parameters,
@@ -826,7 +830,7 @@ class DistributedDataParallel(Module, Joinable):
             parameters,
             list(reversed(bucket_indices)),
             list(reversed(per_bucket_size_limits)),
-            self.process_group,
+            self.process_group, # 这里使用了
             expect_sparse_gradient,
             # The bucket size limit is specified in the constructor.
             # Additionally, we allow for a single small bucket for parameters
