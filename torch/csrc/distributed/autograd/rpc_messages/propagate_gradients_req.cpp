@@ -19,7 +19,14 @@ PropagateGradientsReq::PropagateGradientsReq(
     : autogradMetadata_(autogradMetadata),
       grads_(std::move(grads)),
       retainGraph_(retainGraph) {}
+/*
+3.1.2 内部隐式发起
+因为是隐式发起，所以代码比较隐蔽，我们这次采用从下至上的方式来剥丝抽茧。
+我们知道，如果节点之间要求反向传播，会发送BACKWARD_AUTOGRAD_REQ，所以我们从 BACKWARD_AUTOGRAD_REQ 开始发起寻找。
 
+3.1.2.1 BACKWARD_AUTOGRAD_REQ
+在 torch/csrc/distributed/autograd/rpc_messages/propagate_gradients_req.cpp 之中 PropagateGradientsReq::toMessageImpl 会调用到 BACKWARD_AUTOGRAD_REQ。
+*/
 c10::intrusive_ptr<Message> PropagateGradientsReq::toMessageImpl() && {
   std::vector<at::IValue> ivalues;
   // Add all the grad tensors.
@@ -43,7 +50,7 @@ c10::intrusive_ptr<Message> PropagateGradientsReq::toMessageImpl() && {
   return c10::make_intrusive<Message>(
       std::move(payload),
       std::move(tensorTable),
-      MessageType::BACKWARD_AUTOGRAD_REQ);
+      MessageType::BACKWARD_AUTOGRAD_REQ); // 这里会用到
 }
 
 std::unique_ptr<PropagateGradientsReq> PropagateGradientsReq::fromMessage(

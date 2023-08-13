@@ -42,6 +42,12 @@ class context:
         >>>     t1 = torch.rand((3, 3), requires_grad=True)
         >>>     t2 = torch.rand((3, 3), requires_grad=True)
         >>>     loss = rpc.rpc_sync("worker1", torch.add, args=(t1, t2)).sum()
+
+        我们找一找如何发起反向传播，按照从下往上的顺序进行。这里也有两种：
+
+            一种是主动发起，比如上图之中 worker 0 的 loss 之上主动调用backward 方法。
+            一种是内部隐式发起，比如上图的 worker 0 之中的 t3 如何通过 recv 告诉 worker 1，你应该启动反向传播了。
+
         >>>     dist_autograd.backward(context_id, [loss])
     '''
     #当生成时，__enter__ 会调用 _new_context() 在C++生成一个context。

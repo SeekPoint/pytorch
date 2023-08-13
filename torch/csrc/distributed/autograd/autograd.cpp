@@ -16,6 +16,7 @@ void backward(
   RECORD_FUNCTION(
       kDistAutogradBackwardProfilingKey, std::vector<c10::IValue>());
   try {
+  //可以看到，最终会调用到 DistEngine::getInstance().execute(context_id, roots, retain_graph) 完成反向传播。这就进入了引擎。
     DistEngine::getInstance().execute(context_id, roots, retain_graph);
   } catch (std::exception& e) {
     // FIXME: crashes if exception type is not RuntimeError

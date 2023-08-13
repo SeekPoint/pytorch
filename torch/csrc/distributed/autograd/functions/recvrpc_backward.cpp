@@ -20,8 +20,52 @@ RecvRpcBackward::RecvRpcBackward(
       autogradContext_(std::move(autogradContext)),
       fromWorkerId_(fromWorkerId),
       deviceMap_(std::move(deviceMap)) {}
+/*
+3.1.2.2 PropagateGradientsReq
+继续找谁发出来的 BACKWARD_AUTOGRAD_REQ，就是谁调用到了 toMessageImpl？
+原来在 torch/csrc/distributed/autograd/functions/recvrpc_backward.cpp 这里构建了 PropagateGradientsReq，
+会使用 toMessage 来构建一个消息。
+即，RecvRpcBackward 的调用会发送 BACKWARD_AUTOGRAD_REQ。
 
-variable_list RecvRpcBackward::apply(variable_list&& grads) {
+
+所以我们知道，在 RecvRpcBackward 的执行时候，会发送 BACKWARD_AUTOGRAD_REQ，发送给下一个节点。具体哪里调用 RecvRpcBackward？我们会在下一篇 DistEngine 之中介绍。
+
+此时具体如下，对应就是 worker 0 的 t3 给 worker 1 发送 BACKWARD_AUTOGRAD_REQ 消息。
+
+                                                                +
+                                                       worker 0 | worker 1
+                                                                |
+                                                                |
+ RecvRpcBackward                         PropagateGradientsReq  |
+       +                                          +             |
+       |                                          |             |
+       |                                          |             |
+       |                                          |             |
+       v                                          |             |
+                                                  |             |
+     apply()                                      |             |
+       +                                          |             |
+       |                                          v             |
+       |                                                        |
+       | +------------------------------>  toMessageImpl        |
+       |                                          +             |
+       |                                          |             |
+       |   Message(BACKWARD_AUTOGRAD_REQ)         |             |
+       | <----------------------------------------+             |
+       |                                                        |
+       |                                                        |
+       v                                                        |
+                                                                |
+rpcAgent+>send(Message)  +-------------------------------------------->
+       +                             BACKWARD_AUTOGRAD_REQ      |
+       |                                                        |
+       |                                                        |
+       v                                                        |
+                                                                +
+
+
+*/
+variable_list RecvRpcBackward::apply(variable_list&& grads) { // 调用Node
   std::vector<Variable> outputGrads;
   for (const auto i : c10::irange(grads.size())) {
     const auto& grad = grads[i];
@@ -43,16 +87,16 @@ variable_list RecvRpcBackward::apply(variable_list&& grads) {
 
   // Send the gradients over the wire and record the future in the autograd
   // context.
-  PropagateGradientsReq gradCall(
+  PropagateGradientsReq gradCall(  // 这里构建了 PropagateGradientsReq
       autogradMetadata_,
       outputGrads,
       sharedContext->retrieveGraphTask()->keep_graph_);
 
   // Send the gradients over to the appropriate node.
   auto rpcAgent = rpc::RpcAgent::getCurrentRpcAgent();
-  auto jitFuture = rpcAgent->send(
+  auto jitFuture = rpcAgent->send(  // 发送出去，就是给后向传播过程的下一个节点
       rpcAgent->getWorkerInfo(fromWorkerId_),
-      std::move(gradCall).toMessage(),
+      std::move(gradCall).toMessage(),   // 这里调用了PropagateGradientsReq::toMessageImpl
       rpc::kUnsetRpcTimeout,
       deviceMap_);
 

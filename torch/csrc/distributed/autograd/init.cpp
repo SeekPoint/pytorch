@@ -15,6 +15,7 @@ namespace {
 template <typename T>
 using shared_ptr_class_ = py::class_<T, std::shared_ptr<T>>;
 
+//定义了 backward，get_gradients等等。
 PyObject* dist_autograd_init(PyObject* _unused, PyObject* noargs) {
   auto autograd_module =
       THPObjectPtr(PyImport_ImportModule("torch.distributed.autograd"));

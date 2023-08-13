@@ -29,6 +29,20 @@ nodes. This can be implemented using :mod:`torch.distributed.rpc` as follows:
   t2 = torch.rand((3, 3), requires_grad=True)
 
   # Perform some computation remotely.
+
+    在前文，我们看到了 FORWARD_AUTOGRAD_REQ 在前向传播之中如何调用，假设如下代码：rpc.rpc_sync("worker1", torch.add, args=(t1, t2))，其调用序列是：
+
+    rpc_sync 调用 _invoke_rpc。
+    _invoke_rpc 调用 _invoke_rpc_builtin。
+    然后调用到 pyRpcBuiltin，继而调用到 sendMessageWithAutograd。
+    sendMessageWithAutograd 内部会构建 FORWARD_AUTOGRAD_REQ消息，最后使用RPC 发送。
+    至此，关于整体流程，我们就有了几个疑问：
+
+    在反向计算图的起始位置，如何发起反向传播，怎么传递给反向传播的下一个环节？
+    在反向传播的内部环节，BACKWARD_AUTOGRAD_REQ 是何时调用？recv 操作是何时被调用？ 在上下文中，recvAutogradFunctions_ 是在哪里设置的？
+    以上两个环节分别如何进入分布式autograd引擎？
+    我们接下来就围绕这些疑问进行分析，核心就是如何进入 dist.autograd 引擎。
+
   t3 = rpc.rpc_sync("worker1", my_add, args=(t1, t2)) #首先来到 rpc_sync，发现其调用了_invoke_rpc。
 
   # Perform some computation locally based on remote result.
@@ -295,6 +309,14 @@ As an example the complete code with distributed autograd would be as follows:
     t2 = torch.rand((3, 3), requires_grad=True)
 
     # Perform some computation remotely. # 第一阶段：RPC操作，构建依赖基础
+
+在分布式之下，t3 是异地运行。
+
+t5 对应的是 mul，t5.grad_fn 是 <MulBackward0 object at 0x7fbf18d297b8>。
+t3.grad_fn 是 <CppFunction object at 0x7fbf18d11a20>，就是说，recv 对应的就是 CppFunction 。
+loss 是 tensor(5.5680, grad_fn=)。
+其余的都是 None。
+
     t3 = rpc.rpc_sync("worker1", my_add, args=(t1, t2))
 
     # Perform some computation locally based on remote result.

@@ -397,6 +397,24 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::
   return responseFuture;
 }
 
+/*
+3.2.2 处理消息
+在 processBackwardAutogradReq 之中会：
+
+获取 DistAutogradContainer。
+获取 上下文，该上下文是之前在前向传播过程之中建立的，从前文可知，本图例之中，worker 0 和 worker 1之中每个 autograd 传播都共享同一个上下文 context id。
+通过发送方的 context id，从上下文之中获取到对应的 SendRpcBackward。这里我们看到了上下文是如何使用。
+使用 sendFunction 作为参数，调用 executeSendFunctionAsync 进行引擎处理。
+
+
+3.3 总结
+我们可以看到有两个途径进入 dist autograd 引擎，启动反向传播：
+
+一个是示例代码显式主动调用 backward，进而调用到 DistEngine::getInstance().execute，就是 worker 0。
+一个是被动调用 DistEngine::getInstance().executeSendFunctionAsync，就是 worker 1（当然，worker 0 的 send 也对应了一个被动调用）。
+现在从上至下/自下而上两种查找反向传播的发起源头，都归结到了 DistEngine，所以我们下一篇就介绍 DistEngine。
+
+*/
 c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::
     processBackwardAutogradReq(
         RpcCommandBase& rpc,
@@ -407,17 +425,17 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::
 
   // Retrieve the appropriate autograd context.
   auto autogradContext = DistAutogradContainer::getInstance().retrieveContext(
-      autogradMetadata.autogradContextId);
+      autogradMetadata.autogradContextId);  // 得到发送者的context id
 
   // Lookup the appropriate 'send' function to enqueue.
-  std::shared_ptr<SendRpcBackward> sendFunction =
+  std::shared_ptr<SendRpcBackward> sendFunction =  // 依据发送者context id和消息id得到sendFunction
       autogradContext->retrieveSendFunction(autogradMetadata.autogradMessageId);
 
   // Attach the gradients to the send function.
-  sendFunction->setGrads(gradientsCall.getGrads());
+  sendFunction->setGrads(gradientsCall.getGrads());  // 设置梯度
 
   // Now execute the autograd graph using the "distributed engine."
-  auto execFuture = DistEngine::getInstance().executeSendFunctionAsync(
+  auto execFuture = DistEngine::getInstance().executeSendFunctionAsync(  // 调用引擎
       autogradContext, sendFunction, gradientsCall.retainGraph());
 
   // Our response is satisfied when the rpcs come back.
@@ -544,6 +562,17 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processRRefBackward(
 生成 TensorPipeAgent 时候，把 RequestCallbackImpl 配置为回调函数。这是 agent 的统一响应函数。
 
 前面关于代理接收逻辑时候，我们也提到了，会进入以下函数，其中可以看到有对 processForwardAutogradReq 的处理逻辑。
+
+
+3.2 接受反向传播
+我们接下来看看接收方如何处理反向传播，我们再次回到 worker 1，就是图上的 send 节点如何接受反向传播消息。
+
+3.2.1 接受消息
+在生成 TensorPipeAgent 时候，把 RequestCallbackImpl 配置为回调函数。这是 agent 的统一响应函数。前面关于代理接收逻辑时候，我们也提到了，会进入 RequestCallbackNoPython::processRpc 函数。其中可以看到有对 BACKWARD_AUTOGRAD_REQ 的处理逻辑。
+
+这种是 RPC 的正常流程。
+
+
 */
 c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processRpc(
     RpcCommandBase& rpc,
