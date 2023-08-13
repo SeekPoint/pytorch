@@ -271,6 +271,8 @@ std::shared_ptr<Node> try_get_grad_accumulator(const Variable& self) {
 /*
 这里有一步需要注意，就是 gradient_edge 方法中，有这样一个语句 return Edge(grad_accumulator(self), 0)，这个代码实际是触发Variable::grad_accumulator()调用。
 在一个Variable第一次调用这个API的时候，会生成一个AccumulateGrad 来初始化它的 grad_accumulator_成员，代码如下：
+
+grad_accumulator 返回的是 Node，也就是 AccumulateGrad，是一个Node类型，我们取出了检查校验代码。
 */
 std::shared_ptr<Node> grad_accumulator(const Variable& self) {
   auto autograd_meta = get_autograd_meta(self);

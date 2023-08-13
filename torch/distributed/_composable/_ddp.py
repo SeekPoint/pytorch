@@ -322,9 +322,42 @@ class DistributedDataParallel(Module):
         # order in which their gradients are produced, and assume they
         # are used in the forward pass in the order they are defined.
         #接下来的代码就是生成了一个Reducer。
+        '''
+        调用的 parameters 举例如下， parameters[0] 就是 rank 0 上模型的 parameters，可以看到其只有 [0] 元素有意义，这个 [0] 原始本身包括 20 个元素：
+
+        parameters = {list: 1} 
+        0 = {list: 4}           
+         0 = {Parameter: 10} Parameter containing:\ntensor([[-4.0381e-02,  3.8828e-02, 1  )   
+         1 = {Parameter: 10} Parameter containing:\ntensor([-0.0438, -0.2033,  0.2771,  0.0721,  ) 
+         2 = {Parameter: 5} Parameter containing:\ntensor([[-0.0094, -0.1319,  0.0713,  0.3155,  )
+         3 = {Parameter: 5} Parameter containing:\ntensor([-0.0008,  0.0582, -0.1245, -0.2538, )
+         ...
+         20 = {Parameter: 5} Parameter containing:\ntensor([-0.0008,  0.0582, -0.1245, -0.2538, )                                                   
+         __len__ = {int} 20
+        __len__ = {int} 1
+        bucket_indices 举例如下：
+        
+        关于 tensor indices，就是给所有的tensor一个index，从0开始递增，一直到 tensors.size()。假如模型的 parameters 一共有20个张量，则 tensor index 从 0 到 19，分成 6 个buckets，则在这6个buckets之中，每个 tensor index 都是唯一不重复的。
+        
+        +-----------------------------------------------------------------------+
+        |                                                                       |
+        |  <tensor index 0, tensor index 1, tensor index 2, tensor index 3>     |
+        |                                                                       |
+        |                                                                       |
+        |  <tensor index 4, tensor index 5, tensor 6>                           |
+        |                                                                       |
+        |                                                                       |
+        |  ......                                                               |
+        |                                                                       |
+        |                                                                       |
+        |  <tensor index 16, tensor index 17, tensor index 18, tensor index 19> |
+        |                                                                       |
+        +-----------------------------------------------------------------------+
+
+        '''
         self.reducer = dist.Reducer(
-            parameters,
-            list(reversed(bucket_indices)), # 利用桶index
+            parameters,  # parameters[0]是张量列表
+            list(reversed(bucket_indices)), # 利用桶index  # 桶信息
             list(reversed(per_bucket_size_limits)),
             self.process_group,
             expect_sparse_gradient,

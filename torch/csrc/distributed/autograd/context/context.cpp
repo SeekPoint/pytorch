@@ -377,23 +377,30 @@ const c10::Dict<torch::Tensor, torch::Tensor> DistAutogradContext::
   return accumulatedGrads_; // 分布式梯度累积在这里
 }
 
+/*
+5.7.4.2 DistAutogradContext
+我们顺着来到 DistAutogradContext。
+
+它会在累积的梯度之中，在 accumulatedGrads_ 之中找到张量 对应的梯度 grad，然后用传入的回调函数来处理梯度grad，最后把处理后的梯度拷贝回accumulatedGrads_。
+这样就从 hook获取梯度 开始，到传回规约之后的梯度结束，完成了一个闭环。
+*/
 void DistAutogradContext::runGradCallbackForVariable(
     const torch::autograd::Variable& variable,
     GradCallback&& cb) {
   torch::Tensor grad;
   {
     std::lock_guard<std::mutex> guard(lock_);
-    auto it = accumulatedGrads_.find(variable);
+    auto it = accumulatedGrads_.find(variable); // 找到张量 对应的梯度 grad
     TORCH_INTERNAL_ASSERT(
         it != accumulatedGrads_.end(),
         "The grad for the variable should exist in dist_autograd context.");
     grad = it->value();
   }
-  if (cb(grad)) {
+  if (cb(grad)) { // 用传入的回调函数来处理梯度grad
     std::lock_guard<std::mutex> guard(lock_);
     auto device = grad.device();
     // Needs to update the grad in the map.
-    accumulatedGrads_.insert_or_assign(variable, std::move(grad));
+    accumulatedGrads_.insert_or_assign(variable, std::move(grad)); //最后把处理后的梯度拷贝回accumulatedGrads_
     recordGradEvent(device);
   }
 }

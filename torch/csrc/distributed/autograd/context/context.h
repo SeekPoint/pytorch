@@ -14,7 +14,7 @@ namespace distributed {
 namespace autograd {
 
 class RecvRpcBackward;
-
+//DistAutogradContext 的 accumulatedGrads_会记录张量对应的当前梯度。
 // DistAutogradContext which stores information for a single distributed
 // autograd pass on a worker.
 /*

@@ -39,7 +39,11 @@ def allreduce_hook(
     """
     return _allreduce_fut(process_group, bucket.buffer())
 
+'''
+我们通过 torch/distributed/algorithms/ddp_comm_hooks/default_hooks.py 来看看。
 
+下面的 hook 就是在 all-reduce 前后进行自己的特殊处理。如果使用这个 hook，就使用 ddp_model.register_comm_hook(process_group, fp16_compress_hook)。
+'''
 def fp16_compress_hook(
     process_group: dist.ProcessGroup, bucket: dist.GradBucket
 ) -> torch.futures.Future[torch.Tensor]:

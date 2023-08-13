@@ -40,6 +40,7 @@ struct BucketAccumulator {
   size_t size_limit = 0;
 };  // 桶的逻辑内容
 
+//Reducer提供了反向传播中梯度同步的核心实现，其定义相当复杂，我们甚至需要去掉一些不重要的成员变量以便展示：
 class TORCH_API Reducer {
  public:
   // The constructor takes a list of variables (i.e. parameters) for this
@@ -183,14 +184,74 @@ class TORCH_API Reducer {
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   const std::vector<at::Tensor> params_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
+  // 进程组
   const c10::intrusive_ptr<::c10d::ProcessGroup> process_group_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   std::vector<bool> expect_sparse_gradients_;
 
+  // 对应的 index 存了相应的 grad_accumulator，就是 tensor index对应的grad_accumulator
+  //grad_accumulators_ 可以认为是一个矩阵，矩阵的每个item就是一个 AccumulateGrad（Node类型），就是用来计算梯度的。
+  // 目前看来，这里只是一个bookkeeping作用。
+  /*
+  具体如下图，variable1 是一个实际的 张量，grad_accumulators_ 中的一个item 就指向 variable1 的 AccumulateGrad。
+
+                                        variable1 +----+
+                                                       |
+                                                       |
+                                                       v
++-----------------------------------+    +-------------+-----------+
+|grad_accumulators_                 |    | Variable                |
+|                                   |    |                         |
+|                                   |    |   +------------------+  |
+| [replica_index][variable_index]+---------->+ AccumulateGrad   |  |
+|                                   |    |   |                  |  |
+|                                   |    |   |                  |  |
++-----------------------------------+    |   |    post_hooks_+--------> autograd_hook(index)
+                                         |   |                  |  |
+                                         |   |                  |  |
+                                         |   +------------------+  |
+                                         |                         |
+                                         +-------------------------+
+
+    */
   std::vector<std::shared_ptr<torch::autograd::Node>>
       grad_accumulators_; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+
+// 存了grad_accumulator & index 的对应关系，这样以后在 autograd graph 寻找 unused parameters 就方便了
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   std::unordered_map<torch::autograd::Node*, size_t> gradAccToVariableMap_;
+/*
+作用是给每个 Node 一个对应的VariableIndex，具体如图，下面就给 variable 1 一个 index 1：
+
+                                                        +--------------+
+                                                        | Variable     |
+                                                  +---> |              |
+                                                  |     |              |
+                                                  |     +--------------+
+                                                  |
+                                                  |
++-------------------------------------+           |
+| gradAccToVariableMap_               |           |
+|                                     |           |
+|                                     |           +
+|         <Node*, VariableIndex> +---------> [variable1 ：index1, variable2 : index2]
+|                                     |                     +
+|                                     |                     |
+|                                     |                     |
++-------------------------------------+                     |
+                                                            |
+                                                            v
+                                                  +---------+-----------------------------+
+                                                  |VariableIndex                          |
+                                                  |                                       |
+                                                  |          replica_index of Variable1   |
+                                                  |                                       |
+                                                  |          variable_index of Variable1  |
+                                                  |                                       |
+                                                  +---------------------------------------+
+
+*/
+ //其作用就是保持了 autograd hook，也是起到了bookkeeping 作用。
   std::vector<std::pair<uintptr_t, std::shared_ptr<torch::autograd::Node>>>
       hooks_; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
 
@@ -208,7 +269,18 @@ class TORCH_API Reducer {
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   const bool gradient_as_bucket_view_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  std::vector<size_t> unused_parameters_;
+  std::vector<size_t> unused_parameters_; // 如果没有用到，直接设置为就绪，第一次迭代之后久不会改变了
+
+/*
+0x04 查询类
+以下两个类用来让 autograd hook 函数确定张量对应桶。
+
+4.1 VariableIndex
+VariableIndex 就是确定某个 tensor 在某个桶中的位置。这个对于 autograd hook 有用。对于autograd hook 回调，回调函数所在进程只是知道自己的梯度张量，但是回调函数需要知道这个张量位于哪个replica，以及位于replica之中哪个位置，这样才能进一步规约。
+
+4.1.1 成员变量
+Reducer 等类的实例之中，只有一个 VariableIndex 的成员变量，这个独立成员变量是：
+*/
   // Previous iteration's unused params, used for checking if unused parameters
   // change between iterations. Only filled during the first backwards call.
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
@@ -227,8 +299,15 @@ class TORCH_API Reducer {
   //
   // local_used_map_:     CPU tensor for bookkeeping locally used params
   // local_used_map_dev_: dev tensor for reducing globally unused params
-  at::Tensor local_used_map_;
-  at::Tensor local_used_map_dev_;
+  /*
+  以下两个变量用来记录本地使用过的参数，其标示在未启用同步的情况下（no_sync is on），在当前迭代或者 no_sync session 之中，这些参数是否在本地被使用过。
+
+每个模型副本对应map中的一个张量，每个张量是参数数量的一维int32（one-dim int32）张量。
+
+这些张量在autograd_hook中标记，以指示已使用了相应的参数。这些张量会在当前迭代或无同步会话（no_sync session）的后向传播结束时进行allreduce，以计算出全局未使用的参数。
+  */
+  at::Tensor local_used_map_;  // autograd_hook中会设置，对应论文中的
+  at::Tensor local_used_map_dev_; // GPU
   // Indicate that reduction is done and D2H copy is done as well.
   bool local_used_map_reduced_;
 
@@ -318,7 +397,15 @@ class TORCH_API Reducer {
   struct Bucket {
     // Gradients of the bucket flattened into a 1-dimensional tensor
     at::Tensor gradients;
+/*
+关于 std::vector<at::Tensor> bucket_views_in 和 std::vector<at::Tensor> bucket_views_out 的进一步说明：
 
+在 PyTorch 之中，视图是指创建一个方便查看的东西，视图与原数据共享内存，它只是将原有的数据进行整理，直接显示其中部分内容或者进行重排序后再显示出来。
+每个 view 都将按照如下布局（sizes + strides）创建，这个布局与grad的预期布局相匹配。
+bucket_views_in 和 bucket_views_out 这两个变量提供在 contents 之中操作具体梯度的方法，或者说，它们提供了视图（views），该视图可以操作contents 之中每个张量的梯度。用户把这两个变量作为入口点来把每个梯度的数据从 content 之中移入和移出。
+我们为bucket_视图保留两种状态的原因是：如果注册了DDP通信钩子（communication hook）， bucket_views_out 可以用钩子的 future_work值重新初始化。所以我们需要为bucket_views_in[i].copy_(grad) 保留一个对 replica 原始 contents 的单独视图引用。
+bucket_views_in[i].copy_(grad)和 grad.copy_(bucket_views_out[i]) 提供了将梯度数据移入/移出contents的方便方法。
+*/
     // Views into the `gradients` tensor for each individual gradient
     // Each view is created with layout (size and stride) matching the
     // gradient's expected layout (see the "Gradient Layout Contract" in
@@ -340,6 +427,7 @@ class TORCH_API Reducer {
     // after reduction has completed.
     std::vector<at::Tensor> variables;
 
+//以下三个成员变量存储桶的每个flat张量信息，比如offsets存储了各个张量在flat bucket contents中的offset。
     // Per-variable offset/length into the flattened `gradients` tensor and
     // the corresponding `GradBucket` instance for communication hooks
     std::vector<size_t> offsets;
@@ -350,10 +438,10 @@ class TORCH_API Reducer {
 
     // Number of gradients left to be computed before the bucket is ready to
     // be reduced
-    size_t pending;
+    size_t pending; // 计数
 
     // Global indices of participating variables in the bucket
-    std::vector<size_t> variable_indices;
+    std::vector<size_t> variable_indices;  // 具体每个桶里面有哪些 variable。
 
     // Future work handle for DDP communication hook
     // If no hook is registered, a temporary vanilla allreduce hook is used.
@@ -370,9 +458,18 @@ class TORCH_API Reducer {
     // std::vector<at::cuda::CUDAEvent> events;
 
   };
+/*
+Reducer 的成员变量buckets_ 是关键，这是Reducer 之中所有的桶。
 
+*/
   std::vector<Bucket> buckets_;
 
+/*
+VariableLocator 用来在 bucket 之中确定一个varaible。为了找到一个张量位置，我们需要知道在哪个桶，在桶的张量之中的哪个位置。
+
+哪个桶 : bucket_index 是Reducer.buckets_列表的位置，表示 buckets_ 之上的一个bucket。
+桶副本的哪个位置 : intra_bucket_index 是在 bucket.replica 之中 vector 域的 variable index。
+*/
   // A variable locator locates a particular variable in the reducer's buckets
   struct VariableLocator {
     // Index of the bucket containing the variable in the `buckets_` vector
@@ -424,6 +521,13 @@ class TORCH_API Reducer {
   const int64_t bucket_bytes_cap_;
 
 #ifndef _WIN32
+/*
+5.7 计算梯度支撑类
+我们接下来分析一些计算梯度所涉及到的基本函数和支撑类。
+
+5.7.1 RpcContext
+该类用来封装 distributed::autograd::ContextPtr。
+*/
   struct RpcContext {
     using ContextPtr = torch::distributed::autograd::ContextPtr;
     // The shared_ptr is to hold the context instance.
@@ -456,14 +560,20 @@ class TORCH_API Reducer {
 
   bool static_graph_;
 
+
+//记录在本张量的梯度就绪之前，该张量的 autograd_hook 应该被调用几次。第一次迭代之后，不再增加，所以这个数值应该就是1或者0。用来设置 unused_parameters_ 和 配置 numGradHooksTriggeredMapPerIteration_。
   // Key: size_t (index), Value: the number of times that a variable's
   // autograd_hook() should be triggered before marking this variable's grad as
   // ready for communication. Map will not change after 1st iteration.
   std::unordered_map<size_t, int> numGradHooksTriggeredMap_;
+
+
   // Key: size_t (index), Value: the number of times that a variable's
   // autograd_hook() are left to be triggered before marking this variable's
   // grad as ready for communication. Map will change after 1st iteration to
   // track a grad is ready for communication or not.
+//在本张量的梯度就绪之前，该张量的 autograd_hook 还需要被调用几次。如果为0，就说明这个桶应该整体就绪了。
+//本成员变量是使用 numGradHooksTriggeredMap_ 来重置。
   std::unordered_map<size_t, int> numGradHooksTriggeredMapPerIteration_;
 
  private:
@@ -499,6 +609,8 @@ class TORCH_API Reducer {
   std::vector<int> grad_ready_order_indices_;
   // Bytes capacity of first bucket, can be configured by user
   int64_t first_bucket_bytes_cap_;
+
+  //每个迭代之中，perIterationReadyParams_ 表示就绪的参数。
   // Per iteration set of parameter indices that have been marked ready.
   std::unordered_set<size_t> perIterationReadyParams_;
   // Retrieves parameter names that have not been marked as ready as part of
