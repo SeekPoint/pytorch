@@ -2182,7 +2182,7 @@ Example::
          std::vector<at::Tensor> tensors, // NOLINT
          size_t buffer_size,
          int rank) {
-        broadcast_coalesced(
+        broadcast_coalesced(  // 在这里
             std::move(process_group), tensors, buffer_size, rank);
       },
       py::arg("process_group"),

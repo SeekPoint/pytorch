@@ -35,10 +35,10 @@ class Logger;
 
 // Local accumulator type for a single bucket.
 struct BucketAccumulator {
-  std::vector<size_t> indices;
-  size_t size = 0;
+  std::vector<size_t> indices;  // 桶内容，是张量列表
+  size_t size = 0; // 桶大小，比如若干mb
   size_t size_limit = 0;
-};
+};  // 桶的逻辑内容
 
 class TORCH_API Reducer {
  public:

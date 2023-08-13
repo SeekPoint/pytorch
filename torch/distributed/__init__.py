@@ -21,7 +21,7 @@ if is_available() and not torch._C._c10d_init():
 
 # Custom Runtime Errors thrown from the distributed package
 DistBackendError = torch._C._DistBackendError
-
+# 我们沿着代码来寻找，首先来到 torch\distributed_init_.py，这里会导入 _broadcast_coalesced。
 if is_available():
     from torch._C._distributed_c10d import (
         Store,
@@ -38,7 +38,7 @@ if is_available():
         _DEFAULT_FIRST_BUCKET_BYTES,
         _register_comm_hook,
         _register_builtin_comm_hook,
-        _broadcast_coalesced,
+        _broadcast_coalesced, # 在这里导入
         _compute_bucket_assignment_by_size,
         _verify_params_across_processes,
         _test_python_store,

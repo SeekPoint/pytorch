@@ -432,6 +432,27 @@ c10::intrusive_ptr<Work> ProcessGroupMPI::enqueue(
   return work;
 }
 
+//我们来到 torch/lib/c10d/ProcessGroupMPI.cpp。可以看到，其使用了 MPI 的 MPI_Bcast API 来进行广播操作，其中 opts.rootRank是关键所在。
+/*
+opts 是 BroadcastOptions 的实例。
+
+class BroadcastOptions:
+    rootRank: int
+    rootTensor: int
+    timeout: timedelta
+在 C++ 世界对应了如下：
+
+struct BroadcastOptions {
+  int rootRank = 0;
+  int rootTensor = 0;
+  std::chrono::milliseconds timeout = kUnsetTimeout;
+};
+在定义时候看到，BroadcastOptions 被C++自动初始化为0，所以所有 rank 的进程都是使用 rootRank = 0 进行调用 MPI_Bcast，结果就是从 rank = 0 来向其他 rank 进行广播。
+
+c10::intrusive_ptr<ProcessGroup::Work> broadcast(
+    std::vector<at::Tensor>& data,
+    const BroadcastOptions& opts = BroadcastOptions()) override;
+ */
 c10::intrusive_ptr<Work> ProcessGroupMPI::broadcast(
     std::vector<at::Tensor>& tensors,
     const BroadcastOptions& opts) {
@@ -441,11 +462,11 @@ c10::intrusive_ptr<Work> ProcessGroupMPI::broadcast(
         auto data = (entry->src)[0];
         c10::DeviceGuard guard(data.device());
         std::unique_lock<std::mutex> globalLock(pgGlobalMutex_);
-        MPI_CHECK(MPI_Bcast(
+        MPI_CHECK(MPI_Bcast(  // 调用MPI API
             data.data_ptr(),
             data.numel(),
             mpiDatatype.at(data.scalar_type()),
-            opts.rootRank,
+            opts.rootRank,  // 这里是关键，只是从root广播其他rank
             pgComm_));
       };
   auto entry =

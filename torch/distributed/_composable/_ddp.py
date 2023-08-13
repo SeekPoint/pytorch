@@ -103,7 +103,25 @@ class DistributedDataParallel(Module):
         gradient_as_bucket_view=False,
         static_graph=False,
     ):
+        '''
+        设置设备类型。
 
+        设置设备IDs。
+
+        设置 self.process_group，默认就是 GroupMember.WORLD。
+
+        配置各种类成员变量。
+
+        检查 parameters。
+
+        设定bucket大小。
+
+        构建参数。
+
+        将 rank 0 的state_dict() 广播到其他worker，以保证所有worker的模型初始状态相同。
+
+        建立reducer。
+        '''
         super().__init__()
         self.logger: Optional[dist.Logger] = None
         if not any((p.requires_grad for p in module.parameters())):
@@ -118,7 +136,7 @@ class DistributedDataParallel(Module):
                 ValueError,
                 "device_ids can only be None or contain a single element.",
             )
-
+        # 设置设备类型
         self.is_multi_device_module = len({p.device for p in module.parameters()}) > 1
         distinct_device_types = {p.device.type for p in module.parameters()}
         if len(distinct_device_types) != 1:
@@ -132,6 +150,7 @@ class DistributedDataParallel(Module):
 
         self.device_type = list(distinct_device_types)[0]
 
+        # 设置设备IDs
         if (
             device_ids is None
             or len(device_ids) == 0  # For backward compatibility.
@@ -160,11 +179,13 @@ class DistributedDataParallel(Module):
 
             self.output_device = _get_device_index(output_device, True)
 
+        # 设置process group
         if process_group is None:
             self.process_group = _get_default_group()
         else:
             self.process_group = process_group
 
+        # 配置各种成员变量
         self.static_graph = False
         self.dim = dim
         self.module = module
@@ -180,6 +201,7 @@ class DistributedDataParallel(Module):
             self.parameters_to_ignore = []
 
         # Check that a module does not have Uninitialized parameters
+        # 检查 parameters
         for param in module.parameters():
             if isinstance(param, torch.nn.parameter.UninitializedParameter):
                 self._log_and_throw(
@@ -199,6 +221,15 @@ class DistributedDataParallel(Module):
 
         # Build parameters for reducer.
         parameters, expect_sparse_gradient = self._build_params_for_reducer()
+        '''
+        我们接下来看看如何验证模型。
+            
+            _verify_model_across_ranks 的作用是验证模型（replica 0）的相关参数在广播之后，跨进程时候拥有同样的size/strides。
+            
+                # Verify model equivalence.
+                dist._verify_model_across_ranks(self.process_group, parameters)
+            通过下面代码我们可知，_verify_model_across_ranks 实际调用到verify_replica0_across_processes。
+        '''
         # Verify model equivalence.
         _verify_param_shape_across_processes(self.process_group, parameters)
         # Sync params and buffers. Ensures all DDP models start off at the same value.
@@ -236,6 +267,14 @@ class DistributedDataParallel(Module):
         static_graph,
     ):
         """
+        _ddp_init_helper 是用来初始化业务的函数，其主要逻辑如下：
+
+对参数进行分桶，尽可能按照前向传播的逆序（前向传播中先计算出来的梯度，会先反向传播）把参数分配平均分配入桶，这样可以提高通信速度和归并速度；
+重置分桶状态；
+生成一个Reducer，其内部会注册 autograd_hook，其用来在反向传播时候进行梯度同步；
+进行logging配置；
+给SyncBatchNorm Layer传递 DDP handle；
+
         Initialization helper function that does the following:
         (1) bucketing the parameters for reductions
         (2) resetting the bucketing states
@@ -271,7 +310,7 @@ class DistributedDataParallel(Module):
                 self.bucket_bytes_cap,
             ]
         (
-            bucket_indices,
+            bucket_indices,  # 利用桶index
             per_bucket_size_limits,
         ) = dist._compute_bucket_assignment_by_size(
             parameters,
@@ -282,9 +321,10 @@ class DistributedDataParallel(Module):
         # Note: reverse list of buckets because we want to approximate the
         # order in which their gradients are produced, and assume they
         # are used in the forward pass in the order they are defined.
+        #接下来的代码就是生成了一个Reducer。
         self.reducer = dist.Reducer(
             parameters,
-            list(reversed(bucket_indices)),
+            list(reversed(bucket_indices)), # 利用桶index
             list(reversed(per_bucket_size_limits)),
             self.process_group,
             expect_sparse_gradient,
@@ -355,11 +395,26 @@ class DistributedDataParallel(Module):
             assert self.logger is not None
             self.logger._set_static_graph()
 
+    '''
+    2.2.1 _build_params_for_reducer
+    具体 _build_params_for_reducer 就为reducer建立参数，逻辑大致如下：
+    
+        遍历_module_copies，得到(module, parameter)列表 modules_and_parameters，这些参数是需要求导的，不能在忽略列表之中。
+        用集合去除可能在多个modules中共享的参数。
+        构建一个参数列表。
+        检查是否一个module期盼一个sparse梯度，把结果放到 expect_sparse_gradient 之中。
+        得到module的参数，与下面的buffer一起，都是用来同步到其他worker的。
+        得到module的buffer，module_buffers 在后续同步时候会用到。
+        返回参数列表和expect_sparse_gradient。
+    '''
+    ## 之前在初始化过程中，设定了 self._module_copies = [self.module]
     def _build_params_for_reducer(self):
         # Build tuple of (module, parameter) for all parameters that require grads.
         modules_and_parameters = [
             (module, parameter)
+            # 得到module列表
             for module_name, module in self.module.named_modules()
+            # 得到参数列表，并且参数是需要求导，不在忽略列表之中
             for parameter in [
                 param
                 # Note that we access module.named_parameters instead of
@@ -373,6 +428,7 @@ class DistributedDataParallel(Module):
         ]
 
         # Deduplicate any parameters that might be shared across child modules.
+        # 用集合去除可能在多个modules中共享的参数
         memo = set()
         modules_and_parameters = [
             # "p not in memo" is the deduplication check.
@@ -383,6 +439,7 @@ class DistributedDataParallel(Module):
         ]
 
         # Build list of parameters.
+        # 构建一个参数列表
         parameters = [parameter for _, parameter in modules_and_parameters]
 
         # Checks if a module will produce a sparse gradient.
@@ -393,6 +450,7 @@ class DistributedDataParallel(Module):
 
         # Build list of booleans indicating whether or not to expect sparse
         # gradients for the corresponding parameters.
+        # 参数是否期盼sparse gradients
         expect_sparse_gradient = [
             produces_sparse_gradient(module) for module, _ in modules_and_parameters
         ]
@@ -410,11 +468,14 @@ class DistributedDataParallel(Module):
         see https://github.com/pytorch/pytorch/issues/63916.
         """
         # Collect buffers for modules, filtering out buffers that should be ignored.
+        # 得到module的参数，与下面的buffer一起，都是用来同步到其他worker的
         named_module_buffers = [
             (buffer, buffer_name)
             for buffer_name, buffer in self.module.named_buffers()
             if buffer_name not in self.parameters_to_ignore
         ]
+
+        # 得到module的buffer，module_buffers 在后续同步时候会用到
         self.modules_buffers = [
             buffer for (buffer, buffer_name) in named_module_buffers
         ]
@@ -673,6 +734,7 @@ class DistributedDataParallel(Module):
 
     # When running in join mode, checks and performs sync of module buffers if
     # the models have buffers that should be synchronized in the forward pass.
+    # 这里多说一句，何处用到 self.modules_buffers？后来在广播参数时候就会用到，比如：
     def _check_and_sync_module_buffers(self):
         if self._check_sync_bufs_pre_fwd():
             authoritative_rank = self._find_common_rank(self._distributed_rank, False)
@@ -979,6 +1041,7 @@ class DistributedDataParallel(Module):
             and len(self.modules_buffers) > 0
         )
 
+    # 这里使用了 _find_common_rank 来得到目前 DDP 使用的所有有效 ranks。
     def _find_common_rank(self, input_rank, rank_cond):
         # -1 indicates that this rank is not under consideration to be the
         # common_rank
@@ -986,6 +1049,7 @@ class DistributedDataParallel(Module):
             [input_rank if rank_cond else -1],
             device=self.device,
         )
+        # 使用MAX操作得到最大数值
         dist.all_reduce(rank_to_use, op=ReduceOp.MAX, group=self.process_group)
         if rank_to_use.item() == -1:
             self._log_and_throw(
@@ -993,7 +1057,7 @@ class DistributedDataParallel(Module):
                 "BUG! Expected rank_cond to be true for at least one process."
                 " This indicates a bug in PyTorch, please report an issue.",
             )
-        return rank_to_use.item()
+        return rank_to_use.item()  # 返回全部ranks
 
     def _sync_buffers(self):
         with torch.no_grad():

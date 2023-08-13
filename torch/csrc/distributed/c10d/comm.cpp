@@ -10,6 +10,7 @@
 namespace c10d {
 namespace {
 
+//对于BroadcastWork，我们补充说明一下，就是利用 ProcessGroup 来把张量广播出去，ProcessGroup 具体可以参见前面文章。
 class BroadcastWork {
  public:
   BroadcastWork(
@@ -67,6 +68,7 @@ void broadcast_coalesced(
   // Coalesce tensors into buckets taking into account the maximum buffer size.
   // This routine is multi-device aware, so the tensors can be split across
   // multiple devices and can contain a mix of CPU and CUDA tensors.
+  // 首先计算出桶
   std::vector<std::vector<size_t>> buckets;
   std::tie(buckets, std::ignore) =
       compute_bucket_assignment_by_size(tensors.vec(), {buffer_size});
@@ -76,11 +78,11 @@ void broadcast_coalesced(
 
   // We maintain a maximum of 2 in flight broadcast operations to avoid
   // allocating too much memory (in case the specified tensors are very large).
-  std::deque<BroadcastWork> in_flight;
+  std::deque<BroadcastWork> in_flight;  // 建立一个广播work列表
   constexpr auto max_in_flight = 2;
-  for (const auto& bucket : buckets) {
-    if (in_flight.size() >= max_in_flight) {
-      in_flight.front().finish();
+  for (const auto& bucket : buckets) {  // 遍历桶
+    if (in_flight.size() >= max_in_flight) { // 由注释可以知道，广播维度是2，这样避免内存占用过大
+      in_flight.front().finish();  // 广播变量
       in_flight.pop_front();
     }
 

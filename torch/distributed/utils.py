@@ -145,7 +145,7 @@ def _sync_module_states(
         broadcast_bucket_size,
         src
     )
-
+#_sync_params_and_buffers 是依据 module的state_dict 来收集可以训练的参数，然后把这些参数广播出去。
 def _sync_params_and_buffers(
     process_group: dist.ProcessGroup,
     module_states: List[torch.Tensor],
