@@ -47,7 +47,41 @@ def get_method_name(depth=2):
 
 Token = Any
 """Represents an opaque fencing token used by the rendezvous backend."""
+'''
+3.5 后端
+在 PyTorch 之中，backend 概念指的是当前进程要使用的通信后端，一般来说，支持的通信后端有 gloo，mpi，nccl 。建议用 nccl。
 
+在弹性训练这里，DynamicRendezvousHandler 需要我们在构建时候指定后端（RendezvousBackend）。用户可以自己实现后端，或者使用如下PyTorch附带实现之一:
+
+C10dRendezvousBackend，其使用 C10d 存储（默认是 TCPStore） 作为 rendezvous backend，其优势是不需要依赖第三方，比如etcd，来构建一个rendezvous 。
+EtcdRendezvousBackend，其使用EtcdRendezvousHandler，EtcdRendezvousBackend 等类来基于 etcd 完成。
+因为 EtcdRendezvousBackend 必须依赖 ETCD，需要安装一个 ETCD集群，所以推荐使用 c10d 后端，其易用性更好。我们接下来就主要介绍 c10d 后端。
+
+C10d 后端主要基于一个 TCPStore，通过 TCP 进行同步。我们在之前文章中介绍过 TCPStore，TCPStore 是基于 TCP 的分布式键值存储实现（类似于 Redis）。是一个典型的 client-server 架构，服务器存储/保存数据，而存储客户端可以通过 TCP 连接到服务器存储并执行诸如set()插入键值对、get()检索键值对等操作。
+
+所以，对于 c10d 后端来说，在其中一个代理之上会运行 TCPStore Master，其负责监听端口，提供API，Rendezvous 的各种同步操作，都是由各个代理连接到这个中心化的 TCPStore Master，在其上完成。
+
+具体可以如下图所示，来源于知乎 BobLiu。
+
+IMG！！！！有图！！！
+
+3.5.1 使用
+下图展示了如何配置后端
+
+     store = TCPStore("localhost")
+     backend = C10dRendezvousBackend(store, "my_run_id") # 配置了后端
+
+     rdzv_handler = DynamicRendezvousHandler.from_backend(
+         run_id="my_run_id",
+         store=store,
+         backend=backend,
+         min_nodes=2,
+         max_nodes=4
+     )
+3.5.2 基类
+我们首先看看后端的基类 RendezvousBackend。这是一个虚类，主要功能就是设置和获取State。
+
+'''
 class RendezvousBackend(ABC):
     """Represents a backend that holds the rendezvous state."""
 
@@ -178,7 +212,16 @@ class RendezvousTimeout:
                 raise ValueError(f"The {name} timeout ({timeout}) must be positive.")
             setattr(self, "_" + name, timeout)
 
+'''
+RendezvousSettings 类用来存储rendezvous的配置。可以理解为静态元信息。
 
+    run_id : rendezvous 的 id。
+    min_nodes ：rendezvous 的最小节点数目。
+    max_nodes ：rendezvous 的最大节点数目。
+    timeout ：超时时间。
+    keep_alive_interval ：节点在发送心跳之间等待的时间量。
+    keep_alive_max_attempt ： 心跳的最大重试次数。
+'''
 @dataclass(repr=False, eq=False, frozen=True)
 class RendezvousSettings:
     """Holds the settings of the rendezvous.
@@ -207,7 +250,7 @@ class RendezvousSettings:
     keep_alive_interval: timedelta
     keep_alive_max_attempt: int
 
-
+#_NodeDesc 是rendezvous的一个节点。
 @dataclass(eq=True, order=True, frozen=True)
 class _NodeDesc:
     """Describes a node in the rendezvous.
@@ -255,7 +298,24 @@ class _NodeDescGenerator:
 
         return _NodeDesc(local_addr or socket.getfqdn(), os.getpid(), local_id)
 
+'''
+3.3 状态
+_RendezvousState 是rendezvous的状态。是动态信息，每一个 node 都会维护一个本地 state。
 
+    round：Rendezvous的当前轮次
+    
+    complete：一个布尔值，指示rendezvous当前一轮是否完成了。
+    
+    deadline：截止时间，如果如果当前轮次一直在等待节点加入，如果这个参数设置了，就是等待的截至时间。
+    
+    closed：一个布尔值，指示rendezvous是否结束了。
+    
+    participants：字典结构，存放参与者和它们对应ranks。
+    
+    wait_list：set结构，存放等待参与下一轮rendezvous操作的一组节点
+    
+    last_heartbeats：字典，包含每个节点上次心跳时间。
+'''
 class _RendezvousState:
     """Holds the state of a rendezvous.
 
@@ -308,7 +368,7 @@ def _remove_participant_epilogue(state: _RendezvousState, settings: RendezvousSe
         if len(state.participants) < settings.min_nodes:
             state.deadline = None
 
-
+# 这个类的作用是保存与其他节点同步的rendezvous状态，但是需要一个派生类来完成功能。
 class _RendezvousStateHolder(ABC):
     """Holds the shared rendezvous state synced with other nodes."""
 
@@ -330,7 +390,7 @@ class _RendezvousStateHolder(ABC):
     def mark_dirty(self) -> None:
         """Marks the local state as dirty."""
 
-
+#_BackendRendezvousStateHolder 拓展了_RendezvousStateHolder。其 sync 就是调用内部的 后端，对 store 进行读写。
 class _BackendRendezvousStateHolder(_RendezvousStateHolder):
     """Holds the rendezvous state synced with other nodes via a backend.
 
@@ -394,6 +454,7 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
 
             state_bits = pickle.dumps(self._state)
 
+            # 这里会对后端进行设置
             set_response = self._backend.set_state(state_bits, self._token)
             if set_response is not None:
                 state_bits, token, has_set = set_response
@@ -591,6 +652,45 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
             pid=self._node.pid,
             local_id=self._node.local_id,
         )
+    '''
+    StateHolder 具体如何使用在 _DistributedRendezvousOpExecutor 之中有（以下代码精简）：
+        通过 _state_holder.sync() 同步各种状态，因为最新状态在 rendezvous。
+        通过 self._state_holder.state 得到最新的状态。
+        进行业务处理。
+        通过 _state_holder.mark_dirty() 再次同步，把自己状态同步给其他节点
+        
+        
+        
+我们把目前逻辑总结如下，两个 _BackendRendezvousStateHolder 通过 TCPStore 进行信息交互。
+
+                                                                       +
++-------------------------------+                                      |                                        +-------------------------------+
+| _BackendRendezvousStateHolder |                                      |                                        | _BackendRendezvousStateHolder |
+|                               |     +-------------------+            |           +--------------------+       |                               |
+|             _settings +-----------> | RendezvousSettings|            |           | RendezvousSettings | <----------+ _settings                |
+|                               |     +-------------------+            |           +--------------------+       |                               |
+|                               |     +-------------------+            |           +--------------------+       |                               |
+|             _state +--------------> | _RendezvousState  |            |           | _RendezvousState   | <----------+ _state                   |
+|                               |     |                   |            |           |                    |       |                               |
+|                               |     +-------------------+            |           +--------------------+       |                               |
+|                               |                                      |                                        |                               |
+|                               |     +-----------------------+        +           +----------------------+     |                               |
+|             _backend +------------> | C10dRendezvousBackend |                    | C10dRendezvousBackend| <-------+  _backend                 |
+|                               |     |                       |    +---------+     |                      |     |                               |
+|                               |     |             _store +-----> |TCPStore | <---------+ _store         |     |                               |
+|                               |     |                       |    |         |     |                      |     |                               |
+|                               |     +-----------------------+    +---------+     +----------------------+     |                               |
+|                               |                                                                               |                               |
+|                               |         ^                            +                       ^                |                               |
+|                               |         |                            |                       |                |                               |
+|                               |         |                            |                       |                |                               |
+|             sync +----------------------+                            |                       +---------------------+  sync                    |
+|                               |   set_state                          |                         set_state      |                               |
++-------------------------------+                                      +                                        +-------------------------------+
+
+
+
+    '''
 
     def run(
         self,
@@ -604,7 +704,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
             # Reads or writes the latest rendezvous state shared by all nodes in
             # the rendezvous. Note that our local changes might get overridden
             # by another node if that node synced its changes before us.
-            has_set = self._state_holder.sync()
+            has_set = self._state_holder.sync()  # 这里要同步各种状态，因为最新状态在 rendezvous。
             if has_set is not None:
                 if has_set:
                     msg = (
@@ -620,7 +720,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                 self._record(message=msg)
                 log.debug(msg)
 
-            self._state = self._state_holder.state
+            self._state = self._state_holder.state # 得到最新的状态
 
             ctx = _RendezvousContext(self._node, self._state, self._settings)
 
@@ -658,6 +758,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                     self._mark_rendezvous_closed()
 
                 # Attempt to sync our changes back to other nodes.
+                # 再次同步，把自己状态同步给其他节点
                 self._state_holder.mark_dirty()
 
     def _keep_alive(self) -> None:
@@ -739,6 +840,10 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
 
         del self._state.last_heartbeats[self._node]
 
+    '''
+    state.participants 从哪里来？在 rendezvous 结束时候，会设置 rank。
+    因为每个节点上都是按照同样算法排序，所以rank 排序在每个节点上都是一样的。可以保证每个Node得到的rank是与其他Node不同的。
+    '''
     def _mark_rendezvous_complete(self) -> None:
         msg = (
             f"The node '{self._node}' marked round {self._state.round} of the rendezvous "
@@ -874,7 +979,27 @@ class _RendezvousKeepAliveOp:
             return _Action.KEEP_ALIVE
         return _Action.FINISH
 
+'''
+DynamicRendezvousHandler 拓展了RendezvousHandler，其定义如下，其最主要逻辑是：在 group_rank = 0 之上建立一个 TCPStore，然后封装成一个 PrefixStore。
 
+最主要的是如下几个成员变量：
+
+    _BackendRendezvousStateHolder 负责在 Rendezvous 之间协调信息。
+    _DistributedRendezvousOpExecutor 负责具体执行业务。
+    _store 负责保存信息（分布式）
+    
+我们也可以用如下方式直接生成 DynamicRendezvousHandler。
+
+ store = TCPStore("localhost")
+ backend = C10dRendezvousBackend(store, "my_run_id")
+ rdzv_handler = DynamicRendezvousHandler.from_backend(
+     run_id="my_run_id",
+     store=store,
+     backend=backend,
+     min_nodes=2,
+     max_nodes=4
+ )
+'''
 class DynamicRendezvousHandler(RendezvousHandler):
     """Represents a handler that sets up a rendezvous among a set of nodes."""
 
@@ -890,6 +1015,11 @@ class DynamicRendezvousHandler(RendezvousHandler):
     _heartbeat_lock: threading.Lock
     _keep_alive_timer: Optional[_PeriodicTimer]
 
+    '''
+    from_backend 是具体生成 DynamicRendezvousHandler 的方法，相当于生成器。
+
+    其生成了 RendezvousSettings，_BackendRendezvousStateHolder 和 node，然后建立了 DynamicRendezvousHandler。
+    '''
     @classmethod
     def from_backend(
         cls,
@@ -1002,13 +1132,119 @@ class DynamicRendezvousHandler(RendezvousHandler):
         return self._backend_name
     '''
     4.2.2.1 处理成员关系变化
-Elastic 调用 rdzv_handler.next_rendezvous() 来处理成员关系变化，目的是启动下一轮 rendezvous 操作（因为本worker已经启动，需要加入集群）。
+    Elastic 调用 rdzv_handler.next_rendezvous() 来处理成员关系变化，目的是启动下一轮 rendezvous 操作（因为本worker已经启动，需要加入集群）。
+    
+    注意，next_rendezvous 是 RendezvousHandler 的内部函数。
+    这一函数调用会被阻塞，直到 worker 的数量达到了要求。
+    在 worker 被初始化，或者重启的时候，这一函数都会被调用。
+    当函数返回时，不同的 worker group 会以返回中的 rank 作为唯一的标示。其内部逻辑是：
+    
+    先使用_RendezvousExitOp让该node退出。
+    然后再使用_RendezvousJoinOp把该node重新加入。
+    最后启动心跳，返回world size，store等。
+    
+    
+    DynamicRendezvousHandler 之中就体现的不明显，应该是因为 DynamicRendezvousHandler 是在ETCD之后开发，所以很多功能不完善，在演进之中。
 
-注意，next_rendezvous 是 RendezvousHandler 的内部函数。这一函数调用会被阻塞，直到 worker 的数量达到了要求。在 worker 被初始化，或者重启的时候，这一函数都会被调用。当函数返回时，不同的 worker group 会以返回中的 rank 作为唯一的标示。其内部逻辑是：
+本系列是基于PyTorch 1.9 为主进行分析，所以上面 next_rendezvous 代码之中没有错误处理，直接抛到最外面去了。在2021-12月最新代码之中，已经加入了错误处理，后续应该还会继续完善。
 
-先使用_RendezvousExitOp让该node退出。
-然后再使用_RendezvousJoinOp把该node重新加入。
-最后启动心跳，返回world size，store等。
+
+
+
+
+4.6 小结
+Rendezvous 和 Agent 之间的逻辑联系总结如下，每个启动脚本都有这么一套机制。若干启动脚本的机制之间会互相联系。
+
++-----------------------------+      +------------------------------------------------+
+| LocalElasticAgent           |      | WorkerSpec                                     |
+|                             |      |                                                |
+| +------------------------+  |      |   rdzv_handler = {DynamicRendezvousHandler} -------+
+| |WorkerGroup             |  |      |                                                |   |
+| |            spec +--------------> |   entry = worker_fn                            |   |
+| |            workers     |  |      |                                                |   |
+| |            store       |  |      |   role = {str} 'trainer'                       |   |
+| |            group_rank  |  |      |                                                |   |
+| |       group_world_size |  |      +------------------------------------------------+   |
+| |                        |  |                                                           |
+| +------------------------+  |                                                           |
+|                             |                                                           |
+| rdzv_run_id                 |                                                           |
+| store                       |            +-----------------------------------------+    |
+|                             |            |DynamicRendezvousHandler                 |    |
++-----------------------------+            |                                         |    |
+                                           |                                         |    |
+                                           |   _settings: RendezvousSettings         | <--+
+                                           |                                         |
+                                           |   _store: Store                         |
+                                           |                                         |
+                                           |   _state_holder: _RendezvousStateHolder |
+                                           |                                         |
+                                           |   _op_executor: _RendezvousOpExecutor   |
+                                           |                                         |
+                                           +-----------------------------------------+
+或者和前面的静态逻辑结合起来看看。
+
++------------------------+   +----------------------------------------------+     +  +------------------------+   +---------------------------------------------+
+| LocalElasticAgent      |   | WorkerSpec                                   |     |  | LocalElasticAgent      |   | WorkerSpec                                  |
+|                        |   |                                              |     |  |                        |   |                                             |
+| +--------------------+ |   |   rdzv_handler = {DynamicRendezvousHandler} ----+  |  | +--------------------+ |   |  rdzv_handler = {DynamicRendezvousHandler}-----+
+| | WorkerGroup        | |   |                                              |  |  |  | | WorkerGroup        | |   |                                             |  |
+| |        spec +----------->+   entry = worker_fn                          |  |  |  | |        spec +----------->+  entry = worker_fn                          |  |
+| |        workers     | |   |                                              |  |  |  | |        workers     | |   |                                             |  |
+| |        store       | |   |   role = {str} 'trainer'                     |  |  |  | |        store       | |   |  role = {str} 'trainer'                     |  |
+| |        group_rank  | |   |                                              |  |  |  | |        group_rank  | |   |                                             |  |
+| |   group_world_size | |   +----------------------------------------------+  |  |  | |   group_world_size | |   +---------------------------------------------+  |
+| |                    | |   +--------------------------------------------+    |  |  | |                    | |   +--------------------------------------------+   |
+| +--------------------+ |   | DynamicRendezvousHandler                   |    |  |  | +--------------------+ |   | DynamicRendezvousHandler                   |   |
+|  rdzv_run_id           |   |                                            |    |  |  |  rdzv_run_id           |   |                                            |   |
+|  store                 |   |                                            |    |  |  |  store                 |   |                                            |   |
++------------------------+   |    _settings: RendezvousSettings           |    |  |  +------------------------+   |    _settings: RendezvousSettings           |   |
+                             |                                            | <--+  |                               |                                            +<--+
+                             |    _store: Store                           |       |                               |    _store: Store                           |
+                             |                                            |       |                               |                                            |
+                     +----------+ _state_holder: _RendezvousStateHolder   |       |                               |    _state_holder: _RendezvousStateHolder +-----+
+                     |       |                                            |       |                               |                                            |   |
+                     |       |    _op_executor: _RendezvousOpExecutor     |       |                               |    _op_executor: _RendezvousOpExecutor     |   |
+                     |       |                                            |       |                               |                                            |   |
+                     |       +--------------------------------------------+       |                               +--------------------------------------------+   |
+                     v                                                            |                                                                                |
+           +---------+---------------------+                                      |                                      +-------------------------------+         |
+           | _BackendRendezvousStateHolder |                                      |                                      | _BackendRendezvousStateHolder |         |
+           |                               |     +-------------------+            |         +--------------------+       |                               |         |
+           |             _settings +-----------> | RendezvousSettings|            |         | RendezvousSettings | <----------+ _settings                | <-------+
+           |                               |     +-------------------+            |         +--------------------+       |                               |
+           |                               |     +-------------------+            |         +--------------------+       |                               |
+           |             _state +--------------> | _RendezvousState  |            |         | _RendezvousState   | <----------+ _state                   |
+           |                               |     |                   |            |         |                    |       |                               |
+           |                               |     +-------------------+            |         +--------------------+       |                               |
+           |                               |     +-----------------------+        +         +----------------------+     |                               |
+           |             _backend +------------> | C10dRendezvousBackend |                  | C10dRendezvousBackend| <-------+  _backend                 |
+           |                               |     |                       |    +---------+   |                      |     |                               |
+           |                               |     |             _store +-----> |TCPStore | <-------+ _store         |     |                               |
+           |                               |     +---+-------------------+    +---+-----+   +-----------+----------+     |                               |
+           |                               |         ^                            |                     ^                |                               |
+           |                               |         |                            |                     |                |                               |
+           |                               |         |                            |                     |                |                               |
+           |             sync +----------------------+                            |                     +---------------------+  sync                    |
+           |                               |   set_state                  NODE 1  |  NODE 2               set_state      |                               |
+           +-------------------------------+                                      +                                      +-------------------------------+
+
+
+
+
+
+0x05 总结
+目前我们分析了Rendezvous的静态结构和动态逻辑，大家对其机制有了一个基本理解，比如有如下概念：
+
+    节点概念_NodeDesc，这样可以把系统表达出来。
+    状态概念。_RendezvousState 是rendezvous的状态。是动态信息，每一个 node 都会维护一个本地 state。
+    总体静态类 _BackendRendezvousStateHolder，用来把节点，状态，后端以及其他信息统一维护起来。
+    共享共享键值存储，比如TCPStore，可以集中保存上述信息，也可以用来彼此交换信息，达成共识。
+    动态server或者handler，RendezvousHandler就提供了一套API以供外界访问。
+下一篇我们介绍内部业务逻辑如何实现，即 Rendezvous 引擎。
+
+
+
     '''
     def next_rendezvous(self) -> Tuple[Store, int, int]:
         """See base class."""
@@ -1019,7 +1255,7 @@ Elastic 调用 rdzv_handler.next_rendezvous() 来处理成员关系变化，目�
         self._record(message=msg)
         log.info(msg)
 
-        try:
+        try:   # 加入了错误处理
             self._stop_heartbeats()
 
             # Delay the execution for a small random amount of time if this is our
@@ -1039,10 +1275,14 @@ Elastic 调用 rdzv_handler.next_rendezvous() 来处理成员关系变化，目�
             self._start_heartbeats()
 
             #这两个变量是动态生成的，所以从 state 之中取出。
+            '''
+            上面代码之中，使用了 _get_world，这里我们再分析一下。rank, world_size 这两个变量是动态生成的，所以从 state 之中取出。
+            而且，因为 participants 是在所有Node之间同步的，所以每个Node得到的 participants 完全一致。
+            '''
             rank, world_size = self._get_world()
             store = self._get_store()
 
-        except Exception as e:
+        except Exception as e:   # 加入了错误处理，但是没有发起下一轮rendezvous
             self._record(
                 message=f"{type(e).__name__}: {str(e)}",
                 node_state=NodeState.FAILED,

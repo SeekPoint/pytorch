@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 _default_timeout_seconds = 600
 
-
+#StaticTCPRendezvous 拓展了RendezvousHandler，其定义如下，其最主要逻辑是：在 group_rank = 0 之上建立一个 TCPStore，然后封装成一个PrefixStore。
 class StaticTCPRendezvous(RendezvousHandler):
     """
     Static rendezvous that is a wrapper around the TCPStore.
@@ -78,7 +78,7 @@ class StaticTCPRendezvous(RendezvousHandler):
     def shutdown(self) -> bool:
         return True
 
-
+#在其中有 create_rdzv_handler 建立了 StaticTCPRendezvous。
 def create_rdzv_handler(params: RendezvousParameters) -> RendezvousHandler:
     if "rank" not in params.config:
         raise ValueError(

@@ -9,7 +9,14 @@ from .api import rendezvous_handler_registry as handler_registry
 from .dynamic_rendezvous import create_handler
 
 __all__ = ['get_rendezvous_handler']
+'''
+既然有了创建途径，我们就来看看如何创建。rendezvous 提供了如下实现，分别是 etcd、etcd-v2、c10d 和 static，这里我们以 static 和 c10d 为例进行说明。
 
+4.4.1 静态 RendezvousHandler
+我们使用 _create_static_handler 举例，看看如何创建 static 类型的 handler。
+
+首先从 _create_static_handler 入手。
+'''
 def _create_static_handler(params: RendezvousParameters) -> RendezvousHandler:
     from . import static_tcp_rendezvous
 
@@ -29,13 +36,13 @@ def _create_etcd_v2_handler(params: RendezvousParameters) -> RendezvousHandler:
 
     return create_handler(store, backend, params)
 
-
+#这里 _create_c10d_handler 会返回一个 DynamicRendezvousHandler。
 def _create_c10d_handler(params: RendezvousParameters) -> RendezvousHandler:
     from .c10d_rendezvous_backend import create_backend
 
     backend, store = create_backend(params)
 
-    return create_handler(store, backend, params)
+    return create_handler(store, backend, params) #这里返回了 DynamicRendezvousHandler。
 
 
 def _register_default_handlers() -> None:

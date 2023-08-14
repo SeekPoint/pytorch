@@ -174,7 +174,8 @@ def _get_addr_and_port(
         )
     return (master_addr, master_port)
 
-
+# 我们先看看如何使用 Rendezvous。
+# launch_agent 启动了一个 LocalElasticAgent，调用了其 run 方法。在调用 run 之前，会生成 rdzv_handler，然后设置到 WorkerSpec 之中。
 def launch_agent(
     config: LaunchConfig,
     entrypoint: Union[Callable, str, None],
@@ -255,7 +256,11 @@ def launch_agent(
         local_world_size=config.nproc_per_node,
         entrypoint=entrypoint,
         args=tuple(args),
-        rdzv_handler=rdzv_registry.get_rendezvous_handler(rdzv_parameters),
+        # '''
+        # 在这个流程之中，rdzv_registry.get_rendezvous_handler(rdzv_parameters) 是最初的来源，因此，我们要看看 get_rendezvous_handler。
+        # 而 get_rendezvous_handler 会返回 RendezvousHandler，所以 RendezvousHandler 和 rendezvous_handler_registry 才是根本。
+        # '''
+        rdzv_handler=rdzv_registry.get_rendezvous_handler(rdzv_parameters), # 构建了 rdzv_handler  # 这里设置了 rdzv_handler
         max_restarts=config.max_restarts,
         monitor_interval=config.monitor_interval,
         redirects=config.redirects,
@@ -274,7 +279,7 @@ def launch_agent(
     try:
         metrics.initialize_metrics(metrics.MetricsConfig(config.metrics_cfg))
 
-        result = agent.run()
+        result = agent.run()  # 启动代理  run 函数中，最终会调用到 self._rendezvous(worker_group)，_rendezvous 方法会 调用 next_rendezvous() 来处理成员关系变化。
         # records that agent.run() has succeeded NOT that workers have succeeded
         events.record(agent.get_event_succeeded())
 

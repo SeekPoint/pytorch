@@ -148,6 +148,11 @@ class EtcdRendezvousHandler(RendezvousHandler):
     def get_backend(self) -> str:
         return "etcd"
 
+    '''
+    这部分容错机制在EtcdRendezvousHandler 之中体现的特别明显。
+
+    next_rendezvous 方法会调用 rendezvous_barrier。
+    '''
     def next_rendezvous(self):
         rdzv_version, rank, world_size = self._rdzv_impl.rendezvous_barrier()
 
@@ -256,6 +261,7 @@ class EtcdRendezvous:
         if self._lease_this_rank_stop is not None:
             self._lease_this_rank_stop.set()
 
+    #在 rendezvous_barrier 之中，如果底层抛出各种异常，则会捕获，然后调用 init_phase 再次执行一次rendezvous，直到deadline时间到为止。
     def rendezvous_barrier(self):
         """
         Main entry point for next rendezvous.
@@ -313,6 +319,7 @@ class EtcdRendezvous:
                 log.info("Rendezvous attempt failed, will retry. Reason: " + str(e))
                 time.sleep(1)
 
+    # init_phase 会发起一轮 rendezvous。
     def init_phase(self):
         """
         Initially, the rendezvous state is expected to be one of:
@@ -333,7 +340,7 @@ class EtcdRendezvous:
              state, which is best handled by retrying later
         """
         try:
-            active_version = self.try_create_rendezvous()
+            active_version = self.try_create_rendezvous()   # 发起一轮rendezvous
             state = json.loads(active_version.value)
             log.info("New rendezvous state created: " + str(state))
         except etcd.EtcdAlreadyExist:

@@ -677,12 +677,13 @@ class SimpleElasticAgent(ElasticAgent):
     #  `torch.distributed.elastic.metrics.prof`.
     '''
     4.2.1 _rendezvous
-我们首先看看_rendezvous，其做如下操作：
-
-调用 next_rendezvous() 来处理成员关系变化，其会返回 world size，store等。
-会把 store 配置到 workgroup 之中，后续worker 之间就可以通过这个kvstore进行沟通。
-调用 _assign_worker_ranks 会生成 worker，并且为 worker 建立 ranks，返回的 workers 都赋值在代理的 worker_group.workers 之中。
-以上两点都是利用 rendezvous 的信息来进行处理，比如从 rendezvous 之中提取 ranks。
+    我们首先看看_rendezvous，其做如下操作：
+    
+    调用 next_rendezvous() 来处理成员关系变化，其会返回 world size，store等。
+    会把 store 配置到 workgroup 之中，后续worker 之间就可以通过这个kvstore进行沟通。
+    调用 _assign_worker_ranks 会生成 worker，并且为 worker 建立 ranks，返回的 workers 都赋值在代理的 worker_group.workers 之中。
+    以上两点都是利用 rendezvous 的信息来进行处理，比如从 rendezvous 之中提取 ranks。
+    
     '''
     @prof
     def _rendezvous(self, worker_group: WorkerGroup) -> None:

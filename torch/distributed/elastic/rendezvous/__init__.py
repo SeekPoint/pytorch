@@ -61,6 +61,8 @@ assigned a different rank in the next (re-)rendezvous.
 
 **Fault-tolerance**:
 
+在开始join rendezvous 和 rendezvous 完成之间，如果有进程崩溃（或网络故障等），就会自动引发一个re-rendezvous，剩余健康节点会自动重组。
+
 Torch Distributed Elastic rendezvous is designed to tolerate node failures
 during the rendezvous process. Should a process crash (or lose network
 connectivity, etc), between joining the rendezvous and it being completed, then

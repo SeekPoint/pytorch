@@ -29,7 +29,14 @@ class RendezvousConnectionError(RendezvousError):
 class RendezvousStateError(RendezvousError):
     """Raised when the state of a rendezvous is corrupt."""
 
+'''
+RendezvousHandler 用来执行业务逻辑，几个虚函数是：
 
+    next_rendezvous ：rendezvous barrier 的主要入口，新加入的节点会等待在这里，直到当前rendezvous结束，或者超时，或者当前 rendezvous 被标识为closed。
+    is_closed ：是否已经结束，如果rendezvous结束，意味着所有试图re-rendezvous都将失败。
+    num_nodes_waiting ：返回在rendezvous barrier等待的当前阶段数目，这些节点不属于当前工作组。
+    用户应该周期调用这个方法来检查是否有新节点等待加入工作组，如果有，就调用next_rendezvous() (re-rendezvous。) 进行下一次re-rendezvous。
+'''
 class RendezvousHandler(ABC):
     """Main rendezvous interface.
 
@@ -39,10 +46,12 @@ class RendezvousHandler(ABC):
         provided, and is recommended for most users.
     """
 
+    # 获取 rendezvous backend名字
     @abstractmethod
     def get_backend(self) -> str:
         """Returns the name of the rendezvous backend."""
 
+    # rendezvous barrier 的主要入口，新加入的节点会等待在这里，直到当前rendezvous结束，或者超时，或者当前 rendezvous 被标识为closed。
     @abstractmethod
     def next_rendezvous(
         self,
@@ -68,6 +77,7 @@ class RendezvousHandler(ABC):
                 The rendezvous did not complete on time.
         """
 
+    # 是否已经结束，如果rendezvous结束，意味着所有试图re-rendezvous都将失败
     @abstractmethod
     def is_closed(self) -> bool:
         """Checks whether the rendezvous has been closed.
@@ -86,6 +96,7 @@ class RendezvousHandler(ABC):
     def set_closed(self):
         """Marks the rendezvous as closed."""
 
+    # 返回在rendezvous barrier等待的当前阶段数目，这些节点不属于当前工作组。用户应该周期调用这个方法来检查是否有新节点等待加入工作组，如果有，就调用`next_rendezvous()` (re-rendezvous。) 进行下一次re-rendezvous。
     @abstractmethod
     def num_nodes_waiting(self) -> int:
         """Returns the number of nodes who arrived late at the rendezvous
@@ -117,7 +128,24 @@ class RendezvousHandler(ABC):
                 rdzv_handler.shutdown()
         """
 
+'''
+0x03 静态结构
+我们接下来看看相关支撑系统。这里要注意的是，elastic 内部有一套 Rendezvous，和 distributed 原有的 Rendezvous 那套不一样，别搞混了。
+distributed 原有的 Rendezvous 就是一套简单的 KV 存储。
+elastic Rendezvous 则要复杂得多。
 
+我们仔细分析一下 Rendezvous 的支撑系统。
+
+3.1 启动参数
+RendezvousParameters 是构建RendezvousHandler所需参数。
+
+    backend ：后端名称。
+    endpoint ：端点，格式是 [:]。
+    run_id : rendezvous 的 id。
+    min_nodes ：rendezvous 的最小节点数目。
+    max_nodes ：rendezvous 的最大节点数目。
+    kwargs ：后端的附加参数。
+'''
 class RendezvousParameters:
     """Holds the parameters to construct a :py:class:`RendezvousHandler`.
 
@@ -208,7 +236,21 @@ class RendezvousParameters:
 
 RendezvousHandlerCreator = Callable[[RendezvousParameters], RendezvousHandler]
 
+'''
+在 torch/distributed/elastic/rendezvous/api.py 之中有如下代码。
 
+# The default global registry instance used by launcher scripts to instantiate
+# rendezvous handlers.
+rendezvous_handler_registry = RendezvousHandlerRegistry()
+所以我们来到了 RendezvousHandlerRegistry。
+
+4.3.1 RendezvousHandlerRegistry
+RendezvousHandlerRegistry 是一个负责创建 RendezvousHandler 的工厂类。
+
+    register 就是往内部字典添加对应的构建器。
+    create_handler 就是依据key，取出对应的构建器。
+    rendezvous_handler_registry 是全局Registry。
+'''
 class RendezvousHandlerRegistry:
     """Represents a registry of :py:class:`RendezvousHandler` backends."""
 
@@ -268,4 +310,28 @@ class RendezvousHandlerRegistry:
 
 # The default global registry instance used by launcher scripts to instantiate
 # rendezvous handlers.
-rendezvous_handler_registry = RendezvousHandlerRegistry()
+
+rendezvous_handler_registry = RendezvousHandlerRegistry() #系统会创建一个全局的 registry
+'''
+在这里注册了若干handler，用来提供创建器。
+rendezvous 提供了如下实现，分别是 etcd、etcd-v2、c10d 和 static。
+
+from .api import rendezvous_handler_registry as handler_registry
+
+def _register_default_handlers() -> None:
+    handler_registry.register("etcd", _create_etcd_handler)
+    handler_registry.register("etcd-v2", _create_etcd_v2_handler)
+    handler_registry.register("c10d", _create_c10d_handler)
+    handler_registry.register("static", _create_static_handler)
+运行时候就是：
+
+rendezvous_handler_registry = 
+  _registry = {dict: 4} 
+   'etcd' = {function} <function _create_etcd_handler at 0x7ff657e12d08>
+   'etcd-v2' = {function} <function _create_etcd_v2_handler at 0x7ff657e12d90>
+   'c10d' = {function} <function _create_c10d_handler at 0x7ff657e12e18>
+   'static' = {function} <function _create_static_handler at 0x7ff657b9d2f0>
+   __len__ = {int} 4
+
+其含义就是：_create_etcd_handler 可以创建 etcd 类型的handler，以此类推。
+'''
