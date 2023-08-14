@@ -625,7 +625,7 @@ def parse_min_max_nnodes(nnodes: str):
 
     return min_nodes, max_nodes
 
-
+#这个变量可以得到每个node之上支持多少个进程。
 def determine_local_world_size(nproc_per_node: str):
     try:
         logging.info(f"Using nproc_per_node={nproc_per_node}.")
@@ -766,9 +766,9 @@ def run_script_path(training_script: str, *training_script_args: str):
     sys.argv = [training_script] + [*training_script_args]
     runpy.run_path(sys.argv[0], run_name="__main__")
 
-
+#脚本入口主要代码如下，可以看到，其调用到了 elastic_launch 来完成功能，所以我们下一节就要顺藤摸瓜来看看这个函数。
 def run(args):
-    if args.standalone:
+    if args.standalone:  # 有两种模式：Standalone 模式和分布式模式，这里要判断一下
         args.rdzv_backend = "c10d"
         args.rdzv_endpoint = "localhost:29400"
         args.rdzv_id = str(uuid.uuid4())

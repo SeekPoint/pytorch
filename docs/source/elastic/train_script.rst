@@ -30,6 +30,7 @@ of training.
 
 .. code-block:: python
 
+  #下面是一个训练脚本的示例，该脚本在每个epoch上设置检查点，因此在失败时最差也只是会丢失一个epoch的训练成果。
   def main():
        args = parse_args(sys.argv[1:])
        state = load_checkpoint(args.checkpoint_path)

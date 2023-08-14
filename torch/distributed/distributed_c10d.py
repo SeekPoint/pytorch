@@ -349,6 +349,7 @@ class _World:
         """
         Process group's global rank to local rank mapping
         TODO don't expose the map, expose fine grained ops
+        该全局变量存储了每个 group 的 global rank 到 local rank 映射信息。
         """
         global _pg_group_ranks
         return _pg_group_ranks
@@ -558,6 +559,7 @@ def get_process_group_ranks(group: ProcessGroup):
     """
     return list(_world.pg_group_ranks[group].keys())
 
+#我们可以 _get_group_size 获取到某一个group 的大小。
 def _get_group_size(group):
     """
     Helper that gets a given group's world size.

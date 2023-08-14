@@ -235,7 +235,7 @@ class WorkerState(str, Enum):
         """
         return state in {WorkerState.HEALTHY, WorkerState.UNHEALTHY}
 
-
+#WorkerGroup 代表了一个工作组。WorkerGroup 作为一个整体来管理多个 workers，进行批量处理。
 class WorkerGroup:
     """
     Represents the set of ``Worker`` instances for the given ``WorkerSpec``
@@ -448,7 +448,38 @@ class ElasticAgent(abc.ABC):
         """
         raise NotImplementedError()
 
+#在SimpleElasticAgent 初始化之中，会建立一个 WorkerGroup。
+'''
+具体如下：
 
++-----------------------------+      +------------------------------------------------+
+| LocalElasticAgent           |      | WorkerSpec                                     |
+|                             |      |                                                |
+| +------------------------+  |      |   rdzv_handler = {DynamicRendezvousHandler} -------+
+| |WorkerGroup             |  |      |                                                |   |
+| |            spec +--------------> |   entry = worker_fn                            |   |
+| |            workers     |  |      |                                                |   |
+| |            store       |  |      |   role = {str} 'trainer'                       |   |
+| |            group_rank  |  |      |                                                |   |
+| |       group_world_size |  |      +------------------------------------------------+   |
+| |                        |  |                                                           |
+| +------------------------+  |                                                           |
+|                             |                                                           |
+| rdzv_run_id                 |                                                           |
+| store                       |            +-----------------------------------------+    |
+|                             |            |DynamicRendezvousHandler                 |    |
++-----------------------------+            |                                         |    |
+                                           |                                         |    |
+                                           |   _settings: RendezvousSettings         | <--+
+                                           |                                         |
+                                           |   _store: Store                         |
+                                           |                                         |
+                                           |   _state_holder: _RendezvousStateHolder |
+                                           |                                         |
+                                           |   _op_executor: _RendezvousOpExecutor   |
+                                           |                                         |
+                                           +-----------------------------------------+
+'''
 class SimpleElasticAgent(ElasticAgent):
     """
     An ``ElasticAgent`` that manages workers (``WorkerGroup``)
@@ -715,12 +746,13 @@ class SimpleElasticAgent(ElasticAgent):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
+    # SimpleElasticAgent 是 LocalElasticAgent 的基类，所以会先运行到WorkerSpec.run 方法这里，run方法则调用了 _invoke_run。
     @prof
     def run(self, role: str = DEFAULT_ROLE) -> RunResult:
         start_time = time.monotonic()
         shutdown_called: bool = False
         try:
-            result = self._invoke_run(role)
+            result = self._invoke_run(role)   # 调用
             self._total_execution_time = int(time.monotonic() - start_time)
             self._record_metrics(result)
             self._record_worker_events(result)
@@ -845,6 +877,62 @@ class SimpleElasticAgent(ElasticAgent):
 
         put_metric(f"workers.{spec.role}.flakiness", int(flakiness))
 
+    '''
+    4.5 代理主循环
+    代理在 invoke_run 之中做如下操作：
+    
+    启动 _initialize_workers，这里会使用 _rendezvous 构建一个 rendezvous，然后调用 _start_workers 启动 workers。
+    进入 while True 循环，在循环之中：
+        通过 _monitor_workers 定期轮训用户程序运行情况，得到客户进程运行结果，然后依据情况作出判断。
+            如果程序正常结束，则返回。
+            如果程序出错，则重试，即重启所有 workers，如果重试次数达到依然有问题，就结束所有workers。
+            如果节点成员关系有变化，比如scale up就会有新的节点在waiting，这时候就重启所有workers。
+            
+            
+于是最终逻辑如下：
+
++----------------------------------------------+
+| LocalElasticAgent                            |
+|                                              |    +---------------------------------------------------+
+|  rdzv_run_id                                 |    | WorkerSpec                                        |
+|                                              |    |                                                   |
+|  store           +------------------------+  |    |      rdzv_handler = {DynamicRendezvousHandler} +-------+
+|                  |WorkerGroup             |  |    |                                                   |    |
+|  _pcontext       |            spec +------------> |      entry = worker_fn                            |    |
+|                  |            workers     |  |    |                                                   |    |
+|                  |            store       |  |    |      role = {str} 'trainer'                       |    |
+|                  |            group_rank  |  |    |                                                   |    |
+|                  |       group_world_size |  |    +---------------------------------------------------+    |
+|                  |                        |  |                                                             |
+|                  +------------------------+  |                                                             |
+|  +----------------------------------------+  |                                                             |
+|  | _invoke_run                            |  |                                                             |
+|  |                                        |  |             +-----------------------------------------+     |
+|  |   _initialize_workers +------------------------+        |DynamicRendezvousHandler                 |     |
+|  |                                        |  |    |        |                                         |     |
+|  |                                        |  |    |        |                                         |     |
+|  |   while True:                          |  |    |        |   _settings: RendezvousSettings         | <---+
+|  |       _monitor_workers(_worker_group)  |  |    |        |                                         |
+|  |                +                       |  |    |        |   _store: Store                         |
+|  |                | _pcontext.wait        |  |    |        |                                         |
+|  |                |                       |  |    |        |   _state_holder: _RendezvousStateHolder |
+|  +----------------------------------------+  |    |        |                                         |
+|                   |                          |    |        |   _op_executor: _RendezvousOpExecutor   |
++----------------------------------------------+    |        |                                         |
+                    |                               |        +-----------------------------------------+
+                    |                               |
+                    v                               v
+         +-------------------------------------------------+
+         |  +------------+  +------------+  +------------+ |
+         |  |Process     |  |Process     |  |Process     | |
+         |  |            |  |            |  |            | |
+         |  |    work_fn |  |   work_fn  |  |    work_fn | |
+         |  |            |  |            |  |            | |
+         |  +------------+  +------------+  +------------+ |
+         +-------------------------------------------------+
+
+    '''
+
     def _invoke_run(self, role: str = DEFAULT_ROLE) -> RunResult:
         # NOTE: currently only works for a single role
 
@@ -861,8 +949,10 @@ class SimpleElasticAgent(ElasticAgent):
 
         while True:
             assert self._worker_group.state != WorkerState.INIT
+            # 定期监控
             time.sleep(monitor_interval)
-            run_result = self._monitor_workers(self._worker_group)
+            # 监控客户程序运行情况
+            run_result = self._monitor_workers(self._worker_group) # 得到进程运行结果
             state = run_result.state
             self._worker_group.state = state
 
@@ -870,6 +960,7 @@ class SimpleElasticAgent(ElasticAgent):
             put_metric(f"workers.{role}.{state.name.lower()}", 1)
 
             if state == WorkerState.SUCCEEDED:
+                # 程序正常结束
                 log.info(
                     f"[{role}] worker group successfully finished."
                     f" Waiting {self._exit_barrier_timeout} seconds for other agents to finish."
@@ -877,7 +968,8 @@ class SimpleElasticAgent(ElasticAgent):
                 self._exit_barrier()
                 return run_result
             elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED}:
-                if self._remaining_restarts > 0:
+                # 程序出错
+                if self._remaining_restarts > 0: # 重试
                     log.info(
                         f"[{role}] Worker group {state.name}. "
                         f"{self._remaining_restarts}/{spec.max_restarts} attempts left;"
@@ -886,14 +978,17 @@ class SimpleElasticAgent(ElasticAgent):
                     self._remaining_restarts -= 1
                     self._restart_workers(self._worker_group)
                 else:
-                    self._stop_workers(self._worker_group)
+                    self._stop_workers(self._worker_group)  # 重试次数达到，结束workers
                     self._worker_group.state = WorkerState.FAILED
                     self._exit_barrier()
                     return run_result
             elif state == WorkerState.HEALTHY:
+                # 节点成员关系有变化，比如scale up，就会有新节点waiting
                 # membership changes do not count as retries
                 num_nodes_waiting = rdzv_handler.num_nodes_waiting()
                 group_rank = self._worker_group.group_rank
+
+                # 如果有新的节点在waiting，就重启所有workers
                 if num_nodes_waiting > 0:
                     log.info(
                         f"[{role}] Detected {num_nodes_waiting} "

@@ -131,7 +131,7 @@ class elastic_launch:
         self._entrypoint = entrypoint
 
     def __call__(self, *args):
-        return launch_agent(self._config, self._entrypoint, list(args))
+        return launch_agent(self._config, self._entrypoint, list(args))  # 内部会调用用户程序
 
 
 def _get_entrypoint_name(
@@ -215,6 +215,41 @@ def launch_agent(
 
     master_addr, master_port = _get_addr_and_port(rdzv_parameters)
 
+    # 1. 得到spec  WorkerSpec ：这是配置信息，里面包含了代理所需要的某些全局信息，比如 RendezvousHandler，role，entry（用户函数）。
+    '''
+    代理会从这里提取各种所需信息。比如_start_workers 会从中获取 store。
+
+        use_agent_store = spec.rdzv_handler.get_backend() == "static"
+        此时逻辑为：
+        
+        +--------------------------+      +---------------------------------------------------+
+        |LocalElasticAgent         |      | WorkerSpec                                        |
+        |                          |      |                                                   |
+        |     WorkerSpec +--------------> |      rdzv_handler = {DynamicRendezvousHandler} --------+
+        |                          |      |                                                   |    |
+        |     rdzv_run_id          |      |      entry = worker_fn                            |    |
+        |                          |      |                                                   |    |
+        |     store                |      |      role = {str} 'trainer'                       |    |
+        |                          |      |                                                   |    |
+        |                          |      +---------------------------------------------------+    |
+        |                          |                                                               |
+        |                          |                                                               |
+        |                          |                                                               |
+        |                          |                                                               |
+        |                          |               +-----------------------------------------+     |
+        +--------------------------+               |DynamicRendezvousHandler                 |     |
+                                                   |                                         |     |
+                                                   |                                         |     |
+                                                   |   _settings: RendezvousSettings         | <---+
+                                                   |                                         |
+                                                   |   _store: Store                         |
+                                                   |                                         |
+                                                   |   _state_holder: _RendezvousStateHolder |
+                                                   |                                         |
+                                                   |   _op_executor: _RendezvousOpExecutor   |
+                                                   |                                         |
+                                                   +-----------------------------------------+
+    '''
     spec = WorkerSpec(
         role=config.role,
         local_world_size=config.nproc_per_node,
@@ -230,6 +265,7 @@ def launch_agent(
         local_addr=config.local_addr,
     )
 
+    # 2. 构建代理
     agent = LocalElasticAgent(
         spec=spec, start_method=config.start_method, log_dir=config.log_dir
     )

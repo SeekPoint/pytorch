@@ -1029,6 +1029,7 @@ class DynamicRendezvousHandler(RendezvousHandler):
 
             self._start_heartbeats()
 
+            #这两个变量是动态生成的，所以从 state 之中取出。
             rank, world_size = self._get_world()
             store = self._get_store()
 
