@@ -43,6 +43,18 @@ __all__ = [
 TORCHELASTIC_ENABLE_FILE_TIMER = "TORCHELASTIC_ENABLE_FILE_TIMER"
 TORCHELASTIC_TIMER_FILE = "TORCHELASTIC_TIMER_FILE"
 
+'''
+0x05 LocalElasticAgent
+LocalElasticAgent 是弹性训练最终使用的代理，主要用于在本地进行操作，负责管理单机上所有的worker进程，其派生了 SimpleElasticAgent。
+
+此代理在每个主机之上部署，并配置为生成n个工作进程。当使用GPU时，n是主机上可用的GPU数量。本地代理不会与部署在其他主机上的其他本地代理通信，即使worker可以在主机间通信。Worker id被解释为本地进程。代理作为把本机所有工作进程作为一个整体启动和停止。
+
+传递给worker的函数和参数必须与python multiprocessing兼容。要将multiprocessing数据结构传递给worker，用户可以在与指定的start_method相同的多处理multiprocessing中创建数据结构，并将其作为函数参数传递。
+
+exit_barrier_timeout用来指定等待其他代理完成的时间量（以秒为单位）。这起到了一个安全网的作用，可以处理worker在不同时间完成的情况，以防止代理将提前完成的worker视为scale-down事件。强烈建议用户代码确保worker以同步方式终止，而不是依赖于exit_barrier_timeout。
+
+SimpleElasticAgent 主要是提供给了初始化和总体运行方式，但是遗留了一些抽象函数没有被实现，比如_start_workers，_stop_workers，_monitor_workers，_shutdown。LocalElasticAgent 就补齐了这些函数。
+'''
 class LocalElasticAgent(SimpleElasticAgent):
     """
     An implementation of :py:class:`torchelastic.agent.server.ElasticAgent`
@@ -86,7 +98,7 @@ class LocalElasticAgent(SimpleElasticAgent):
         def trainer(args) -> str:
             return "do train"
 
-        def main():
+        def main():  #以下是如何把binary作为入口来启动。  _rendezvous 操作之后，Worker 实例已经生成了，接下来就看看如何生成 Worker 进程。
             start_method="spawn"
             shared_queue= multiprocessing.get_context(start_method).Queue()
             spec = WorkerSpec(
@@ -211,12 +223,19 @@ class LocalElasticAgent(SimpleElasticAgent):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
+    #以下函数会停止workers。
     @prof
     def _stop_workers(self, worker_group: WorkerGroup) -> None:
         self._shutdown()
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
+    '''
+    _start_workers 方法会调用 start_processes 来启动 worker 进程，默认_start_method 是 "spawn"。
+    也就是启动了多个进程，并行执行用户程序。同时这些进程的运行结果会被监控。start_processes 参数之中，entrypoint和args 是用户命令和参数，entrypoint可以是函数或者字符串。
+
+_start_workers 把 start_processes 方法启动多线程的结果保存在 _pcontext 之中，后续就用 _pcontext 来继续控制，比如结束 worker 就是直接调用 _pcontext 的 close方法。
+    '''
     @prof
     def _start_workers(self, worker_group: WorkerGroup) -> Dict[int, Any]:
         spec = worker_group.spec
@@ -268,6 +287,7 @@ class LocalElasticAgent(SimpleElasticAgent):
         self._setup_local_watchdog(envs=envs)
 
         assert spec.entrypoint is not None
+        ## 把启动多线程的结果保存在 _pcontext 之中。
         self._pcontext = start_processes(
             name=spec.role,
             entrypoint=spec.entrypoint,
@@ -290,6 +310,79 @@ class LocalElasticAgent(SimpleElasticAgent):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
+    #运行之后，TE 会调用 _monitor_workers 对workers进行监控。之前把启动多线程的结果保存在 _pcontext 之中，现在就用 _pcontext 对运行情况进行监控。
+    '''
+    因为启动和监控涉及到系统整体运行逻辑，需要和 rendezvous 一起才能更好理解，所以我们把这部分的分析推迟，等到 Rendezvous 之后再来做整体分析。
+
+目前总体逻辑如下：
+
+    调用 rdzv_handler.next_rendezvous() 来和其他节点进行同步，获得信息。
+    获得信息中的store（可以认为就是远端的KV存储），group_world_size，group_rank 传给 Agent。
+    ranks 等信息传给 _assign_worker_ranks方法。
+    _assign_worker_ranks 之中，调用 _share_and_gather 在各个代理之间同步，得到角色的总体信息。每个代理将其配置（group_rank, group_world_size , num_workers）写入公共KV存储。
+    依据 role infos 来确定全局rank：当前代理的global rank是 本代理 的 group_rank 在infos数组的偏移量（offset）。偏移量的计算方法是，排名低于group_rank的所有代理的local_world之和。
+    使用各种信息建立一系列的 Workers。
+    Workers 被复制给 Agent 的 WorkerGroup 之中。
+    使用 _start_workers 来启动 worker 进程。
+    把 worker 进程 id 赋值给 Agent 的 worker.id 之中，这样以后就可以用 worker.id 来操作进程。
+    使用 _monitor_workers 监控 worker 进程。
+    使用 _exit_barrier 来等待 worker 进程结束。
+                                                              _initialize_workers
+                                                                      +
+                                                                      |
+                                                                      |
+                                                                      v
+                                                              _rendezvous(worker_group)
+                                                                      +
++----------------------------------------------+                      |
+| LocalElasticAgent                            |                      | 1
+|                                              |   2                  v
+|                                         +--------------+  rdzv_handler.next_rendezvous()
+| +--------------------+                  |    |                      +
+| | WorkerGroup        |                  |    |                      |
+| |                    |                  |    |                    3 | ranks
+| |                    |                  |    |                      v
+| |  spec              |                  |    |       +--------------+------------------+
+| |                    |                  |    |       | _assign_worker_ranks            |
+| |                    |                  |    |       |                                 |
+| |  store   <----------------------------+    |       |                        4        |
+| |                    |                  |    |       | role_infos = _share_and_gather( |
+| |                    |                  |    |       |               +          store) |
+| |  group_world_size<--------------------+    |       |               | 5               |
+| |                    |                  |    |       |               |                 |
+| |                    |                  |    |       |               v                 |
+| |  group_rank <-------------------------+    |       |          _get_ranks(world...)   |
+| |                    |                       |       |          _get_ranks(role...)    |
+| |                    |   +----------------+  |       |               +                 |
+| |  workers  +----------->+ Worker0(rank 0)|  |       |               |                 |
+| |                    |   | Worker1(rank 1)|  |       |               | 6               |
+| |                    |   | ...            |  |Workers|               v                 |
+| |                    |   | Workern(rank n)+<------------+ new Worker(local_rank,       |
+| +--------------------+   +---------+------+  |    7  |               global_rank,      |
+|                                    ^         |       |               role_rank,        |
+|                                    |         |       |               world_size,       |
+|                                    |         |       |               role_world_size)  |
++----------------------------------------------+       |                                 |
+                                     |                 +---------------+-----------------+
+                                     |                                 |
+                                     |                                 | 8
+                                     |              9                  v
+                                     +-----------------------+   _start_workers
+                                                                       +
+                                                                       | 10
+                                                                       |
+                                                                       v
+                                                       +---------------+--------------+
+                                                       | state = _monitor_workers     |
+                                                  +--> |                              +-->
+                                                  |    +---------------+--------------+  |
+                                                  |                    |                 |
+                                                  <--------------------------------------+
+                                                     LOOP  Every 30S   |
+                                                                       | 11
+                                                                       v
+                                                                    _exit_barrier
+    '''
     @prof
     def _monitor_workers(self, worker_group: WorkerGroup) -> RunResult:
         role = worker_group.spec.role
@@ -303,17 +396,18 @@ class LocalElasticAgent(SimpleElasticAgent):
             )
             return RunResult(state=WorkerState.UNKNOWN)
 
-        result = self._pcontext.wait(0)
+        result = self._pcontext.wait(0) # 对运行结构进行监控
         if result:
-            if result.is_failed():
+            if result.is_failed(): # 如果进程失败
                 # map local rank failure to global rank
                 worker_failures = {}
+                #  返回的结果内部就包括每个进程的运行结果
                 for local_rank, failure in result.failures.items():
                     worker = worker_group.workers[local_rank]
                     worker_failures[worker.global_rank] = failure
                 return RunResult(
                     state=WorkerState.FAILED,
-                    failures=worker_failures,
+                    failures=worker_failures,  # 返回运行结果
                 )
             else:
                 # copy ret_val_queue into a map with a global ranks
@@ -323,7 +417,7 @@ class LocalElasticAgent(SimpleElasticAgent):
                     workers_ret_vals[worker.global_rank] = ret_val
                 return RunResult(
                     state=WorkerState.SUCCEEDED,
-                    return_values=workers_ret_vals,
+                    return_values=workers_ret_vals,  # 返回运行结果
                 )
         else:
             return RunResult(state=WorkerState.HEALTHY)

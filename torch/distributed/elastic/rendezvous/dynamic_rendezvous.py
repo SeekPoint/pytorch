@@ -646,8 +646,8 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                     self._keep_alive()
                 elif action == _Action.ADD_TO_PARTICIPANTS:
                     self._add_to_participants()
-                elif action == _Action.ADD_TO_WAIT_LIST:
-                    self._add_to_wait_list()
+                elif action == _Action.ADD_TO_WAIT_LIST:  # 发现当前Action
+                    self._add_to_wait_list()  # 然后执行
                 elif action == _Action.REMOVE_FROM_PARTICIPANTS:
                     self._remove_from_participants()
                 elif action == _Action.REMOVE_FROM_WAIT_LIST:
@@ -1000,7 +1000,16 @@ class DynamicRendezvousHandler(RendezvousHandler):
     def get_backend(self) -> str:
         """See base class."""
         return self._backend_name
+    '''
+    4.2.2.1 处理成员关系变化
+Elastic 调用 rdzv_handler.next_rendezvous() 来处理成员关系变化，目的是启动下一轮 rendezvous 操作（因为本worker已经启动，需要加入集群）。
 
+注意，next_rendezvous 是 RendezvousHandler 的内部函数。这一函数调用会被阻塞，直到 worker 的数量达到了要求。在 worker 被初始化，或者重启的时候，这一函数都会被调用。当函数返回时，不同的 worker group 会以返回中的 rank 作为唯一的标示。其内部逻辑是：
+
+先使用_RendezvousExitOp让该node退出。
+然后再使用_RendezvousJoinOp把该node重新加入。
+最后启动心跳，返回world size，store等。
+    '''
     def next_rendezvous(self) -> Tuple[Store, int, int]:
         """See base class."""
         msg = (
@@ -1048,7 +1057,7 @@ class DynamicRendezvousHandler(RendezvousHandler):
         self._record(message=msg, rank=rank)
         log.info(msg)
 
-        return store, rank, world_size
+        return store, rank, world_size # 返回的是 worker group 的rank
 
     def is_closed(self) -> bool:
         """See base class."""

@@ -108,7 +108,25 @@ class WorkerSpec:
             assert self.entrypoint is not None
             return self.entrypoint.__qualname__
 
+'''
+0x03 Worker
+我们首先要看看 worker，这是 Agent 所管理的主体。
 
+3.1 Worker 定义
+Worker 类代表了一个worker实例，我们上文介绍了WorkerSpec，Worker 就是依据 WorkerSpec 构建出来的，其重点成员变量如下：
+
+    id（任意）：唯一标识一个worker，具体是由ElasticAgent的特定实现来解释，对于本地代理，它可以是worker的pid（int），对于远程代理，它可以被编码为``host:port（string）`。
+    
+    local_rank ：worker的local rank。
+    
+    global_rank：worker的global rank。
+    
+    role_rank：具有相同角色的所有worker的rank。
+    
+    world_size：全局worker数量。
+    
+    role_world_size：具有相同角色的worker数量。
+'''
 class Worker:
     """
     Represents a worker instance. Contrast this with ``WorkerSpec`` that
@@ -182,7 +200,41 @@ class Worker:
     def __repr__(self):
         return str(self)
 
+'''
+3.3 WorkerState
+WorkerState 表示 WorkerGroup的状态。工作组中的所有工作人员作为一个整体来维护/更改状态。如果工作组中的一个worker失败，则整个工作组被认为是失败：
 
+  UNKNOWN - agent lost track of worker group state, unrecoverable
+  INIT - worker group object created not yet started
+  HEALTHY - workers running and healthy
+  UNHEALTHY - workers running and unhealthy
+  STOPPED - workers stopped (interruped) by the agent
+  SUCCEEDED - workers finished running (exit 0)
+  FAILED - workers failed to successfully finish (exit !0)
+具体这些状态意义如下：
+
+    UNKNOWN-代理丢失了对工作组状态的跟踪，无法恢复
+    
+    INIT-创建的工作组对象尚未启动
+    
+    HEALTHY-worker健康运行
+    
+    UNHEALTHY-worker在运行但是不健康
+    
+    STOPPED-代理停止（中断）worker
+    
+    SUCCEEDED-worker已完成运行（exit数值为0）
+    
+    FAILED-worker未能成功完成（exit数值不等于0)
+
+工作组从初始的INIT状态开始，然后进入"健康"或"不健康"状态，最后到达终端"成功"或"失败"状态。工作组可以被代理打断并且临时置于"停止"状态。处于"已停止"状态的工作进程可以在不久的将来被调度重启，被设置为已停止的状态的例子为：
+
+    观察到工作组故障|不健康
+    检测到成员更改
+当工作组上的操作（启动、停止、rdzv、重试等）失败，并导致操作部分应用于工作组时，状态将为"未知"。这通常发生在状态改变期间发生异常，而且异常未捕获/未处理的情况下。当工作组处于"未知"状态，代理不会恢复工作组，因此最好终止作业，并且由job manager重试节点。
+
+WorkerState 具体定义如下：
+'''
 class WorkerState(str, Enum):
     """
     State of the ``WorkerGroup``. Workers in a worker group change state as a unit.
@@ -256,7 +308,17 @@ class WorkerGroup:
 
         self.state = WorkerState.INIT
 
+'''
+4.3 ranks相关
+前面的 _assign_worker_ranks 为 worker 建立 ranks，但是其内部有些细节我们还需要梳理一下。
 
+4.3.1 _RoleInstanceInfo
+这里要介绍一下 _RoleInstanceInfo 这个数据结构。代理使用该类与其他代理交换信息。该信息用于确定本代理workers的rank。这些代理工作在异构环境下，不同代理也许有不同数量的workers。其构建参数是：
+
+    role (str) : 用户定义的role。
+    rank (int) : 代理的rank。
+    local_world_size (int) : 本地 workers 的数目。
+'''
 class _RoleInstanceInfo:
     """
     The class is used by the agent to exchange the information with other agents.
@@ -385,7 +447,19 @@ def _get_socket_with_port() -> socket.socket:
 def _get_fq_hostname() -> str:
     return socket.getfqdn(socket.gethostname())
 
+'''
+2.4 基类
+基类ElasticAgent 是一个 Abstract Class，真正运行的代理都需要由此派生。
+从 ElasticAgent 的注释可知，代理进程负责管理一个或多个worker 进程。
+工作进程被假定为常规分布式PyTorch脚本。
+当worker进程由代理创建时，代理将为worker进程提供必要的信息，以便正确初始化torch进程组。
+部署时，精确的拓扑和 agent-to-worker 比率取决于代理的具体实现和用户作业放置偏好。
 
+ElasticAgent 有两个派生类：
+
+    SimpleElasticAgent 实现了基类的部分函数，其目的是为了方便扩展新代理的实现。
+    LocalElasticAgent 派生了SimpleElasticAgent ，是目前弹性训练最终使用的代理，主要用于在本地进行操作，负责管理单机上所有的worker进程。
+'''
 class ElasticAgent(abc.ABC):
     """
     Agent process responsible for managing one or more worker processes.
@@ -479,6 +553,14 @@ class ElasticAgent(abc.ABC):
                                            |   _op_executor: _RendezvousOpExecutor   |
                                            |                                         |
                                            +-----------------------------------------+
+                                           
+                                           
+在SimpleElasticAgent 初始化之中，会建立一个 WorkerGroup。   
+
+
+0x04 SimpleElasticAgent
+SimpleElasticAgent 是 Agent 的实现类之一。此抽象是为了方便扩展新的 agent 实现。
+从后面可知，目前内置的 LocalElasticAgent 负责管理单机上的所有 worker 进程，如果用户希望只用一个代理就管理多机上所有的 worker，而不仅仅是本机 worker，那么可以通过扩展 SimpleElasticAgent 来实现一个自定义 Agent。                                        
 '''
 class SimpleElasticAgent(ElasticAgent):
     """
@@ -496,6 +578,35 @@ class SimpleElasticAgent(ElasticAgent):
     def get_worker_group(self, role: str = DEFAULT_ROLE) -> WorkerGroup:
         return self._worker_group
 
+    #调用 派生类的 _start_workers 来启动 worker 进程，因此基类这里没有实现，我们后续会看到派生类如何实现。
+    '''
+    目前逻辑如下，具体是：
+
+        调用 rdzv_handler.next_rendezvous 来与其他 Node 进行同步。
+        rdzv_handler.next_rendezvous 返回 ranks 等信息给_assign_worker_ranks。
+        _assign_worker_ranks会生成一些Workers，其中每个 Worker都被自动分配了 rank。这些 workers 被 Agent的worker_group.workers所指向。
+        +--------------------------------------------------+
+        | LocalElasticAgent                                |         _initialize_workers
+        |                                                  |                 +
+        |                                                  |                 |
+        |                                                  |                 |
+        |   +----------------------+                       |                 v
+        |   |WorkerGroup           |                       |         _rendezvous(worker_group)
+        |   |                      |                       |                 +
+        |   |     spec             |                       |                 |
+        |   |                      |                       |                 | 1
+        |   |     group_world_size |                       |                 v
+        |   |                      |                       |        rdzv_handler.next_rendezvous()
+        |   |     store            |                       |                 +
+        |   |                      |    +----------------+ |                 |
+        |   |     group_rank       |    | Worker0(rank 0)| |               2 | ranks
+        |   |                      |    | Worker1(rank 1)| |  Workers        v
+        |   |     workers  +----------> | ...            | | <----+ _assign_worker_ranks
+        |   |                      |    | Workern(rank n)| |    3
+        |   +----------------------+    +----------------+ |
+        |                                                  |
+        +--------------------------------------------------+
+    '''
     @abc.abstractmethod
     def _start_workers(self, worker_group: WorkerGroup) -> Dict[int, Any]:
         r"""
@@ -564,6 +675,15 @@ class SimpleElasticAgent(ElasticAgent):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
+    '''
+    4.2.1 _rendezvous
+我们首先看看_rendezvous，其做如下操作：
+
+调用 next_rendezvous() 来处理成员关系变化，其会返回 world size，store等。
+会把 store 配置到 workgroup 之中，后续worker 之间就可以通过这个kvstore进行沟通。
+调用 _assign_worker_ranks 会生成 worker，并且为 worker 建立 ranks，返回的 workers 都赋值在代理的 worker_group.workers 之中。
+以上两点都是利用 rendezvous 的信息来进行处理，比如从 rendezvous 之中提取 ranks。
+    '''
     @prof
     def _rendezvous(self, worker_group: WorkerGroup) -> None:
         r"""
@@ -574,9 +694,11 @@ class SimpleElasticAgent(ElasticAgent):
 
         spec = worker_group.spec
 
+        # 处理成员关系变化，注意，这里得到的是 group rank!
         store, group_rank, group_world_size = spec.rdzv_handler.next_rendezvous()
-        self._store = store
+        self._store = store # store被设置到 Agent之中，store可以被认为是远端KV存储
 
+        # 依据 group rank 为 worker 建立 ranks
         workers = self._assign_worker_ranks(store, group_rank, group_world_size, spec)
         worker_group.workers = workers
         worker_group.store = store
@@ -608,6 +730,58 @@ class SimpleElasticAgent(ElasticAgent):
             f"  global_world_sizes={[worker.world_size for worker in workers]}\n"
         )
 
+    '''
+    依据 role infos 来确定全局rank：当前代理的global rank是 本代理 的 group_rank 在infos数组的偏移量（offset）。
+    偏移量的计算方法是，排名低于group_rank的所有代理的local_world之和。workers 的等级为：[offset, offset+local_world_size]。
+    
+    目前逻辑拓展如下：
+
+调用 rdzv_handler.next_rendezvous() 来和其他节点进行同步，获得信息。
+获得信息中的store（可以认为就是远端的KV存储），group_world_size，group_rank 传给 Agent。
+ranks 等信息传给 _assign_worker_ranks方法。
+_assign_worker_ranks 之中，调用 _share_and_gather 在各个代理之间同步，得到角色的总体信息。每个代理将其配置（group_rank, group_world_size , num_workers）写入公共KV存储。
+依据 role infos 来确定全局rank：当前代理的global rank是 本代理 的 group_rank 在infos数组的偏移量（offset）。偏移量的计算方法是，排名低于group_rank的所有代理的local_world之和。
+使用各种信息建立一系列的 Workers。
+Workers 被复制给 Agent 的 WorkerGroup 之中。
+                                                              _initialize_workers
+                                                                      +
+                                                                      |
+                                                                      |
+                                                                      v
+                                                              _rendezvous(worker_group)
+                                                                      +
++----------------------------------------------+                      |
+| LocalElasticAgent                            |                      | 1
+|                                              |   2                  v
+|                                         +--------------+  rdzv_handler.next_rendezvous()
+| +--------------------+                  |    |                      +
+| | WorkerGroup        |                  |    |                      |
+| |                    |                  |    |                    3 | ranks
+| |                    |                  |    |                      v
+| |  spec              |                  |    |       +--------------+------------------+
+| |                    |                  |    |       | _assign_worker_ranks            |
+| |                    |                  |    |       |                                 |
+| |  store   <----------------------------+    |       |                        4        |
+| |                    |                  |    |       | role_infos = _share_and_gather( |
+| |                    |                  |    |       |               +          store) |
+| |  group_world_size<--------------------+    |       |               | 5               |
+| |                    |                  |    |       |               |                 |
+| |                    |                  |    |       |               v                 |
+| |  group_rank <-------------------------+    |       |          _get_ranks(world...)   |
+| |                    |                       |       |          _get_ranks(role...)    |
+| |                    |   +----------------+  |       |               +                 |
+| |  workers  +----------->+ Worker0(rank 0)|  |       |               |                 |
+| |                    |   | Worker1(rank 1)|  |       |               | 6               |
+| |                    |   | ...            |  |Workers|               v                 |
+| |                    |   | Workern(rank n)+<------------+ new Worker(local_rank,       |
+| +--------------------+   +----------------+  |    7  |               global_rank,      |
+|                                              |       |               role_rank,        |
++----------------------------------------------+       |               world_size,       |
+                                                       |               role_world_size)  |
+                                                       |                                 |
+                                                       +---------------------------------+
+_rendezvous 操作之后，Worker 实例已经生成了，接下来就看看如何生成 Worker 进程。但是因为这些方法在 SimpleElasticAgent 之中并没有实现，所以我们需要在其派生类 LocalElasticAgent 分析小节才能继续拓展我们的逻辑图。
+    '''
     def _get_ranks(
         self,
         role_infos: List[_RoleInstanceInfo],
@@ -630,6 +804,17 @@ class SimpleElasticAgent(ElasticAgent):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
+    '''
+    4.2.3.2 为 worker 分配 ranks
+    接着是调用 _assign_worker_ranks 为 worker 建立 ranks。分配 rank 算法如下：
+    
+        每个代理将其配置（group_rank, group_world_size , num_workers）写入公共存储。
+        每个代理检索所有代理的配置，并使用角色和rank执行两级排序。
+        确定全局rank：当前代理的global rank是 本代理 的 group_rank 在infos数组的偏移量（offset）。偏移量的计算方法是，排名低于group_rank的所有代理的local_world之和。workers 的等级为：[offset, offset+local_world_size]。
+        确定role rank：使用第3点中的算法确定role rank，不同之处是：偏移量计算是从与当前角色相同且具有最小 group rank 的第一个代理开始。
+        因为所有代理都使用同样算法，所以其计算出的 ranks 数组都是相同的。
+    然后生成 workers，把 worker 都赋值在 worker_group.workers 之中。
+    '''
     @prof
     def _assign_worker_ranks(
         self, store, group_rank: int, group_world_size: int, spec: WorkerSpec
@@ -651,9 +836,14 @@ class SimpleElasticAgent(ElasticAgent):
            in the point 3 with the exception that the offset is done from the first
            agent that has the same role as current one and has the minimum group rank.
         """
-
+        # 每个代理将其配置（group_rank, group_world_size, num_workers）写入公共存储。
         role_infos = self._share_and_gather(store, group_rank, group_world_size, spec)
+
+        # 每个代理检索所有代理的配置，并使用角色和rank执行两级排序。
         my_role_info = role_infos[group_rank]
+
+        # 确定全局rank：当前代理的global rank是 本代理 的 group_rank 在infos数组的偏移量（offset）。
+        # 偏移量的计算方法是，排名低于group_rank的所有代理的local_world之和。workers 的等级为：[offset, offset+local_world_size]。
         worker_world_size, worker_global_ranks = self._get_ranks(role_infos, group_rank)
         role_infos = sorted(
             role_infos, key=functools.cmp_to_key(_RoleInstanceInfo.compare)
@@ -666,9 +856,13 @@ class SimpleElasticAgent(ElasticAgent):
             for idx, role_info in enumerate(role_infos)
             if _RoleInstanceInfo.compare(role_info, my_role_info) == 0
         )
+
+        # 确定role rank：使用第3点中的算法确定role rank，不同之处是：偏移量计算是从与当前角色相同且具有最小 group rank 的第一个代理开始。
         role_world_size, role_ranks = self._get_ranks(
             role_infos, role_pos, role_start_idx, role_end_idx + 1
         )
+
+        # 生成 workers，把 worker 都赋值在 worker_group.workers 之中。
         workers = []
         for ind in range(spec.local_world_size):
             worker = Worker(
@@ -681,6 +875,10 @@ class SimpleElasticAgent(ElasticAgent):
             workers.append(worker)
         return workers
 
+    '''
+    _share_and_gather 的作用是在各个代理之间同步，得到角色的总体信息。每个代理将其配置（group_rank, group_world_size , num_workers）写入公共存储。
+    这里就是使用之前 Rendezvous 返回的 store 来进行信息共享。
+    '''
     def _share_and_gather(
         self, store, group_rank: int, group_world_size: int, spec: WorkerSpec
     ) -> List:
@@ -700,6 +898,13 @@ class SimpleElasticAgent(ElasticAgent):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
+    '''
+    4.2 初始化workers
+        代理主循环之中，首先使用 self._initialize_workers(self._worker_group) 来启动 worker。在 _initialize_workers之中：
+        
+        首先使用 self._rendezvous(worker_group) 进行节点之间的同步共识操作以及rank处理等等。
+        其次调用 _start_workers 启动 workers。这里的 _start_workers 是虚函数，需要派生类实现。
+    '''
     @prof
     def _initialize_workers(self, worker_group: WorkerGroup) -> None:
         r"""
@@ -720,18 +925,19 @@ class SimpleElasticAgent(ElasticAgent):
         # workers on different nodes to fail on a collective op before waiting
         # on the rdzv barrier, this way we ensure that nodes enter rdzv
         # at around the same time and reduce false positive rdzv timeout errors
-        self._rendezvous(worker_group)
+        self._rendezvous(worker_group) # 同步共识操作  # Worker实例已经生成了
 
         log.info(f"[{role}] Starting worker group")
-        worker_ids = self._start_workers(worker_group)
+        worker_ids = self._start_workers(worker_group) # 启动worker
         for local_rank, w_id in worker_ids.items():
             worker = worker_group.workers[local_rank]
-            worker.id = w_id
+            worker.id = w_id  # 得到进程ID
 
         worker_group.state = WorkerState.HEALTHY
 
     # pyre-fixme[56]: Pyre was not able to infer the type of the decorator
     #  `torch.distributed.elastic.metrics.prof`.
+    # _restart_workers 是重启 workers。
     @prof
     def _restart_workers(self, worker_group: WorkerGroup) -> None:
         """
@@ -931,6 +1137,15 @@ class SimpleElasticAgent(ElasticAgent):
          |  +------------+  +------------+  +------------+ |
          +-------------------------------------------------+
 
+4.1 总体运行
+SimpleElasticAgent 主循环 _invoke_run 是核心逻辑（这里默认代理和worker在同一个机器之上），其中做如下操作：
+
+    使用 self._initialize_workers(self._worker_group) 完成初始化工作，比如来启动 worker，为每个worker 分配 rank 等等。
+    然后进入 while True 循环，在循环之中通过 _monitor_workers 定期轮训用户程序运行情况，得到 worker 进程运行结果，然后依据情况进行不同处理。
+        如果程序正常结束，则返回。
+        如果程序出错，则重试，如果重试次数达到，结束workers。
+        如果节点成员关系有变化，比如scale up就会有新的节点在waiting，这时候就重启所有workers。
+
     '''
 
     def _invoke_run(self, role: str = DEFAULT_ROLE) -> RunResult:
@@ -999,6 +1214,7 @@ class SimpleElasticAgent(ElasticAgent):
             else:
                 raise Exception(f"[{role}] Worker group in {state.name} state")
 
+    #实际上，几乎不可能保证DDP的所有 worker 都能保证同时结束，所以因此TE提供了一个finalization barrier，这个barrier的作用是对worker finalization 实施等待超时（5分钟）。
     def _exit_barrier(self):
         """
         Wait for ``exit_barrier_timeout`` seconds for all agents to finish
