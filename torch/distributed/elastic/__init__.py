@@ -34,6 +34,75 @@ that waits for TIMEOUT(5 minutes) for worker finalization.
 
 **Worker Failure**
 
+
+5.4 其他代理重启
+从源码注释可知：新一轮 rendezvous 会让其他 agent 也重启它们的worker。
+
+When worker fails, TE will check the number of restarts available, if there is more than 0 restarts, TE will start a new rendezvous round and restart the worker process. New rendezvous round will other TE agents to terminate their workers.
+这是如何做到的？具体如下：
+
+Agent 0（故障Agent）通过 monitoring 发现了故障。
+Agent 0 调用 _restart_workers 重启worker。
+Agent 0 会调用 next_rendezvous 发起新一轮 rendezvous。
+Agent 0 在做任何操作之前，比如 keep alive 操作之前，会调用 sync 来从kvstore获取集群信息，这样可以保证 Agent拿到的是集群最新状态。
+Agent 0 会把自己加入到本地的 waiting_list 之中。
+Agent 0 同时会调用 mark_dirty，意思是我状态更新了，需要写入KVStore。
+Agent 0 会调用sync把自己的waiting_list 被写入 KVStore。
+Agent 1（其他正常工作的 agent）会在做任何操作之前，比如 keep alive 操作之前，会调用 sync 操作从KVStore 获取最新信息。
+Agent 1 利用这些信息来更新自己的状态，这样本地 waiting_list 就会更新。
+Agent 1 的 train loop 在每 30 秒监控之后，因为系统正常，是 Healthy 状态。
+Agent 1 所以调用 num_nodes_waiting() 看看 waiting_list 数目。
+Agent 1 会获取本地 waiting list 的数目。
+如果 waiting list 不为空，也调用_restart_workers。
+其最终会调用next_rendezvous。
+具体如下：
+
+ Agent 0                                      Agent 1
++---------------------------+                 +--------------------------------------------+
+|    _invoke_run            |                 |                       _invoke_run          |
+|          +                |                 |                           +                |
+|          |                |                 |                           |                |
+|          | 1              |                 |                           |                |
+|          v                |                 |                           |                |
+| Worker Process Error      |                 |                           |                |
+|          +                |                 |                           |                |
+|          |                |                 |                           | 10             |
+|          | 2              |                 |                           v                |
+|          v                |                 |                        HEALTHY             |
+|  _restart_workers         |                 |                           +                |
+|          +                |                 |                           | 11             |
+|          |                |                 |                           |                |
+|          | 3              |                 |                           v                |
+|          v                |                 |              +-->  num_nodes_waiting() > 0 |
+|   next_rendezvous         |                 |              |            +                |
+|          +                |                 |              |            |                |
+|          | 4              |                 |              | 12         | 13             |
+|          |                +   +----------+  |              |            v                |
+|          v      cluster info  |          |  |              |       _restart_workers      |
+|        sync  <------------+-> | KV Store |  |              |            +                |
+|          +                |   |          |  |              |            |                |
+|          | 5              |   |          |  |              |            | 14             |
+|          v                |   |          |  |              |            v                |
+|  Add to local waiting_list|   |          |  |              |        next_rendezvous      |
+|          +                |   |          |  |              |                             |
+|          |                |   |          |  |              |                             |
+|          | 6              |   |          |  |              v                             |
+|          v                |   |          |  |                                            |
+|     mark_dirty            |   |          |  |  Add to local waiting_list                 |
+|          +                |   |          |  |              ^                             |
+|          |                |   |          |  |              |                             |
+|          | 7              |   |          |  |            9 | waiting_list                |
+|          v         7      |   |          |  |    8         +                             |
+|        sync +---------------> |          +--------------> sync                           |
+|              waiting_list |   |          |  |waiting_list                                |
+|                           |   +----------+  |                                            |
++---------------------------+                 +--------------------------------------------+
+
+
+至此，我们监控机制初步介绍完成，因为篇幅所限，我们下一篇继续介绍Scale up/down如何处理。
+
+
+
 When worker fails, TE will check the number of restarts
 available, if there is more than 0 restarts, TE will start a new rendezvous
 round and restart the worker process. New rendezvous round will other

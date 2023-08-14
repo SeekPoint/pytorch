@@ -64,7 +64,7 @@ def synchronize(
     agent_data = get_all(store, rank, key_prefix, world_size)
     return agent_data
 
-
+#在 torch/distributed/elastic/utils/store.py 之中，barrier 会调用 synchronize 进行同步。
 def barrier(
     store, rank: int, world_size: int, key_prefix: str, barrier_timeout: float = 300
 ) -> None:
@@ -75,4 +75,4 @@ def barrier(
         once per unique ``key_prefix``.
     """
     data = f"{rank}".encode(encoding="UTF-8")
-    synchronize(store, data, rank, world_size, key_prefix, barrier_timeout)
+    synchronize(store, data, rank, world_size, key_prefix, barrier_timeout)  #synchronize 则是通过store进行同步。

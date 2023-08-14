@@ -234,7 +234,7 @@ class LocalElasticAgent(SimpleElasticAgent):
     _start_workers 方法会调用 start_processes 来启动 worker 进程，默认_start_method 是 "spawn"。
     也就是启动了多个进程，并行执行用户程序。同时这些进程的运行结果会被监控。start_processes 参数之中，entrypoint和args 是用户命令和参数，entrypoint可以是函数或者字符串。
 
-_start_workers 把 start_processes 方法启动多线程的结果保存在 _pcontext 之中，后续就用 _pcontext 来继续控制，比如结束 worker 就是直接调用 _pcontext 的 close方法。
+    _start_workers 把 start_processes 方法启动多线程的结果保存在 _pcontext 之中，后续就用 _pcontext 来继续控制，比如结束 worker 就是直接调用 _pcontext 的 close方法。
     '''
     @prof
     def _start_workers(self, worker_group: WorkerGroup) -> Dict[int, Any]:
@@ -287,11 +287,13 @@ _start_workers 把 start_processes 方法启动多线程的结果保存在 _pcon
         self._setup_local_watchdog(envs=envs)
 
         assert spec.entrypoint is not None
+
+        #TE 使用 torch.mp 和 subprocess 包进行多进程处理。在启动多进程时候，把结果保存在 _pcontext 之中，这是一个 PContext 类型的实例。
         ## 把启动多线程的结果保存在 _pcontext 之中。
         self._pcontext = start_processes(
             name=spec.role,
-            entrypoint=spec.entrypoint,
-            args=args,
+            entrypoint=spec.entrypoint,  # 训练代码入口
+            args=args,  # 这里重要的是local rank
             envs=envs,
             log_dir=attempt_log_dir,
             start_method=self._start_method,
@@ -382,11 +384,31 @@ _start_workers 把 start_processes 方法启动多线程的结果保存在 _pcon
                                                                        | 11
                                                                        v
                                                                     _exit_barrier
+    
+_monitor_workers 在监控时候，就使用 _pcontext 进行监控。在监控时候会依据线程结果转为WorkerState.FAILED，WorkerState.HEALTHY 或者WorkerState.SUCCEEDED返回给上层。    
+
+
+这里会调用 _pcontext.wait(0) 来获取目前 worker 子进程们的状态，然后依据返回结果，转换不同的 WorkerState 返回给调用者。这里就提到了前面讲的，RunResult 应该和 global rank 映射，所以_monitor_workers就有一个从 local rank 到 gloabl rank 的映射。
+
+为何要使用 Global rank 作为进程状态的标示？因为在Node之间需要沟通，这时候需要用Global rank。
+
+
+
+
+3.2 处理
+根据返回状态不同，会有不同处理：
+
+如果 WorkerState.SUCCEEDED，则说明训练结束，正常返回。
+如果 WorkerState.HEALTHY，则说明训练正常运行，这时候会检查是否有新节点加入，我们后文会详解。
+如果 WorkerState.UNHEALTHY, WorkerState.FAILED，说明训练出现问题，这里有两种情况。
+一种是程序出错，TE 会进行重试。
+一种是节点退出，我们在下文分析，但是其处理流程与程序出错一致。
+接下来我们就分析一下如何处理训练结束 和 程序出错。
     '''
     @prof
     def _monitor_workers(self, worker_group: WorkerGroup) -> RunResult:
         role = worker_group.spec.role
-        worker_pids = {w.id for w in worker_group.workers}
+        worker_pids = {w.id for w in worker_group.workers}   # 拿到本agent所有worker的pid
         assert self._pcontext is not None
         pc_pids = set(self._pcontext.pids().values())
         if worker_pids != pc_pids:
@@ -402,9 +424,9 @@ _start_workers 把 start_processes 方法启动多线程的结果保存在 _pcon
                 # map local rank failure to global rank
                 worker_failures = {}
                 #  返回的结果内部就包括每个进程的运行结果
-                for local_rank, failure in result.failures.items():
-                    worker = worker_group.workers[local_rank]
-                    worker_failures[worker.global_rank] = failure
+                for local_rank, failure in result.failures.items():   # local_rank是进程index
+                    worker = worker_group.workers[local_rank]   # 拿到对应的worker
+                    worker_failures[worker.global_rank] = failure  # 拿到其 global_rank，进而设置worker状态
                 return RunResult(
                     state=WorkerState.FAILED,
                     failures=worker_failures,  # 返回运行结果

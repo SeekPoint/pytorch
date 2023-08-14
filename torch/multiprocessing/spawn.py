@@ -174,6 +174,13 @@ class SpawnContext(ProcessContext):
 # general enough, and backends like XLA can reuse them in Colab notebooks as well.
 # Currently we only add this API first, we can consider adding it to documentation as
 # needed in the future.
+'''
+2.4 ProcessContext
+由前面可知，MultiprocessContext 的关键变量是：_pc: Optional[mp.ProcessContext]，这个成员变量是通过 start_processes 来构建，所以我们需要看看torch.mp.ProcessContext。
+
+2.4.1 start_processes
+start_processes 在 torch/multiprocessing/spawn.py 之中，返回 ProcessContext。注意，从此之后，训练进程就会跑自己的训练代码，仿佛没有agent一样，因为agent已经把torch.distributed.launch 的工作做完了。
+'''
 def start_processes(fn, args=(), nprocs=1, join=True, daemon=False, start_method='spawn'):
     mp = multiprocessing.get_context(start_method)
     error_queues = []
@@ -182,7 +189,7 @@ def start_processes(fn, args=(), nprocs=1, join=True, daemon=False, start_method
         error_queue = mp.SimpleQueue()
         process = mp.Process(
             target=_wrap,
-            args=(fn, i, args, error_queue),
+            args=(fn, i, args, error_queue),  # 训练进程开始跑训练代码
             daemon=daemon,
         )
         process.start()

@@ -1718,6 +1718,7 @@ Rendezvous 和 Agent 之间的逻辑联系总结如下，每个启动脚本都�
             )
             raise
 
+    # 在 MultiprocessContext 之中，close 方法是关闭所有子进程，然后等待其全部停止。
     def _close(self) -> None:
         op = _RendezvousCloseOp() # 设置算子
 

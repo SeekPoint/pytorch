@@ -81,7 +81,22 @@ from torch.distributed.elastic.utils.logging import get_logger
 
 log = get_logger()
 
+'''
+注意，这里 start_processes 的代码在 torch/distributed/elastic/multiprocessing/api.py 之中，和后面用到的 mp的 start_processes 不同。
+start_processes 会从args之中提取 local rank，然后依据 local_rank 做操作，比如建立每个进程的log文件。
+其意义是：把每个worker进程同local_rank 联系起来，一个 local_rank 对应一个 worker进程。
 
+# 前文提到，start_processes 参数之中，entrypoint和args 是用户命令和参数，entrypoint可以是函数或者字符串。
+# 如果entrypoint是函数，则使用MultiprocessContext。如果是字符串类型，使用SubprocessContext。
+
+
+具体来说，两个派生类的基础不同。
+
+MultiprocessContext 使用torch.multiprocessing.start_processes来启动进程。
+SubprocessContext 使用subprocess.Popen来启动进程。
+我们接下来仅使用 MultiprocessContext 来分析。
+
+'''
 def start_processes(
     name: str,
     entrypoint: Union[Callable, str],
@@ -218,6 +233,7 @@ def start_processes(
     tee_stderrs: Dict[int, str] = {}
     error_files = {}
 
+    # 大量使用了local_rank
     for local_rank in range(nprocs):
         if log_dir == os.devnull:
             tee_stdouts[local_rank] = os.devnull
@@ -246,7 +262,7 @@ def start_processes(
             envs[local_rank]["TORCHELASTIC_ERROR_FILE"] = error_file
 
     context: PContext
-    if isinstance(entrypoint, str):
+    if isinstance(entrypoint, str):  # 如果是字符串
         context = SubprocessContext(
             name=name,
             entrypoint=entrypoint,
@@ -259,7 +275,7 @@ def start_processes(
             error_files=error_files,
         )
     else:
-        context = MultiprocessContext(
+        context = MultiprocessContext(  # 函数则来到这里
             name=name,
             entrypoint=entrypoint,
             args=args,

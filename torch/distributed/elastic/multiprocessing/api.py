@@ -185,6 +185,8 @@ class RunProcsResult:
     def is_failed(self) -> bool:
         return len(self.failures) > 0
 
+#PContext 就是一个抽象类，实际上就是些基本配置。
+# 但是其有两个派生类很关键：MultiprocessContext 和 SubprocessContext。
 
 class PContext(abc.ABC):
     """
@@ -258,6 +260,7 @@ class PContext(abc.ABC):
         """
         raise NotImplementedError()
 
+    #wait 方法是在其基类 class PContext(abc.ABC): 之中。就是循环调用 _poll 函数来定期检测。
     def wait(self, timeout: float = -1, period: float = 1) -> Optional[RunProcsResult]:
         """
         Waits for the specified ``timeout`` seconds, polling every ``period`` seconds
@@ -291,8 +294,8 @@ class PContext(abc.ABC):
             timeout = sys.maxsize
 
         expiry = time.time() + timeout
-        while time.time() < expiry:
-            pr = self._poll()
+        while time.time() < expiry:   # 定期操作
+            pr = self._poll()  # 用poll来检测
             if pr:
                 return pr
             time.sleep(period)
@@ -371,7 +374,38 @@ def _wrap(
     ret_val_.put(ret)
     queue_finished_reading_event.wait()
 
+#MultiprocessContext 定义如下，其中最有意义的是 _pc 这个成员变量，其实际是 ProcessContext 这个变量。
+'''
+2.5 总结
+目前关系如下：
 
+在生成时候，LocalElasticAgent 生成了 MultiprocessContext，MultiprocessContext 又生成了 ProcessContext。
+LocalElasticAgent._pcontext 保存了 MultiprocessContext，MultiprocessContext._pc 保存了 ProcessContext。
+监控时候，LocalElasticAgent._monitor_workers 调用了 MultiprocessContext.wait，MultiprocessContext 又调用了 ProcessContext.join，ProcessContext.join 具体监控进程的运行状态，这样完成了监控的整体逻辑。
+子进程有变化或者超时之后，ProcessContext.join 返回了进程结果，MultiprocessContext.wait 把进程结果转发回去，_monitor_workers 把进程结果转换为 WorkerState.SUCCEEDED 或者 WorkerState.FAILED。
+具体如图：
+
++--------------------------------------------------------------------------------------+   +------------------------------------+   +----------------+
+| LocalElasticAgent                                                                    |   | MultiprocessContext                |   | ProcessContext |
+|                                                                                      |   |                                    |   |                |
+|                                                                                      |   |                                    |   |                |
+|  +----------------------------------------+       MultiprocessContext _pcontext      |   |       ProcessContext _pc           |   |                |
+|  | _invoke_run                            |                                          |   |                                    |   |                |
+|  |                                        |                                          |   |                                    |   |                |
+|  |   _initialize_workers  +-------------------->  _pcontext = start_processes  +-------------->  start():                     |   |                |
+|  |                                        |                                          |   |         _pc = mp.start_processes +----------->          |
+|  |                                        |                                          |   |                                    |   |                |
+|  |   while True:                          |      +--------------------------------+  |   |                                    |   |                |
+|  |       _monitor_workers(_worker_group)+------> | _monitor_workers               |  |   |                                    |   |                |
+|  |                                        |      |                                |  |   |                                    |   |                |
+|  |                                        |      |             _pcontext.wait +--------------->  wait +---> poll:             |   |                |
+|  |                                        |      |                                |  |   |                    _pc.join  +--------------->          |
+|  +----------------------------------------+      +--------------------------------+  |   |                                    |   |                |
+|                                                                                      |   |                                    |   |                |
++--------------------------------------------------------------------------------------+   +------------------------------------+   +----------------+
+
+
+'''
 class MultiprocessContext(PContext):
     """
     ``PContext`` holding worker processes invoked as a function.
@@ -411,18 +445,19 @@ class MultiprocessContext(PContext):
 
         # see comments in ``join()`` for what this is
         self._return_values: Dict[int, Any] = {}
-        self._pc: Optional[mp.ProcessContext] = None
+        self._pc: Optional[mp.ProcessContext] = None # 这里是关键
         # Note: set method should ONLY be invoked for the use case when all processes finished
         # successfully. If any process died on event.wait() calling set() method will deadlock.
         self._worker_finished_event = mp.get_context(self.start_method).Event()
 
+    #MultiprocessContext start 是调用mp.start_processes，然后保存结果。
     def _start(self):
         if self._pc:
             raise ValueError(
                 "The process context already initialized."
                 " Most likely the start method got called twice."
             )
-        self._pc = mp.start_processes(
+        self._pc = mp.start_processes(  # 这里返回了 mp.ProcessContext
             fn=_wrap,
             args=(
                 self.entrypoint,
@@ -442,10 +477,24 @@ class MultiprocessContext(PContext):
     def _is_done(self) -> bool:
         return len(self._return_values) == self.nprocs
 
+    '''
+    _poll 函数是具体做检测的，调用了 torch.mp.ProcessContext.join 来做检测。
+    torch.mp.ProcessContext 在部分/所有工作进程失败时引发异常。
+    如果超时，则会检查工作进程状态并立即返回。
+    因为我们使用 synchronize.Event 等待所有进程完成，所以 Join 将永远不会返回成功。
+
+    PyTorch 使用 multiprocessing.Queue 将工作进程返回值带回父进程，最后返回的结果内部就包括每个进程的运行结果。
+    '''
     def _poll(self) -> Optional[RunProcsResult]:
         assert self._pc is not None  # assertion for mypy type checker
 
         try:
+            '''
+            2.4.2 ProcessContext
+torch.mp.ProcessContext 才是最终发挥作用的类。其实，torch.mp.ProcessContext 的内部实现和如何启动我们并不在意，因为通过 start_processes 方法，torch.mp.ProcessContext 事实上已经启动了，我们把它当作一个功能性黑盒子即可，我们真正关心的是如何使用 torch.mp.ProcessContext 来进行监控。
+
+从其注释中我们可以知道，torch.mp.ProcessContext在部分/所有工作进程失败时引发异常。如果超时，则会检查工作进程状态并立即返回。因为我们使用synchronize.Event等待所有进程完成，所以Join将永远不会返回成功。
+            '''
             # torch.mp.ProcessContext Throws an Exception if some/all of
             # worker processes failed
             # timeout < 0 checks worker status and return immediately
@@ -459,11 +508,11 @@ class MultiprocessContext(PContext):
             # pipe. Hence to prevent deadlocks on large return values,
             # we opportunistically try queue.get on each join call
             # See: https://docs.python.org/2/library/multiprocessing.html#all-platforms
-            for local_rank in range(0, self.nprocs):
+            for local_rank in range(0, self.nprocs):  # 遍历自己下面的进程
                 return_queue = self._ret_vals[local_rank]
                 if not return_queue.empty():
                     # save the return values temporarily into a member var
-                    self._return_values[local_rank] = return_queue.get()
+                    self._return_values[local_rank] = return_queue.get() # 得到进程运行结果
 
             if self._is_done():
                 # we should ALWAYS have ALL the return values when all the processes are done
@@ -476,7 +525,7 @@ class MultiprocessContext(PContext):
                 )
                 self.close()
                 return RunProcsResult(
-                    return_values=self._return_values,
+                    return_values=self._return_values, # 返回进程结果
                     stdouts=self.stdouts,
                     stderrs=self.stderrs,
                 )

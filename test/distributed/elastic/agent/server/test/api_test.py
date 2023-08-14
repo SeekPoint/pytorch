@@ -138,7 +138,7 @@ class TestAgent(SimpleElasticAgent):
     def _monitor_workers(self, worker_group: WorkerGroup) -> RunResult:
         raise NotImplementedError("mock this method")
 
-    def _shutdown(self):
+    def _shutdown(self):  #停止 workers 就是关闭上下文。
         pass
 
 
