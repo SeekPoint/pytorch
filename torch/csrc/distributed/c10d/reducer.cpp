@@ -1609,9 +1609,10 @@ void Reducer::populate_bucket_views_out(
   }
 }
 
+//这里把 num_iterations_ 增加，并且记录时间。
 void Reducer::prepare_for_forward() {
   std::lock_guard<std::mutex> lock(mutex_);
-  num_iterations_++;
+  num_iterations_++; // 这里会递增
   if (should_collect_runtime_stats()) {
     record_forward_compute_start_time();
   }
@@ -1676,6 +1677,11 @@ autograd_hook 之中会递减，然后如果是 0，就设置此变量为 ready�
                    v
 
 
+
+这里会遍历桶，对于每个桶，重置其副本的pending状态，某一个模型副本pending状态是由这个模型副本中对应桶的变量数目决定。
+
+如果是静态图，则重置numGradHooksTriggeredMapPerIteration_。
+
 */
 void Reducer::reset_bucket_counting() {
   next_bucket_ = 0;
@@ -1683,8 +1689,8 @@ void Reducer::reset_bucket_counting() {
   // in each iteration.
   num_buckets_ready_ = 0;
 
-  for (auto& bucket : buckets_) {
-    bucket.pending = bucket.variables.size();
+  for (auto& bucket : buckets_) {   // 遍历桶
+    bucket.pending = bucket.variables.size(); //对于每个桶，重置其副本的pending状态，某一个模型副本pending，是由这个模型副本中，本桶的变量数目决定
   }
 
   if (static_graph_) {
@@ -1692,6 +1698,21 @@ void Reducer::reset_bucket_counting() {
   }
 }
 
+/*
+3.3.2 查找未使用的参数
+search_unused_parameters 完成了 "查找未使用的参数" 功能。
+
+我们首先要看看 Reducer 的 find_unused_parameters_ 成员变量。如果 find_unused_parameters_ 被设置为 true，则 DDP 会在前向传播结束时候，从指定的输出进行回溯，遍历autograd计算图来找到所有没有使用过的参数，并且一一标记为就绪 ready。
+
+对于所有参数，DDP 都有一个指向它们的梯度累积函数的指针，但对于那些autograd图中不存在的参数，它们将在第一次调用autograd钩子时就被标记为准备就绪。
+
+因为模型输出可能会被忽略，所以这个操作不是立即完成的，我们只是像在torch.autograd.backward()这里开始执行规约操作。
+
+大家可以发现，这么做开销会很大，为什么要这么做？这是因为计算动态图会改变。
+
+训练时候，某次迭代可能只用到模型的一个子图，而且因为PyTorch 是动态计算，所以子图会在迭代期间改变，就是说，某些参数可能在下一次迭代训练时候被跳过。
+同时，因为所有参数在一开始就已经被分好桶，而 hook 又规定了只有整个桶 ready （即，pending == 0）之后才会进行通信，所以如果我们不将未使用参数标记为 ready，整个通信过程就会没法进行。
+*/
 // Traverse the autograd graph starting at the specified output.
 // All parameters for which we have a pointer to their gradient accumulation
 // functions, but don't show up in the autograd graph will be marked ready for
@@ -1714,11 +1735,12 @@ void Reducer::search_unused_parameters(
   for (const auto& output : outputs) {
     const auto& grad_fn = output.grad_fn();
     if (grad_fn) {
-      queue.push_back(grad_fn.get());
+      queue.push_back(grad_fn.get()); // 把所有输出节点的梯度函数插入到queue
     }
   }
 
   // Traverse the autograd graph starting at the specified output.
+  // 遍历这个queue中的元素，对于每一个函数，找到其后向图之中的后续边，然后把后续边指向的节点再插入queue，然后继续循环，最终 seen 里面是所有从output出发，所有节点的梯度函数
   while (!queue.empty()) {
     auto fn = queue.back();
     queue.pop_back();
@@ -1734,6 +1756,17 @@ void Reducer::search_unused_parameters(
 
   // Find accumulator functions that don't show up in this graph.
   // 遍历查找，如果某一个accumulator 函数没有在这图里面，就说明不用计算梯度
+  // gradAccToVariableMap_ 里面是所有需要被规约的variable
+  // 遍历gradAccToVariableMap_，如果 seen 之中没有，就说明这个参数没有被使用，插入到unused_parameters_
+  /*
+  至此，前向传播已经结束，我们得到了如下：
+
+需要计算梯度的参数已经分桶。
+桶已经重建完毕。
+前向传播已经完成。
+从指定的输出进行回溯，遍历autograd计算图来找到所有没有使用过的参数，并且一一标记为就绪 ready。
+我们在下一篇就分析后向传播。
+  */
   for (const auto& it : gradAccToVariableMap_) {
     // If the accumulator function is present in the graph, we know
     // a gradient will be computed for the corresponding parameter.
@@ -1782,10 +1815,20 @@ void Reducer::search_unused_parameters(
   }
 }
 
+/*
+3.2.3 初始化桶
+同步之后就是初始化桶，本部分代码在前文已经分析过，故此省略。
+
+3.3 准备后向传播
+前向传播完成之后，调用 prepare_for_backward 完成了后向传播的准备。
+
+具体大致分为两步：重置，查找未使用的参数。
+*/
 void Reducer::prepare_for_backward(
     const std::vector<torch::autograd::Variable>& outputs) {
   std::lock_guard<std::mutex> lock(mutex_);
 
+  // 记录开始时间
   backward_compute_start_time_ = current_time_in_nanos();
   if (should_collect_runtime_stats()) {
     record_backward_compute_start_time();
@@ -1812,7 +1855,7 @@ void Reducer::prepare_for_backward(
   // and we don't have to search the autograd graph for presence of these hooks.
   if (dynamic_graph_find_unused()) {
     unused_parameters_.clear();
-    search_unused_parameters(outputs);
+    search_unused_parameters(outputs);  // 查找没有使用的参数
   }
 }
 
@@ -2074,25 +2117,40 @@ void Reducer::RpcContext::set(ContextPtr&& new_context_ptr) {
   }
 }
 #endif
+/*
+3.2.2 同步桶indices
+产生尺寸之后，就使用 sync_bucket_indices 同步桶的indices，其逻辑如下：
 
+遍历桶，把桶的大小都记录到bucket_sizes。
+配置TensorOptions。
+把桶对应的indices和桶数目放入indices_tensor，这里是通过 PyTorch accessor来对张量进行读写，accessor就像是一个张量，但它将张量的维度和 dtype 硬编码为了模板参数，可以高效的访问元素。
+因为 NCCL这样的 ProcessGroup 只支持device之间的操作，所以把indices_tensor拷贝到indices_tensor_device。
+对 indices_tensor_device 进行广播。
+类似，对桶尺寸进行广播。
+广播结束之后，遍历桶，使用从rank 0收到的num_buckets, bucket_sizes_tensor 和 indices_tensor 更新传进来的参数bucket_indices。
+*/
 void Reducer::sync_bucket_indices(
     std::vector<std::vector<size_t>>& bucket_indices) {
   auto num_buckets = bucket_indices.size();
   std::vector<size_t> bucket_sizes;
   bucket_sizes.reserve(num_buckets);
   int64_t total_size = 0;
+
+  // 遍历桶，把桶的大小都记录到bucket_sizes
   for (const auto i : c10::irange(num_buckets)) {
     auto bucket_size = bucket_indices.at(i).size();
     bucket_sizes.push_back(bucket_size);
     total_size += bucket_size;
   }
 
+  // 配置TensorOptions
   at::TensorOptions options;
   options = options.dtype(at::kInt);
   options = options.device(params_[0].device());
 
   // Group indices and num_bucket together into indices_tensor
   // Broadcast this tensor first, as its size is equal among all processes
+  // 把桶对应的indices和桶数目放入indices_tensor，这里是通过 PyTorch accessor来对张量进行读写，accessor就像是一个张量，但它将张量的维度和 dtype 硬编码为了模板参数，可以高效的访问元素
   auto indices_tensor = at::empty({total_size + 1}, at::kInt);
   auto indices_accessor = indices_tensor.accessor<int, 1>();
   auto indices_accessor_Index = 0;
@@ -2107,15 +2165,19 @@ void Reducer::sync_bucket_indices(
   // Copy CPU tensor to device tensor, as the process_group_ could be NCCL and
   // it can only broadcast device tensors.
   auto indices_tensor_device = at::empty({total_size + 1}, options);
+
+  //// 因为 NCCL这样的 ProcessGroup 只支持device之间的操作，所以把indices_tensor拷贝到indices_tensor_device
   indices_tensor_device.copy_(indices_tensor, /*non_blocking=*/true);
   std::vector<at::Tensor> indices_tensor_list = {indices_tensor_device};
+
+  //// 对 indices_tensor_device 进行广播
   process_group_->broadcast(indices_tensor_list)->wait();
   indices_tensor.copy_(indices_tensor_list.front(), /*non_blocking=*/false);
 
   // Update num_buckets after receiving it from rank 0
   num_buckets = indices_accessor[indices_accessor_Index];
 
-  // Broadcast bucket_sizes
+  // Broadcast bucket_sizes // 类似，对桶尺寸进行广播
   auto bucket_sizes_tensor = at::empty({(int64_t)num_buckets}, at::kInt);
   auto bucket_sizes_accessor = bucket_sizes_tensor.accessor<int, 1>();
   for (const auto i : c10::irange(num_buckets)) {
@@ -2137,6 +2199,7 @@ void Reducer::sync_bucket_indices(
   bucket_indices.clear();
   bucket_indices.reserve(num_buckets);
   indices_accessor_Index = 0;
+  // 遍历桶，使用从rank 0收到的num_buckets, bucket_sizes_tensor 和 indices_tensor 更新传进来的参数bucket_indices
   for (const auto i : c10::irange(num_buckets)) {
     const auto& bucket_size = bucket_sizes_accessor[i];
     std::vector<size_t> bucket;
@@ -2159,6 +2222,13 @@ rebuild_buckets 函数进行广播通信调用，并且可以与下一个forward
 
 在find_unused_parameters=true情况下重建bucket 就是异步操作，因为我们可以多次重建bucket，其中子图经过训练，参数索引顺序可能会更频繁地更改。
 对于find_unused_parameters=false的情况，bucket只重建一次，性能成本可以忽略不计。如果已重建存储桶， rebuild_buckets 则返回true。
+
+接下来进行重建桶，具体分为：
+
+配置各种尺寸限制。
+计算桶的尺寸。
+同步桶indices。
+初始化桶。
 */
 bool Reducer::rebuild_buckets() {
   // Ensure reduction for previous backwards pass is finished. If user's model
@@ -2187,9 +2257,12 @@ bool Reducer::rebuild_buckets() {
           " versus rebuilt params size of: ",
           rebuilt_param_indices_.size()));
   std::vector<std::vector<size_t>> rebuilt_bucket_indices;
+
+  // 配置各种尺寸限制
   std::vector<size_t> bucket_size_limits;
   bucket_size_limits.push_back(first_bucket_bytes_cap_);
   bucket_size_limits.push_back(bucket_bytes_cap_);
+
   std::vector<size_t> per_bucket_size_limits;
   auto ddp_set_last_bucket_as_small =
       (parse_env("DDP_SET_LAST_BUCKET_CAP") == "1");
@@ -2203,6 +2276,7 @@ bool Reducer::rebuild_buckets() {
     std::reverse(rebuilt_params_.begin(), rebuilt_params_.end());
     std::reverse(rebuilt_param_indices_.begin(), rebuilt_param_indices_.end());
   }
+  // 计算桶的尺寸
   std::tie(rebuilt_bucket_indices, per_bucket_size_limits) =
       compute_bucket_assignment_by_size(
           rebuilt_params_,
@@ -2229,12 +2303,14 @@ bool Reducer::rebuild_buckets() {
   // For rebuilt bucket indices, it needs to be synced across all ranks.
   // Broadcast the newly rebuilt bucket indices from rank 0 in default.
   // After syncing up rebuilt bucket indices, initialize buckets for reducer.
+  // 同步桶indices
   sync_bucket_indices(rebuilt_bucket_indices);
 
   has_rebuilt_bucket_ = true; // 只重建一次
   rebuilt_params_.clear();
   rebuilt_param_indices_.clear();
 
+  // 初始化桶
   initialize_buckets(std::move(rebuilt_bucket_indices));
 
   return true;
@@ -2521,6 +2597,35 @@ result 最终如下，里面每个vector 都对应了一个bucket，里面是都
 |                                                                       |
 +-----------------------------------------------------------------------+
 
+
+
+
+其次，我们来看看 compute_bucket_assignment_by_size的具体逻辑：
+
+生成一个计算结果 result，并且使用参数tensors的大小来为result预留出空间。
+
+生成一个buckets，这是所有桶的列表，每一个实际桶可以认为是 BucketAccumulator
+
+遍历传入的所有张量，对于每一个张量：
+
+如果有index，就拿到张量的index。
+如果配置了期待sparse gradient，则把这个张量自己放入一个桶，因为没法和其他张量放在一起。
+使用张量信息构建桶的key。
+使用 key 找到对应的桶, 拿到BucketAccumulator。
+向该桶的张量列表 indices 里面插入新张量的index，indices 是 tensor index list。
+增加对应桶大小。
+如果需要，就设定成大小限制的初始值。
+如果桶的尺寸大于最小值限制，就是说目前桶的尺寸已经达到了桶的最大限制，按说需要转移到新桶了（实际上确实转移到了逻辑的新桶，但是实际还是在现有桶内执行，因为 type, device 还是同样的，还是应该在原有桶内继续累积，不过原有桶的indice已经转移到了result之中，就相当于清空了）。
+把桶内容插入到返回result，就是说，当桶尺寸过大的时候，就先插入到result之中。
+利用 BucketAccumulator() 重新生成桶，bucket是个引用，所以直接赋值，就相当于清空原有的桶，就是原来桶继续用，但是桶内原有的indices已经转移到了result之中。
+把剩余的桶内indices插入到返回值result。之前已经有些直接插入到了result之中。
+
+对 result 进行排序：
+
+如果 tensor_indices 非空，说明张量的顺序已经是梯度准备好的顺序，不需要再排序了。
+如果 tensor_indices 是空的，依据最小张量index来排序，这里假定张量的顺序是他们使用的顺序（或者说是他们梯度产生次序的反序）。这种排序可保证桶是按照连续不断的顺序准备好。
+注意，这里就是正序排列，等到创建Reducer的时候，才反序传入：list(reversed(bucket_indices))
+另外需要注意的是：因为 tensors就是 Python 代码中的参数 parameters[0]，而 parameters[0] 是按照 parametes() 的返回结果来的，所以DDP最终是按model.parameters()的相反顺序启动AllReduce。
 
 
 */

@@ -636,6 +636,7 @@ class DistributedDataParallel(Module):
         with torch.autograd.profiler.record_function(
             "DistributedDataParallel.pre_forward"
         ):
+            # 如果做配置，则调用 reducer 为forward做准备
             if torch.is_grad_enabled() and self.require_backward_grad_sync:
                 assert self.logger is not None
                 self.logger.set_runtime_stats_and_log()
@@ -648,6 +649,12 @@ class DistributedDataParallel(Module):
             # call _rebuild_buckets before the peak memory usage increases
             # during forward computation.
             # This should be called only once during whole training period.
+            '''
+            # 在前向传播之前使用 _rebuild_buckets 来重置桶
+            # 在此函数内，也许在释放旧bucket之前分配新bucket。
+            # 如果要节省峰值内存使用量，请在正向计算期间峰值内存使用量增加之前调用_rebuild_bucket。
+            # 在整个训练期间，这只能调用一次。
+            '''
             if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
                 logger.info("Reducer buckets have been rebuilt in this iteration.")
                 self._has_rebuilt_buckets = True

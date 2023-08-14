@@ -794,6 +794,7 @@ class ZeroRedundancyOptimizer(Optimizer, Joinable):
                     )
         return handles
 
+    #其中，使用 _sync_params 来同步模型参数，具体是使用 _distributed_broadcast_coalesced 进行完成。
     def _sync_params(self):
         r"""
         Syncs all parameter shards across the ranks.
