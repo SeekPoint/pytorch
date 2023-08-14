@@ -441,6 +441,8 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
         """See base class."""
         return self._state
 
+    #在 run 函数之中，需要注意的是：在执行各种算子操作之前，会调用 self._state_holder.sync() 在各个 worker 之间进行一个状态同步，达成共识 （consensus）。
+    #torch/distributed/elastic/rendezvous/c10d_rendezvous_backend.py 之中是对应后端代码。
     def sync(self) -> Optional[bool]:
         """See base class."""
         state_bits: Optional[bytes] = None
@@ -449,16 +451,16 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
 
         has_set: Optional[bool]
 
-        if self._dirty:
+        if self._dirty: # 如果本node状态变化了
             has_set = False
 
             state_bits = pickle.dumps(self._state)
 
-            # 这里会对后端进行设置
+            # 这里会对后端进行设置  # 把自己的状态设置到backend之中
             set_response = self._backend.set_state(state_bits, self._token)
             if set_response is not None:
                 state_bits, token, has_set = set_response
-        else:
+        else:  # 自己没变化，只能从后端获取
             has_set = None
 
             if self._cache_duration > 0:
@@ -467,13 +469,13 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
                 if self._last_sync_time >= max(time.monotonic() - self._cache_duration, 0):
                     return None
 
-            get_response = self._backend.get_state()
+            get_response = self._backend.get_state()  # 从backend获取其他节点最新状态
             if get_response is not None:
                 state_bits, token = get_response
 
         if state_bits is not None:
             try:
-                self._state = pickle.loads(state_bits)
+                self._state = pickle.loads(state_bits) # 用后端状态更新本身的状态
             except pickle.PickleError as exc:
                 raise RendezvousStateError(
                     "The rendezvous state is corrupt. See inner exception for details."
@@ -501,6 +503,9 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
 
         return has_set
 
+    '''
+    _sanitize 方法用来依据其他节点消息做处理，比如清理故障节点。即，如果上一次的心跳时间超过了一定阈值范围，则会把这些节点标记为dead_node，并且从 participant或者wait list中清除这些节点。
+    '''
     def _sanitize(self) -> None:
         state = self._state
 
@@ -518,17 +523,17 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
         participant_removed = False
 
         for dead_node in self._dead_nodes:
-            del state.last_heartbeats[dead_node]
+            del state.last_heartbeats[dead_node]  # 移除故障节点
 
             try:
-                del state.participants[dead_node]
+                del state.participants[dead_node]  # 移除故障节点
 
                 participant_removed = True
             except KeyError:
                 pass
 
             try:
-                state.wait_list.remove(dead_node)
+                state.wait_list.remove(dead_node) # 移除故障节点
             except KeyError:
                 pass
 
@@ -547,6 +552,55 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
         """
         self._dirty = True
 
+'''
+0x03 算子
+_RendezvousOpExecutor 引擎的业务逻辑被分成两层：用户操作 和 内部业务逻辑。用户操作和内部业务机制之间被解耦。
+
+用户操作被分成各种算子，包括：心跳，Join，关闭，结束。比如Join 算子就是 _RendevzousJoinOp。
+
+内部业务逻辑被分成各种业务函数，比如 _add_to_participants 方法从等待列表中移除节点，往 participants 加入这个节点。
+
+算子和内部业务逻辑并不是一一对应，需要一个类似状态机的机制来控制。
+
+比如，心跳操作算子的结果可能是：超时/keep alive/正常结束，所以应该根据这个结果调用不同的内部业务函数。这种对应关系逻辑就是通过 Action 来完成的。
+各种算子联合起来，聚合成了一个状态机。
+算子内部就是生成各种 Action，决定了状态机的下一步操作。
+引擎内部就是根据 Action 来执行具体业务逻辑，或者可以说，是通过 Action 进行解耦。
+
+具体如下，引擎从逻辑上可以分成三层：最上面是算子层，中间是 Action 层，下面是业务函数层。
+
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+| _RendezvousKeepAliveOp    _RendezvousCloseOp    _RendezvousExitOp    _RendezvousJoinOp  |
+|                                                                                         |
++-------------+---------------------+--------------------+------------------+-------------+
+              |                     |                    |                  |
+              |                     |                    |                  |
+              |                     |                    |                  |
+              |                     |                    |                  |
+              v                     v                    v                  v
+
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+| KEEP_ALIVE   ADD_TO_PARTICIPANTS   ADD_TO_WAIT_LIST   REMOVE_FROM_WAIT_LIST   ......    |
+|                                                                                         |
++-------------+----------+----------+----------+---------+---------+---------+------------+
+              |          |          |          |         |         |         |
+              |          |          |          |         |         |         |
+              |          |          |          |         |         |         |
+              |          |          |          |         |         |         |
+              v          v          v          v         v         v         v
+
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+| _add_to_participants    _remove_from_participants     _add_to_wait_list        ......   |
+|                                                                                         |
+|                                                                                         |
++-----------------------------------------------------------------------------------------+
+我们逐一解析。
+
+
+'''
 
 class _Action(Enum):
     """Specifies the possible actions based on the state of the rendezvous."""
@@ -563,7 +617,8 @@ class _Action(Enum):
     ERROR_TIMEOUT = 10
     FINISH = 11
 
-
+# 其作用是把 Rendezvous 的各种信息封装了起来，提供给操作引擎。
+# 这里就有了 _RendezvousState 和 RendezvousSettings 的使用。
 class _RendezvousContext:
     """Holds the context of the rendezvous.
 
@@ -588,7 +643,70 @@ class _RendezvousContext:
         self.state = state
         self.settings = settings
 
+'''
+0x01 前言
+1.1 总体系统
+弹性训练可以理解为在 Rendezvous 基础之上的一个运行系统。
 
+
+
+Agent 偏重具体节点上的逻辑
+
+    Agent 负责具体业务逻辑相关操作，比如启动进程执行用户程序，监控用户程序运行情况，如果有异常就通知 Rendezvous。
+    Agent 是一个 worker manager，负责启动/管理 workers 进程，组成一个 worker group，监控 workers 运行状态，捕获失效 workers，如果有故障/新加入worker，则重启 worker group。
+    Agent负责维护 WORLD_SIZE 以及 RANK 信息。用户不需要再手动提供，Agent会自动处理这些。
+    Agent 是具体节点上的后台进程，是独立个体。Agent自己无法实现整体上的弹性训练，所以需要一个机制来完成 worker 之间的相互发现，变更同步等等（WORLD_SIZE 和 RANK 这些信息其实也需要多个节点同步才能确定），这就是下面的 Rendezvous 概念。
+Rendezvous 负责
+
+集群逻辑
+
+，保证节点之间对于""有哪些节点参与训练"达成强一致共识。
+
+    每一个 Agent 内部包括一个 Rendezvous handler，这些 handler 总体上构成了一个 Rendezvous 集群，从而构成了一个 Agent 集群。
+    Rendezvous 完成之后，会创建一个共享键值存储（shared key-value store），这个store实现了一个torch.distributed.Store API。此存储仅由已完成Rendezvous的成员共享，它旨在让Torch Distributed Elastic在初始化作业过程之中交换控制和数据信息。
+    Rendezvous 负责在每个agent之上维护当前 group 所有相关信息。每个 agent 之上有一个 rendezvous，它们会互相通信，总体维护一套信息，这些信息存储在上面提到的Store 之中。
+    Rendezvous 负责集群逻辑相关，比如新加入节点，移除节点，分配rank等等。
+1.2 Rendezvous
+目前为止，Rendezvous 信息如下，DynamicRendezvousHandler 属于动态逻辑，其中，_RendezvousStateHolder 是状态等元信息存储（静态结构），大家会发现图中还有一个 _RendezvousOpExecutor 没有介绍，这就是运行时引擎，所以我们本文看看 _RendezvousOpExecutor 如何处理。
+
++-----------------------------+      +------------------------------------------------+
+| LocalElasticAgent           |      | WorkerSpec                                     |
+|                             |      |                                                |
+| +------------------------+  |      |   rdzv_handler = {DynamicRendezvousHandler} -------+
+| |WorkerGroup             |  |      |                                                |   |
+| |            spec +--------------> |   entry = worker_fn                            |   |
+| |            workers     |  |      |                                                |   |
+| |            store       |  |      |   role = {str} 'trainer'                       |   |
+| |            group_rank  |  |      |                                                |   |
+| |       group_world_size |  |      +------------------------------------------------+   |
+| |                        |  |                                                           |
+| +------------------------+  |                                                           |
+|                             |                                                           |
+| rdzv_run_id                 |                                                           |
+| store                       |            +-----------------------------------------+    |
+|                             |            |DynamicRendezvousHandler                 |    |
++-----------------------------+            |                                         |    |
+                                           |                                         |    |
+                                           |   _settings: RendezvousSettings         | <--+
+                                           |                                         |
+                                           |   _store: Store                         |
+                                           |                                         |
+                                           |   _state_holder: _RendezvousStateHolder |
+                                           |                                         |
+                                           |   _op_executor: _RendezvousOpExecutor   |
+                                           |                                         |
+                                           +-----------------------------------------+
+1.3 解耦
+_RendezvousOpExecutor 把功能分割解耦：
+
+    业务逻辑被抽象成为一系列算子，比如 _RendevzousJoinOp。
+    Rendezvous 内部维护了一套由业务函数组成的状态机，比如函数 _add_to_participants 用来添加参与者。
+    _RendezvousOpExecutor 引擎来执行各种算子，依据算子结果，得到一个 Action，再利用 Action 调用业务函数进行操作。
+本文主要介绍C10d 后端对应的 Rendezvous 引擎。
+
+
+_RendezvousOpExecutor 是引擎的基类，只是定义了run这个虚函数。
+'''
 class _RendezvousOpExecutor(ABC):
     """Executes rendezvous operations."""
 
@@ -612,7 +730,51 @@ class _RendezvousOpExecutor(ABC):
                 timed-out.
         """
 
+'''
+2.2 分布式操作引擎
+_DistributedRendezvousOpExecutor 拓展了 _RendezvousOpExecutor，是 ElasticTorch 的实际执行者。类似于 Looper，负责消息分发，调用业务，状态维护。
 
+2.2.1 定义
+与其基类相比，_DistributedRendezvousOpExecutor 加入了比如节点信息，状态，配置这样的成员变量。
+
+
+逻辑如下：
+
++---------------------------------------------------------------+
+| _DistributedRendezvousOpExecutor                              |
+|                                                               |
+|                     +------------------------+                |
+|        _state +---> | _RendezvousState       |                |
+|                     |                        |                |
+|                     |       participants     |                |
+|                     |       wait_list        |                |
+|                     |       last_heartbeats  |                |
+|                     |       deadline         |                |
+|                     +------------------------+                |
+|                                                               |
+|                     +-------------------------+               |
+|      _settings +--> | RendezvousSettings      |               |
+|                     |                         |               |
+|                     +-------------------------+               |
+|                                                               |
+|                     +--------------------------------------+  |
+| _state_holder +---> | _BackendRendezvousStateHolder        |  |
+|                     |                                      |  |
+|                     |        _backend: RendezvousBackend   |  |
+|                     |        _state: _RendezvousState      |  |
+|                     |        _settings: RendezvousSettings |  |
+|                     |                                      |  |
+|                     +--------------------------------------+  |
+|                     +--------------------------------------+  |
+|                     | _NodeDesc                            |  |
+|     _node +-------> |              fqdn: str               |  |
+|                     |              pid: int                |  |
+|                     |              local_id: int           |  |
+|                     |                                      |  |
+|                     +--------------------------------------+  |
++---------------------------------------------------------------+
+
+'''
 class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
     """Executes rendezvous operations using a shared state.
 
@@ -689,7 +851,43 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
 +-------------------------------+                                      +                                        +-------------------------------+
 
 
+run 函数实现了基础逻辑，就是依据 action 类型进行各种操作。
 
+具体如下图。
+
++-----------------------------------------+                          +---------------------------------------------------------------+
+|DynamicRendezvousHandler                 |                          | _DistributedRendezvousOpExecutor                              |
+|                                         |                          |                                                               |
+|                                         |                          |                     +------------------------+                |
+|   _settings: RendezvousSettings         |                          |        _state +---> | _RendezvousState       |                |
+|                                         |                          |                     |                        |                |
+|                                         |                          |                     |       participants     |                |
+|   _store: Store                         |                          |                     |       wait_list        |                |
+|                                         |                          |                     |       last_heartbeats  |                |
+|                                         |                          |                     |       deadline         |                |
+|   _state_holder: _RendezvousStateHolder |                          |                     +------------------------+                |
+|                                         | run(_RendezvousJoinOp()) |                     +-------------------------+               |
+|                                         |                          |      _settings +--> | RendezvousSettings      |               |
+|   _op_executor  +------------------------------------------------> |                     |                         |               |
+|                                         |                          |                     +-------------------------+               |
+|                                         |                          |                     +--------------------------------------+  |
++-----------------------------------------+                          | _state_holder +---> | _BackendRendezvousStateHolder        |  |
+                                                                     |                     |                                      |  |
+                                                                     |                     |        _backend: RendezvousBackend   |  |
+                                                                     |                     |        _state: _RendezvousState      |  |
+                                                                     |                     |        _settings: RendezvousSettings |  |
+                                                                     |                     |                                      |  |
+                                                                     |                     +--------------------------------------+  |
+                                                                     |                     +--------------------------------------+  |
+                                                                     |                     | _NodeDesc                            |  |
+                                                                     |     _node +-------> |              fqdn: str               |  |
+                                                                     |                     |              pid: int                |  |
+                                                                     |                     |              local_id: int           |  |
+                                                                     |                     |                                      |  |
+                                                                     |                     +--------------------------------------+  |
+                                                                     +---------------------------------------------------------------+
+                                                                     
+                                                                    
     '''
 
     def run(
@@ -700,10 +898,12 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         """See base class."""
         action = None
 
-        while action != _Action.FINISH:
+        while action != _Action.FINISH: # 循环，一直到获得一个FINISH action 为止
             # Reads or writes the latest rendezvous state shared by all nodes in
             # the rendezvous. Note that our local changes might get overridden
             # by another node if that node synced its changes before us.
+
+            # 这里很重要，在所有node之间做信息同步
             has_set = self._state_holder.sync()  # 这里要同步各种状态，因为最新状态在 rendezvous。
             if has_set is not None:
                 if has_set:
@@ -726,6 +926,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
 
             # Determine the next action to take based on the current state of
             # the rendezvous.
+            # 决定下一个操作，state_handler 就是算子
             action = state_handler(ctx, deadline)
 
             if action == _Action.FINISH:
@@ -761,6 +962,12 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                 # 再次同步，把自己状态同步给其他节点
                 self._state_holder.mark_dirty()
 
+    '''
+    接收到 KEEP_ALIVE action之后，会调用到 _keep_alive 来维持心跳。
+    另外，keep_alive 也会在 _add_to_participants等方法内被调用，会更新本地state之中的last heartbeats，
+    下一次 sync 时候，会把 last_heartbeats 写入键值存储，这样其他Node就可以知道这个节点的状态了。
+    而本地则会在 _sanitize 之中依据 last_heartbeats 做处理，我们之前提到过。
+    '''
     def _keep_alive(self) -> None:
         msg = (
             f"The node '{self._node}' updated its keep-alive heartbeat time for the rendezvous "
@@ -771,6 +978,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
 
         self._state.last_heartbeats[self._node] = datetime.utcnow()
 
+    #接受到 ADD_TO_PARTICIPANTS 之后，调用 _add_to_participants 从等待列表中移除节点，往 participants 加入这个节点。
     def _add_to_participants(self) -> None:
         msg = (
             f"The node '{self._node}' added itself to the participants of round "
@@ -798,6 +1006,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         if len(state.participants) == self._settings.max_nodes:
             self._mark_rendezvous_complete()
 
+    # 接受到 ADD_TO_WAIT_LIST 之后，调用 _add_to_wait_list 网 wait_list 中加入节点。
     def _add_to_wait_list(self) -> None:
         msg = (
             f"The node '{self._node}' added itself to the wait list of round "
@@ -810,6 +1019,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
 
         self._keep_alive()
 
+    #接受到 REMOVE_FROM_PARTICIPANTS 之后，调用 _remove_from_participants 从 participants 和 last_heartbeats 中删除参与者。
     def _remove_from_participants(self) -> None:
         msg = (
             f"The node '{self._node}' removed itself from the participants of round "
@@ -828,6 +1038,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         # _BackendRendezvousStateHolder.
         _remove_participant_epilogue(state, self._settings)
 
+    # 接受到 REMOVE_FROM_WAIT_LIST 之后，调用 _remove_from_wait_list 从 wait_list 移除节点。
     def _remove_from_wait_list(self) -> None:
         msg = (
             f"The node '{self._node}' removed itself from the wait list of round "
@@ -843,6 +1054,11 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
     '''
     state.participants 从哪里来？在 rendezvous 结束时候，会设置 rank。
     因为每个节点上都是按照同样算法排序，所以rank 排序在每个节点上都是一样的。可以保证每个Node得到的rank是与其他Node不同的。
+    
+    
+    接受到 MARK_RENDEZVOUS_COMPLETE 之后，当 rendezvous 聚合操作结束之后，给每一个参与者设置 rank。
+每个节点上都是按照同样算法排序，所以rank在每个节点上都是一样的。
+
     '''
     def _mark_rendezvous_complete(self) -> None:
         msg = (
@@ -881,7 +1097,7 @@ def _should_keep_alive(ctx: _RendezvousContext) -> bool:
 
     return last_heartbeat <= datetime.utcnow() - ctx.settings.keep_alive_interval
 
-
+#_RendezvousExitOp 依据当前状态和时间来确定下一步Action。如果本Node不在participants之中，不处理。否则返回一个从 participants 列表删除的下一步Action。如果超时则返回对应Action。
 class _RendezvousExitOp:
     """Represents a rendezvous exit operation."""
 
@@ -892,72 +1108,198 @@ class _RendezvousExitOp:
             return _Action.REMOVE_FROM_PARTICIPANTS
         return _Action.FINISH
 
+'''
+3.2.4 Join
+_RendezvousJoinOp 这里依据系统状态不同，做不同处理，比如试图把本Node加入到participant，或者 waiting list，或者继续等待，具体可以参见代码注释。
 
+    从上下文之中提取 _RendezvousState 状态，把结果存放在 state 之中。
+    如果状态是closed，则说明此时rendezvous已经结束，则返回_Action.ERROR_CLOSED。
+    看看是不是参与者，把结果存放在is_participant。
+    如果状态已经结束，且本节点已经是参与者，则说明 rendezvous 可以结束，返回 _Action.FINISH。
+    获取当前时间 now。
+    如果 now > deadline，说明已经超时。
+        如果还有时间做 rollback，说明本节点要返回之前的状态。
+        如果本节点已经是参与者，说明此时总节点数目没有达到 min，虽然已经是参与者，但是需要从参与者列表移除，所以返回 _Action.REMOVE_FROM_PARTICIPANTS。
+    如果本节点在等待列表之中，说明此时总节点数目没有达到 max，虽然在等待列表之中，但是需要从等待列表移除，所以返回_Action.REMOVE_FROM_WAIT_LIST。
+    否则返回_Action.ERROR_TIMEOUT。
+    否则没有超时，继续处理。
+        如果state.complete 并且本节点不是参与者（如果节点是参与者，前面已经处理过了），说明rendezvous 已经结束，如果还没有达到最大节点数目，并且当前node不在等待列表之中，就需要添加到等待节点列表，等待下次监控周期到的时候，重新做rendezvous，就可以把等待列表中的节点加入到参与列表之中。所以返回_Action.ADD_TO_WAIT_LIST。
+        如果本节点是参与者并且state不是complete状态（如果是complete状态，前面已经处理过了），如果已经达到了最小节点数 & 已经超时了，则说明rendezvous 已经结束，则返回_Action.MARK_RENDEZVOUS_COMPLETE。
+        否则说明没结束，本节点也不是参与者，则直接加入到参与者列表，返回_Action.ADD_TO_PARTICIPANTS。
+    如果需要保持心跳，就返回 _Action.KEEP_ALIVE。
+    否则返回_Action.SYNC。
+    
+    
+    
+具体逻辑如下：
+
+                           state.closed
+                        +-------------------------->   _Action.ERROR_CLOSED
+                        |
+                        |
+                        |  complete & participant
+                        +-------------------------->   _Action.FINISH
+                        |
+                        |
+                        |  timeout & participant
+                        +-------------------------->   _Action.REMOVE_FROM_PARTICIPANTS
+                        |
+                        |
+                        |  timeout & wait
+                        +-------------------------->   _Action.REMOVE_FROM_WAIT_LIST
+                        |
++-------------------+   |
+|                   |   |  timeout
+| _RendezvousJoinOp +------------------------------>   _Action.ERROR_TIMEOUT
+|                   |   |
++-------------------+   |  complete & < max & not wait
+                        |
+                        +-------------------------->   _Action.ADD_TO_WAIT_LIST
+                        |
+                        |  complete & participant & > min & deadline
+                        |
+                        +-------------------------->   _Action.MARK_RENDEZVOUS_COMPLETE
+                        |
+                        |  not complete & not participant
+                        |
+                        +-------------------------->   _Action.ADD_TO_PARTICIPANTS
+                        |
+                        |  _should_keep_alive
+                        |
+                        +-------------------------->   _Action.KEEP_ALIVE
+                        |
+                        |  else
+                        |
+                        +-------------------------->   _Action.SYNC
+
+以下是源码之中 ETCD 后端 Rendezvous 状态描述图，我们可以大致参考比对 c10d的状态。
+
+
+
+可见，etcd 后端的Join可以分为4个阶段：
+
+setup 阶段，会往固定目录写一个值，这是一个排他锁，如果写失败，说明目前正有一个 rendezvous 过程在进行中。
+join（joinable） 阶段。如果写值成功，则进入join 阶段。如果在等待时间结束或者参与训练的节点达到了最大值，则进入 frozen 阶段。
+frozen（confirm）阶段。需要所有节点都确认，进入最后的 final 阶段。
+final 阶段。分配rank，RANK 0 的实例成为 master。
+仿照上图，我们把 c10d 拓展如下。
+
+      +
+      |
+      |
+      v
++-----+------+
+|            |
+|   closed   +---------------> ERROR_CLOSED
+|            |
++-----+------+
+      |
+      |
+      v
++-----+------+  is_participant
+|            |
+|  complete  +---------------> FINISH
+|            |
++-----+------+
+      |                                                                                 is_participant
+      |
+      v                                                                                +----> REMOVE_FROM_PARTICIPANTS
++-----+-------+  now > deadline  +-----------+    now < rollback     +-----------+     |
+|             |                  |           |                       |           |     |
+|    join     +----------------> |  timeout  +---------------------->+ rollback  +-----+
+|             |                  |           |                       |           |     |
++-----+-------+                  +----+------+                       +-----------+     |
+      |                               |                                                | in state.wait_list
+      |                               |    now > rollback                              |
+      |  now < deadline               |                                                +----> REMOVE_FROM_WAIT_LIST
+      |                               +---------->  ERROR_TIMEOUT
+      |
+      |   complete && not is_participant && < max && not in state.wait_list
+      |
+      +------------------------------------------------------------------>  ADD_TO_WAIT_LIST
+      |
+      |   not complete && is_participant && > min && > deadline
+      |
+      +------------------------------------------------------------------>  MARK_RENDEZVOUS_COMPLETE
+      |
+      |   not complete && not is_participant
+      |
+      +----------------------------------------->  ADD_TO_PARTICIPANTS
+      |
+      |   _should_keep_alive
+      |
+      +--------------------------->  KEEP_ALIVE
+      |
+      |
+      v
+     SYNC
+    
+'''
 class _RendezvousJoinOp:
     """Represents a rendezvous join operation."""
 
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
-        state = ctx.state
+        state = ctx.state # 从上下文之中提取 _RendezvousState 状态
 
         # A closed rendezvous means that it no longer accepts new nodes.
         if state.closed:
-            return _Action.ERROR_CLOSED
+            return _Action.ERROR_CLOSED # 如果已经结束，就返回 _Action.ERROR_CLOSED
 
-        is_participant = ctx.node in state.participants
+        is_participant = ctx.node in state.participants # 看看是不是参与者
 
         # If we are part of the rendezvous and it is already complete there is
         # no further action to take.
-        if state.complete and is_participant:
+        if state.complete and is_participant: # 如果是参与者且状态是结束，就返回 _Action.FINISH
             return _Action.FINISH
 
         now = time.monotonic()
-        if now > deadline:
+        if now > deadline:  # 如果已经超时
             rollback_period = 5  # 5 seconds
 
             # If we still have time to rollback (a short period on top of the
             # operation deadline), try to remove ourself from the rendezvous.
             # It is okay if we can't though as our keep-alive will eventually
             # expire.
-            if now <= deadline + rollback_period:
+            if now <= deadline + rollback_period: # 如果还有时间来 rollback
                 # If we are part of the rendezvous, it means we couldn't find
                 # enough participants to complete it on time.
-                if is_participant:
+                if is_participant:   # 此时尚未达到min，虽然已经是参与者，但是需要移除
                     return _Action.REMOVE_FROM_PARTICIPANTS
                 # If we are in the wait list, it means we couldn't wait till the
                 # next round of the rendezvous.
-                if ctx.node in state.wait_list:
-                    return _Action.REMOVE_FROM_WAIT_LIST
-            return _Action.ERROR_TIMEOUT
+                if ctx.node in state.wait_list: # 此时已经达到 max，虽然已经在等待列表之中，需要移除
+                    return _Action.REMOVE_FROM_WAIT_LIST  # 需要从等待列表移除
+            return _Action.ERROR_TIMEOUT  # 返回超时
 
-        if state.complete:
+        if state.complete: # 如果 rendezvous 已经结束
             # If we are here, it means we are not part of the rendezvous. In
             # case the rendezvous has capacity for additional participants add
             # ourself to the wait list for the next round.
-            if len(state.participants) < ctx.settings.max_nodes:
-                if ctx.node not in state.wait_list:
-                    return _Action.ADD_TO_WAIT_LIST
-        elif is_participant:
+            if len(state.participants) < ctx.settings.max_nodes:  # 如果还没有达到最大节点数
+                if ctx.node not in state.wait_list:  # 如果当前node不在等待列表之中
+                    return _Action.ADD_TO_WAIT_LIST # 就加入到等待列表，发送一个等待action
+        elif is_participant:  # 如果已经在参与者列表
             # If the rendezvous has enough number of participants including us,
             # check whether we have passed the rendezvous deadline. If yes,
             # complete it.
-            if len(state.participants) >= ctx.settings.min_nodes:
-                if cast(datetime, state.deadline) < datetime.utcnow():
-                    return _Action.MARK_RENDEZVOUS_COMPLETE
-        else:
+            if len(state.participants) >= ctx.settings.min_nodes:   # 如果达到了最小节点数
+                if cast(datetime, state.deadline) < datetime.utcnow(): # 如果达到了超时
+                    return _Action.MARK_RENDEZVOUS_COMPLETE  # 标示 rendezvous 已经结束
+        else:  # 否则就直接加入到参与者
             # The rendezvous is not complete yet and we are not part of it. Try
             # to join.
             return _Action.ADD_TO_PARTICIPANTS
 
-        if _should_keep_alive(ctx):
+        if _should_keep_alive(ctx):  # 如果需要保持心跳，就返回 _Action.KEEP_ALIVE
             return _Action.KEEP_ALIVE
 
         # At this point either the rendezvous is not complete, but we are part
         # of it, which means we have to wait for other participants to join; or
         # the rendezvous is complete, but we are not part of it, which means we
         # have to wait for the next round.
-        return _Action.SYNC
+        return _Action.SYNC # 否则返回同步状态 _Action.SYNC
 
-
+#_RendezvousCloseOp 会依据当前状态和时间来确定下一步Action。
 class _RendezvousCloseOp:
     """Represents a rendezvous close operation."""
 
@@ -968,7 +1310,14 @@ class _RendezvousCloseOp:
             return _Action.ERROR_TIMEOUT
         return _Action.MARK_RENDEZVOUS_CLOSED
 
+'''
+3.2 算子
+引擎之中实现了一些算子，基本上，一个操作对应一个算子，我们给出几个操作算子的例子，算子就是依据rendezvous的状态来设置操作类型。
 
+3.2.1 心跳
+3.2.1.1 检查心跳
+_RendezvousKeepAliveOp 的作用是：依据当前状态和时间来确定下一步Action。主要是定期检查本Node是否故障。
+'''
 class _RendezvousKeepAliveOp:
     """Represents a rendezvous keep-alive update operation."""
 
@@ -1264,13 +1613,13 @@ Rendezvous 和 Agent 之间的逻辑联系总结如下，每个启动脚本都�
             if self._state_holder.state.round == 0:
                 _delay(seconds=(0, 0.3))
 
-            exit_op = _RendezvousExitOp()
-            join_op = _RendezvousJoinOp()
+            exit_op = _RendezvousExitOp()  # 设置算子
+            join_op = _RendezvousJoinOp()  # 设置算子
 
             deadline = self._get_deadline(self._settings.timeout.join)
 
-            self._op_executor.run(exit_op, deadline)
-            self._op_executor.run(join_op, deadline)
+            self._op_executor.run(exit_op, deadline) # 这里会进行调用
+            self._op_executor.run(join_op, deadline) # 调用
 
             self._start_heartbeats()
 
@@ -1370,16 +1719,17 @@ Rendezvous 和 Agent 之间的逻辑联系总结如下，每个启动脚本都�
             raise
 
     def _close(self) -> None:
-        op = _RendezvousCloseOp()
+        op = _RendezvousCloseOp() # 设置算子
 
         deadline = self._get_deadline(self._settings.timeout.close)
 
-        self._op_executor.run(op, deadline)
+        self._op_executor.run(op, deadline)  # 调用
 
         msg = f"The node '{self._this_node}' has closed the rendezvous '{self._settings.run_id}'."
         self._record(message=msg, node_state=NodeState.SUCCEEDED)
         log.info(msg)
 
+    #_keep_alive 会调用 _RendezvousKeepAliveOp。
     @staticmethod
     def _keep_alive_weak(weak_self) -> None:
         self = weak_self()
@@ -1389,12 +1739,12 @@ Rendezvous 和 Agent 之间的逻辑联系总结如下，每个启动脚本都�
     def _keep_alive(self) -> None:
         self._heartbeat_lock.acquire()
 
-        op = _RendezvousKeepAliveOp()
+        op = _RendezvousKeepAliveOp() # 设置算子
 
         deadline = self._get_deadline(self._settings.timeout.heartbeat)
 
         try:
-            self._op_executor.run(op, deadline)
+            self._op_executor.run(op, deadline) # 调用
 
             msg = (
                 f"The node '{self._this_node}' has sent a keep-alive heartbeat to the rendezvous "
@@ -1412,11 +1762,18 @@ Rendezvous 和 Agent 之间的逻辑联系总结如下，每个启动脚本都�
         finally:
             self._heartbeat_lock.release()
 
+    '''
+    3.2.1.2 定期调用
+这里要注意的是，因为做任何算子之前，都要调用 sync 操作，而 sync 会在 node 之间同步状态，因为心跳是定期的，所以同步状态也是定期的。
+
+DynamicRendezvousHandler 之中会启动一个timer，定期调用_keep_alive_weak方法。
+    '''
     def _start_heartbeats(self) -> None:
         self._keep_alive_timer = _PeriodicTimer(
             self._settings.keep_alive_interval, self._keep_alive_weak, weakref.ref(self)
         )
 
+        #其次，_keep_alive_weak 会调用 self._keep_alive()。
         self._keep_alive_timer.set_name(f"RendezvousKeepAliveTimer_{self._this_node.local_id}")
 
         self._keep_alive_timer.start()

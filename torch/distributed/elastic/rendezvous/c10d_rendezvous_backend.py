@@ -68,6 +68,13 @@ class C10dRendezvousBackend(RendezvousBackend):
         """See base class."""
         return "c10d"
 
+    '''
+    
+
+后端这里使用 store 作为一个集中式存储，是master。每个 node 是 client，会去master更新自己状态，并且获取其他node状态。这样所有node就会互通有无，达成共识。这里也会定期删除不更新元数据的clients。
+
+get_state 就是简单的从 store 提取。
+    '''
     def get_state(self) -> Optional[Tuple[bytes, Token]]:
         """See base class."""
         # 从store读取数据
@@ -75,6 +82,7 @@ class C10dRendezvousBackend(RendezvousBackend):
 
         return self._decode_state(base64_state)
 
+    #set_state 会做一个compare set，其返回new state和是否更新了state。
     def set_state(
         self, state: bytes, token: Optional[Token] = None
     ) -> Optional[Tuple[bytes, Token, bool]]:
