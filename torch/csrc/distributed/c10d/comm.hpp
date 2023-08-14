@@ -16,6 +16,7 @@ TORCH_API void broadcast_coalesced(
     int rank = 0);
 
 // This class passes bucket contents tensor to DDP communication hook.
+//GradBucket 是用来拷贝信息的类。
 class TORCH_API GradBucket {
  public:
   explicit GradBucket(

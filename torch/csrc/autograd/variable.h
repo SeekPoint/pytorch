@@ -267,6 +267,24 @@ AutogradMeta 的主要成员变量如下：
                    +-------------------------+            +-------------------------+
 
 
+
+2.1.1 AutogradMeta
+AutoGradMeta : 记录 Variable 的autograd历史信息，主要成员变量是。
+
+grad_ ：存储当前Variable实例的梯度，本身也是一个Variable。
+grad_fn ：是个Node实例，非叶子节点才有。通过 grad_fn() 方法来访问，实际上，PyTorch中就是通过 grad_fn是否为空 来判断一个Variable是否是leaf variable。
+grad_accumulator_ ：也是Node的实例，只有叶子节点才有。
+通过Variable的grad_accumulator()来访问。
+叶子节点负责对梯度进行累加，grad_accumulator_ 就是梯度累加处理函数。
+其对应梯度就被保存在 grad_ 变量之中。
+output_nr_：是个数字。output_nr_表明是 Node 的第几个输出，比如为 0 就 表明这个Variable是Node 的第 1 个输出。
+我们总结一下：
+对于非叶子节点，grad_fn是计算梯度操作，梯度不会累积在 grad_ 之上，而是传递给计算图反向传播下一站。grad_fn 就是一个 Node。
+对于叶子节点，PyTorch 虚拟出了一个特殊计算操作，输出这个叶子节点，同时此虚拟计算操作也作为叶子节点的grad_accumulator_来累加其梯度，梯度会累积在 grad_ 之上，因此叶子节点的 output_nr_ 必定为 0。grad_accumulator_ 也是一个 Node，就是 AccumulateGrad。
+其定义如下：
+
+
+
 */
 struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
   std::string name_;

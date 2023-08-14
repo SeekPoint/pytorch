@@ -730,6 +730,74 @@ void GraphTask::mark_as_completed_and_run_post_processing() {
 }
 
 //后续操作，如果之前有注册了 callback，则进行调用。也会进行流同步。
+//对于 final_callbacks_ 处理，在 exec_post_processing 之中，就是当 engine 全部完成 backward 的时候会调用 callback。
+/*
+于是逻辑拓展如下：
+
+Reduer 会注册autograd_hook到AccumulateGrad的post_hooks之上。
+Autograd Engine 在反向传播过程中，如果发现某个参数ready，就调用autograd_hook。
+autograd_hook 之中继续处理。
+会注册一个 finalize_backward到 engine。
+在 GraphTask::exec_post_processing 之中会调用 finalize_backward。
+          Engine        AccumulateGrad                Reducer
+
+            +                  +                         +
+            |                  |                         |
+            |                  |           1             |
+            |                  | <-----------------------+
+            |                  |
+            |                  |
+            |                  |
+            |                  v
+            |                              2
+            |             post_hooks  +-------->  autograd_hook
+            |                                            +
+            |                                            |
+            |                                            |  3
+            |                                            v
+            |                         +------------------+---------------------------+
+            |                         | mark_variable_ready                          |
+            |                         |                                              |
+            |                         |                                              |
+            |                         |     All variable in replica are ready?       |
+            |                         |                   +                          |
+            |                         |                   | YES                      |
+            |                         |                   v                          |
+            |                         |     All replica in bucket are ready?         |
+            |                         |                   +                          |
+            |                         |                   | YES                      |
+            |                         |                   v                          |
+            |                         |            mark_bucket_ready                 |
+            |                         |                                              |
+            |                         |                                              |
+            |                         |                                              |
+            |                         |                   +                          |
+            |                         |                   |                          |
+            |                         |                   |                          |
+            |                         |                   v                          |
+            |                         |          All buckets are ready?              |
+            |                         |                   +                          |
+            |                         |                   | YES                      |
+            |                         |                   v                          |
+            |   queue_back    4       |          all_reduce_local_used_map           |
+            | <----------------------------+  queue_callback(finalize_backward)      |
+            |                         |                                              |
+            |                         |                                              |
+            |                         +-------------------+--------------------------+
+            v                                             |
+                                                          |
+GraphTask::exec_post_processing                           |
+            +                                             |
+            |                                             |
+            |                 5                           v
+            +--------------------------------->   finalize_backward
+            |                                             +
+            |                                             |
+            |                                             |
+            v                                             v
+
+
+*/
 void GraphTask::exec_post_processing() {
   if (!not_ready_.empty()) {
     throw std::runtime_error("could not compute gradients for some functions");
@@ -798,7 +866,7 @@ void GraphTask::exec_post_processing() {
     // NOLINTNEXTLINE(modernize-loop-convert)
     for (size_t i = 0; i < final_callbacks_.size(); ++i) {
       cb_lock.unlock();
-      final_callbacks_[i]();
+      final_callbacks_[i]();  // 调用了callback
       cb_lock.lock();
     }
   }
@@ -1655,6 +1723,12 @@ Engine& Engine::get_default_engine() {
   return engine_stub.load()();
 }
 
+/*
+3.1.2 注册callback
+上面代码之中，使用了 torch::autograd::Engine::get_default_engine().queue_callback 来注册了一个回调函数。我们就来分析一下。
+
+在engine之中有定义，就是往 final_callbacks_ 插入callback：
+*/
 void Engine::queue_callback(std::function<void()> callback) {
   TORCH_CHECK(
       current_graph_task,

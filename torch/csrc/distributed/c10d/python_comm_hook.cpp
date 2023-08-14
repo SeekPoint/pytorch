@@ -17,7 +17,11 @@ PythonCommHook::~PythonCommHook() {
   state_.ptr() = nullptr;
   hook_.ptr() = nullptr;
 }
+/*
+PythonCommHook 用来实现用户的特殊需求，我们前文提到过，这里再给出两个例子。
 
+PythonCommHook 举例
+*/
 c10::intrusive_ptr<c10::ivalue::Future> PythonCommHook::runHook(
     GradBucket& bucket) {
   py::gil_scoped_acquire acquire;

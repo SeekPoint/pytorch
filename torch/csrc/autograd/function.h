@@ -155,6 +155,16 @@ topological_nr_ 具有以下属性：
 variable_list operator()(variable_list&& inputs)是Node的主要方法。该方法接收vector封装的多个Variable实例，并输出vector封装的多个Variable实例，然后调用apply 具体业务函数。该方法依靠C++的多态，将对operator 的调用转化为对自身（子类）的apply方法调用。
 PyTorch中所有用于反向传播计算的函数都继承自Function类，并重写Function类中的apply纯虚函数。
 
+
+2.1.2 Node
+在计算图中，一个计算操作用一个节点（Node）表示，不同的 Node子类实现了不同操作。
+
+AutogradMeta 的 grad_fn_ 和 grad_accumulator_ 都是 Node。
+
+这里针对的主要成员变量是 post_hooks_，就是在 运行梯度计算之后，会执行的 hook。
+
+add_post_hook 会往 post_hooks_ 之中添加一个 hook。
+
 */
 struct TORCH_API Node : std::enable_shared_from_this<Node> {
  public:

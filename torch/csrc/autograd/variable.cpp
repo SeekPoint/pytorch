@@ -273,9 +273,50 @@ std::shared_ptr<Node> try_get_grad_accumulator(const Variable& self) {
 在一个Variable第一次调用这个API的时候，会生成一个AccumulateGrad 来初始化它的 grad_accumulator_成员，代码如下：
 
 grad_accumulator 返回的是 Node，也就是 AccumulateGrad，是一个Node类型，我们取出了检查校验代码。
+
+
+这里 grad_accumulator 代码如下，可以看到，就是获取张量的 autograd_meta->grad_accumulator_，然后返回，对于叶子节点，grad_accumulator_ 就是 AccumulateGrad。
+
+
+
+一个张量为 variable1，张量对应的 VariableIndex 是 index1，具体配置如下，AccumulateGrad 在使用 apply 计算完梯度之后，会调用 post_hooks 之中的 hook。
+
++-----------------------------------------+
+| Reducer                                 |
+|                                         |
+|                                         |
+|  +------------------------------------+ |   +------------------+    +----------------+
+|  | grad_accumulators_                 | |   |  variable1       |    | AccumulateGrad |
+|  |                                    | |   |                  |    |                |
+|  |                                    | |   |                  |    |                |
+|  |  [replica_index][variable_index]+------> |   autograd_meta_+---> |    post_hooks  |
+|  |                                    | |   |                  |    |        +       |
+|  |                                    | |   |                  |    |        |       |
+|  +------------------------------------+ |   +------------------+    +----------------+
+|                                         |                                    |
+|  +-------------------------------+      |                                    |
+|  | gradAccToVariableMap_         |      |                                    v
+|  |                               |      |
+|  |                               |      |                    +-----------------------+
+|  |        [variable1 : index1]   |      |                    |  autograd_hook(index1)|
+|  |                               |      |                    +-----------------------+
+|  +-------------------------------+      |
+|                                         |
++-----------------------------------------+
+
+
+                                               +---------------------------------------+
+                                  index1 +-->  |VariableIndex                          |
+                                               |                                       |
+                                               |          replica_index of Variable1   |
+                                               |                                       |
+                                               |          variable_index of Variable1  |
+                                               |                                       |
+                                               +---------------------------------------+
+
 */
 std::shared_ptr<Node> grad_accumulator(const Variable& self) {
-  auto autograd_meta = get_autograd_meta(self);
+  auto autograd_meta = get_autograd_meta(self); // 获取 autograd_meta
   if (!autograd_meta) {
     return nullptr;
   }
