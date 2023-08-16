@@ -1184,6 +1184,13 @@ from torch.amp import autocast
 py_float = float
 py_int = int
 
+'''
+initModule之后
+在initModule()函数初始化完毕之后，import torch的初始化工作还没有结束。因为在这之后，python的初始化脚本还要调用以下2个API才算真正完成全部的初始化：
+
+_C._initExtension(manager_path())
+_C._init_names(list(torch._storage_classes))
+'''
 # Shared memory manager needs to know the exact location of manager executable
 _C._initExtension(manager_path()) #这些函数的作用就是将c++函数与python进行初始绑定===/csrc/Module.cpp文件中找到了这些函数
 del manager_path

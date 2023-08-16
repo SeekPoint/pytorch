@@ -154,7 +154,7 @@ static PyObject* THPModule_initExtension(
     throw python_error();
 
   THPStorage_postInit(module);
-  THPAutograd_initFunctions(); // 这里调用,初始化了微分系统
+  THPAutograd_initFunctions(); // 这里调用,初始化了微分系统 初始化了torch的自动微分系统，这是PyTorch动态图框架的基础。
   Py_RETURN_NONE;
   END_HANDLE_TH_ERRORS
 }
@@ -1253,6 +1253,19 @@ extern "C"
         TORCH_API PyObject* initModule();
 // separate decl and defn for msvc error C2491
 //initModule函数是对python环境中的torch module进行初始化。其定义在 torch/csrc/Module.cpp
+/*
+1，torch._C的诞生：
+这一步就是产生torch._C类，并在这个python类上面注册众多函数：
+其中TorchMethods注册了29个方法，都是THPModule_前缀的函数；
+DataLoaderMethods注册了4个方法，都是THPModule_前缀的函数；
+torch::autograd::python_functions注册了4个方法；torch::multiprocessing::python_functions注册了1个方法；
+THCPModule_methods注册了37个CUDA相关的函数，前缀都是THCPModule_；
+THCUDNN_methods注册了1个方法；THDPModule_methods注册了28个方法；
+torch::distributed::c10d::python_functions注册了1个方法。
+
+总而言之，在这一小步，我们达到了这样一个里程碑，torch._C符号诞生，并且向torch._C注册了一百余个函数，
+涉及torch、dataloader、autograd、multiprocess、cuda、cudnn、distribute、c10d方面。
+*/
 PyObject* initModule() {
   HANDLE_TH_ERRORS
 
@@ -1290,6 +1303,8 @@ PyObject* initModule() {
 
   static struct PyModuleDef torchmodule = {
       PyModuleDef_HEAD_INIT, "torch._C", nullptr, -1, methods.data()};
+
+  //以下代码先后初始化了torch._C._PtrWrapper、torch._C.Generator（含5个方法）、FatalError、torch.Size、torch.dtype、torch.iinfo、torch.layout、torch.device：
   ASSERT_TRUE(module = PyModule_Create(&torchmodule));
   ASSERT_TRUE(THPGenerator_init(module));
   ASSERT_TRUE(THPException_init(module));
@@ -1301,9 +1316,63 @@ PyObject* initModule() {
   THPQScheme_init(module);
   THPDevice_init(module);
   THPStream_init(module);
+
+  /*
+  3，torch._C._TensorBase的诞生
+
+Gemfield将以下三个初始化函数归为这一小节：
+
+为什么呢？因为地位太显赫了。
+
+THPVariable_initModule(module) 创建了torch._C._TensorBase，这是一切Tensor的基类，在Gemfield的其它专栏文章里将单独解释；
+
+THPFunction_initModule(module)创建了torch._C._FunctionBase，在torch/autograd/function.py中，以下两个类以torch._C._FunctionBase为基类：
+
+class Function(with_metaclass(FunctionMeta, _C._FunctionBase, _ContextMethodMixin, _HookMixin))
+class BackwardCFunction(_C._FunctionBase, _ContextMethodMixin, _HookMixin)
+这个Function继承体系就构成了DAG的基础。
+
+THPEngine_initModule(module)创建了torch._C._EngineBase，_EngineBase这个类负责动态图执行之前的preprocess，_EngineBase会将torch.autograd的backward之类的请求预处理后送给真正的Engine去执行。
+  */
   ASSERT_TRUE(THPVariable_initModule(module)); // 继续分析这里，其中会设定_TensorBase
   ASSERT_TRUE(THPFunction_initModule(module));
   ASSERT_TRUE(THPEngine_initModule(module)); // 这里初始化引擎
+
+/*
+4，pybind11绑定
+
+这一小节的初始化内容都是和pybind11相关的
+
+initONNXBindings是ONNX的python binding：torch._C._onnx.TensorProtoDataType和torch._C._onnx.OperatorExportTypes：
+
+>>> dir(torch._C._onnx.TensorProtoDataType)
+['BOOL', 'COMPLEX128', 'COMPLEX64', 'DOUBLE', 'FLOAT', 'FLOAT16', 'INT16', 'INT32', 'INT64', 'INT8', 'STRING', 'UINT16', 'UINT32', 'UINT64', 'UINT8', 'UNDEFINED', '__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__int__', '__le__', '__lt__', '__members__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__', 'name']
+>>> dir(torch._C._onnx.OperatorExportTypes)
+['ONNX', 'ONNX_ATEN', 'ONNX_ATEN_FALLBACK', 'RAW', '__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__int__', '__le__', '__lt__', '__members__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__', 'name']
+initJITBindings则是通过pybind11往torch._C上注册了一堆和JIT相关的C++函数/对象；
+
+initNNFunctions初始化了一个torch._C._nn 对象，并注册了一些nn相关的函数：
+
+>>> dir(torch._C._nn)
+['__doc__', '__loader__', '__name__', '__package__', '__spec__', '_parse_to', 'adaptive_avg_pool2d', 'adaptive_avg_pool3d', 'adaptive_max_pool2d', 'adaptive_max_pool3d', 'avg_pool2d', 'avg_pool3d', 'binary_cross_entropy', 'elu', 'elu_', \
+'fractional_max_pool2d', 'glu', 'hardtanh', 'hardtanh_', 'l1_loss', 'leaky_relu', 'leaky_relu_', 'log_sigmoid', 'max_pool2d_with_indices', 'max_pool3d_with_indices', 'max_unpool2d', 'max_unpool3d', 'mse_loss', 'multi_margin_loss', \
+'multilabel_margin_loss', 'nll_loss', 'nll_loss2d', 'reflection_pad1d', 'reflection_pad2d', 'replication_pad1d', 'replication_pad2d', 'replication_pad3d', 'rrelu_with_noise', 'rrelu_with_noise_', 'smooth_l1_loss', 'soft_margin_loss', \
+'softplus', 'softshrink', 'thnn_conv2d', 'thnn_conv3d', 'thnn_conv_depthwise2d', 'thnn_conv_dilated2d', 'thnn_conv_dilated3d', 'thnn_conv_transpose2d', 'thnn_conv_transpose3d', 'upsample_bilinear2d', 'upsample_linear1d', 'upsample_nearest1d', \
+'upsample_nearest2d', 'upsample_nearest3d', 'upsample_trilinear3d']
+init_legacy_variable注册了torch._C._LegacyVariableBase：
+
+>>> dir(torch._C._LegacyVariableBase)
+['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', \
+'__ge__', '__getattribute__', '__gt__', '__hash__', '__init__', '__le__', \
+'__lt__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', \
+'__setattr__', '__sizeof__', '__str__', '__subclasshook__']
+_LegacyVariableBase类会派生出Variable类（该类的_execution_engine会初始化为torch._C._EngineBase）：
+
+class Variable(with_metaclass(VariableMeta, torch._C._LegacyVariableBase))
+init_bindings是通过pybind11往torch._C上注册一些函数，torch::cuda::initModule类似，也是通过pybind11往torch._C上注册一些函数，只不过内容是和cuda相关的。
+
+
+*/
   // NOTE: We need to be able to access OperatorExportTypes from ONNX for use in
   // the export side of JIT, so this ONNX init needs to appear before the JIT
   // init.
@@ -1333,6 +1402,8 @@ PyObject* initModule() {
   torch::cuda::initModule(module);
 #endif
   torch::initVerboseBindings(module);
+
+  //5，在torch._C上注册StorageBase类  yk--有明显变化！！
   ASSERT_TRUE(THPStorage_init(module));
 
 #ifdef USE_CUDA
@@ -1354,6 +1425,13 @@ PyObject* initModule() {
         return PyModule_AddObject(module, name, v) == 0;
       };
 
+
+/*
+本小节会进行ATen的global context的初始化，然后使用at::globalContext().defaultGenerator(at::kCPU)进行generator的初始化。
+
+另外，PyTorch会根据编译环境和用户配置，然后向torch._C上注册一些flag。
+这些flag有has_cudnn、has_mkl、has_lapack、_GLIBCXX_USE_CXX11_ABI：
+*/
 #if defined(USE_CUDNN) || defined(USE_ROCM)
   PyObject* has_cudnn = Py_True;
 #else
