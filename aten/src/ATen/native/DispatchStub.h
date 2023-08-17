@@ -253,6 +253,75 @@ struct RegisterHIPDispatch {
 #define REGISTER_ZVECTOR_DISPATCH(name, fn)
 #endif
 
+/*
+REGISTER_DISPATCH
+REGISTER_DISPATCH宏在编译期的时候根据device的不同自动展开不同的注册方法。以CPU的设备为例，REGISTER_DISPATCH会展开为：
+
+REGISTER_ARCH_DISPATCH，并随着cmake系统分三次展开（三个编译单元），分别是default、avx、avx2,如下所示：
+
+REGISTER_ARCH_DISPATCH(name, DEFAULT, fn)
+REGISTER_ARCH_DISPATCH(name, AVX, fn)
+REGISTER_ARCH_DISPATCH(name, AVX2, fn)
+#展开为
+DispatchStub<decltype(fn), struct name>::DEFAULT = *_kernel;
+DispatchStub<decltype(fn), struct name>::AVX = *_kernel;
+DispatchStub<decltype(fn), struct name>::AVX2 = *_kernel;
+在运行的时候，通过choose_cpu_impl()依次判断pytorch是否使用AVX2、AVX编译的，如果都不是则使用DEFAULT。
+
+另外，上述*_kernel函数对应的有以下几十个：
+
+REGISTER_DISPATCH(pdist_forward_stub, &pdist_forward_kernel_impl);
+。。。。。。。
+REGISTER_DISPATCH(tanh_stub, &tanh_kernel)
+REGISTER_DISPATCH(trunc_stub, &trunc_kernel)
+以 REGISTER_DISPATCH(add_stub, &add_kernel) 为例，在CPU设备上的AVX2编译单元中，会展开为如下形式：
+
+template <> decltype(&add_kernel) DispatchStub<decltype(&add_kernel), struct add_stub>::AVX2 = &add_kernel;
+从上面的展开式中可以看到注册了add_kernel函数，这个函数实现在了aten/src/ATen/native/cpu/BinaryOpsKernel.cpp文件中。
+
+在PyTorch的运行中，tensor之间的加法会调用到add_stub，并被分发到上述定义的add_kernel函数上：
+
+void add_kernel(TensorIterator& iter, Scalar alpha_scalar) {
+  std::cout<<"gemfield call "<<__FILE__<<":"<<__LINE__<<":"<<__FUNCTION__<<std::endl;
+  AT_DISPATCH_ALL_TYPES(iter.dtype(), "add_cpu", [&]() {
+    auto alpha = alpha_scalar.to<scalar_t>();
+    auto alpha_vec = Vec256<scalar_t>(alpha);
+    binary_kernel_vec(iter,
+      [=](scalar_t a, scalar_t b) -> scalar_t { return a + alpha * b; },
+      [=](Vec256<scalar_t> a, Vec256<scalar_t> b) {
+        return vec256::fmadd(b, alpha_vec, a);
+      });
+  });
+}
+总结
+Gemfield将PyTorch的初始化分为3个阶段，如下所示：
+
+再谈PyTorch的初始化（上）：介绍c++库main/initModule之前的初始化工作，主要就是global constructors；
+
+再谈PyTorch的初始化（中）：介绍c++库main/initModule之后的初始化工作；
+
+再谈PyTorch的初始化（下）：__init__.py中c++库之外的初始化工作。
+
+本篇文章为上篇，在本篇文章中，gemfield主要介绍c++库main/initModule之前的初始化工作，主要就是global constructors，以及class中的static成员（单例设计模式）。共涉及到PyTorch中以下子系统：
+yk====很多内容随着代码更新已经不存在！！！
+1，Registry系统的初始化；
+2，LegacyDeviceTypeInitRegistry的初始化；
+3，g_device_type_registry的初始化；
+4，内存分配器Allocator的初始化；
+5，Type id系统的初始化；
+6，注册Tensor类型；
+7，device_guard_impl_registry数组的初始化；
+8，THVector table的初始化；
+9，CopyBytesFunction表的初始化；
+10，Caffe2 OpSchemaRegistry的初始化；
+11，ATen中Type继承体系的初始化；
+12，C10 dispatcher table的初始化；
+13，CodeTemplate的global construct；
+14，VariableTypeRegistry及at::globalContext的初始化；
+15，JIT operator的初始化；
+16，REGISTER_DISPATCH。
+
+*/
 // Macro to register the same kernel for all CPU arch types. This is useful
 // if a kernel does not benefit from being recompiled across different arch types.
 #define REGISTER_ALL_CPU_DISPATCH(name, fn)                                    \

@@ -117,6 +117,18 @@ namespace detail {
 // This struct holds the actual type information. There will be
 // one allocated per type. TypeMeta objects will then point to the struct
 // instance for the type they're configured for.
+/*
+而一个TypeMetaData实例就包含了一个Type的元信息（包含了这个Type的大小、如何new、如何placement new、如何copy、如何delete、如何placement delete）
+
+在PyTorch中，通过Type mapping到对应的Id再mapping到对应的TypeMetaData实例，
+
+ Types就必须使用CAFFE_KNOWN_TYPE()来注册一个type id。
+
+ 而CAFFE_KNOWN_TYPE是在运行时的初始化时期动态的分配一个id，用于自定义的type。PyTorch中目前使用CAFFE_KNOWN_TYPE注册有下面的type及其id：
+
+ 如果一个type注册好了,你就可以通过调用 TypeMeta::Make<T>来创建一个对象来包含它的metadata（如构造函数、析构函数等），TypeMeta::Make<T>返回一个TypeMeta() object, 这是一个指向meta信息结构体的一个指针。
+
+*/
 struct TypeMetaData final {
   using New = void*();
   using PlacementNew = void(void*, size_t);

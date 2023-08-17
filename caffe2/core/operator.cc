@@ -387,6 +387,42 @@ std::map<DeviceType, OperatorRegistry*>* gDeviceTypeRegistry() {
   return &g_device_type_registry;
 }
 
+/*
+g_device_type_registry的初始化
+在前述的Registry系统里，和Device operator相关的是以下4个Registry：
+
+CPUOperatorRegistry
+CUDAOperatorRegistry
+HIPOperatorRegistry
+IDEEPOperatorRegistry
+通过CAFFE_REGISTER_DEVICE_TYPE宏，这四个Registry会被放入到g_device_type_registry字典里，来和key（device type）mapping起来：
+
+CAFFE_REGISTER_DEVICE_TYPE(CPU, CPUOperatorRegistry);
+CAFFE_REGISTER_DEVICE_TYPE(CUDA, CUDAOperatorRegistry);
+CAFFE_REGISTER_DEVICE_TYPE(HIP, HIPOperatorRegistry);
+CAFFE_REGISTER_DEVICE_TYPE(DeviceType::IDEEP, IDEEPOperatorRegistry);
+CAFFE_REGISTER_DEVICE_TYPE宏的定义如下：
+
+#define CAFFE_REGISTER_DEVICE_TYPE(type, registry_function) \
+  namespace {                                               \
+  static DeviceTypeRegisterer C10_ANONYMOUS_VARIABLE(       \
+      DeviceType)(type, &registry_function);                \
+  }
+
+//global consturctor
+struct DeviceTypeRegisterer {
+  explicit DeviceTypeRegisterer(DeviceType type, RegistryFunction func) {
+    ......
+    // Calling the registry function to get the actual registry pointer.
+    gDeviceTypeRegistry()->emplace(type, func());
+  }
+
+std::map<DeviceType, OperatorRegistry*>* gDeviceTypeRegistry() {
+  static std::map<DeviceType, OperatorRegistry*> g_device_type_registry;
+  return &g_device_type_registry;
+}
+由于使用了global constructor，g_device_type_registry的初始化将在main之前完成，然后在Caffe2的operator系统里发挥作用。
+*/
 C10_DEFINE_REGISTRY(
     CPUOperatorRegistry,
     OperatorBase,

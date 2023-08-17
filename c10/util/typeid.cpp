@@ -3,7 +3,15 @@
 
 #include <algorithm>
 #include <atomic>
+/*
+Type id系统的初始化
+type id就是一个C++ type的独一无二的id（一个数字），你需要使用CAFFE_KNOWN_TYPE来为一个type注册一个type id，
+从而建立起来了一个id到数据类型的mapping,比如tensor的dtype的类型就使用了这个type id系统。这个系统属于C10子模块，在c10/util/typeid.h中，一共声明了如下的type id：
+。。。
 
+而在c10/util/typeid.cpp文件中，则定义了这些type id，注意，这个初始化是在main函数之前完成的：
+
+*/
 namespace caffe2 {
 namespace detail {
 C10_EXPORT void _ThrowRuntimeTypeLogicError(const std::string& msg) {

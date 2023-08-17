@@ -9,7 +9,10 @@ from pydebug import debuginfo
 # if the identifier is on a line starting with non-whitespace and a list
 # then it is comma separated ${,foo} will insert a comma before the list
 # if this list is not empty and ${foo,} will insert one after.
-
+'''
+CodeTemplate的global construct
+CodeTemplate实现了简单的模板引擎
+'''
 
 class CodeTemplate:
     substitution_str = r"(^[^\n\S]*)?\$([^\d\W]\w*|\{,?[^\d\W]\w*\,?})"

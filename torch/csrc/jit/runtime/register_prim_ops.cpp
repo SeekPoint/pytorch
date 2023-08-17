@@ -1255,6 +1255,31 @@ static const std::vector<OperatorGeneratorArgs> opGenArgs{
                                 }
                               }))};
 
+/*
+JIT operator的初始化
+目前JIT operator和C10 operator是分开的，因为它俩的功能不是完全一样。以后可能将JIT operator拆分，其中一部分和C10 operator复用。要注册一个自定义的JIT operator，需要使用createOperator调用，这个函数接收2个参数：第一个参数是一个name/schema，第二个参数是一个implementation。
+
+如果第一个参数仅指定了函数名（比如gem::field)，那么schema就会从这个函数定义推导出来；如果第一个参数指定的不是一个函数名，那么就是schema，这种情况下要指定完整的schema，比如‘gem::field(Tensor a, double b) -> Tensor’，这种情况下，schema仍然需要从函数定义中推到出来，来和这里指定的做个校验检查。
+
+第二个参数是函数实现，类型是一个函数指针或者functor（包含lambda对象）。这个函数可以接收任意参数的输入（类型只能是PyTorch JIT backend支持类型的一个子集），并且返回一个或者一个tuple的type。比如：
+
+createOperator(
+   "gem::field(float a, Tensor b)",
+   [](float a, at::Tensor b) { return a + b; });
+调用createOperator进行注册的过程中，主要的工作量都是在调用parseSchema，这个函数会进行lexer词法分析。为什么说主要工作量是在调用parseSchema呢？是因为整个初始化阶段JIT模块会有1825次parseSchema调用（当前），下面给出了一些schema的样子：
+
+aten::get_device(Tensor self) -> int
+aten::storage_offset(Tensor self) -> int
+aten::is_contiguous(Tensor self) -> bool
+aten::__and__(Tensor self, Tensor other) -> Tensor
+aten::__and__(Tensor self, Scalar other) -> Tensor
+aten::__iand__(Tensor(a!) self, Tensor other) -> Tensor(a!)
+aten::__iand__(Tensor(a!) self, Scalar other) -> Tensor(a!)
+aten::_adaptive_avg_pool2d_backward(Tensor grad_output, Tensor self) -> Tensor
+aten::_baddbmm_mkl_(Tensor(a!) self, Tensor batch1, Tensor batch2, *, Scalar beta=1, Scalar alpha=1) -> Tensor(a!)
+aten::_batch_norm_impl_index_backward(int impl_index, Tensor input, Tensor grad_output, Tensor? weight, Tensor? running_mean, Tensor? running_var, Tensor? save_mean, Tensor? save_var_transform, bool train, float eps, bool[3] output_mask) -> (Tensor, Tensor, Tensor)
+在JIT模块的operator注册完毕后，PyTorch的初始化就将进入main阶段了，对于PyTorch的python的插件来说，就是stub.cpp文件中的init_C函数调用了，Gemfield将会在下一篇文章中介绍。
+*/
 static std::vector<c10::optional<Operator>> createOperators(
     const std::vector<OperatorGeneratorArgs>& args) {
   std::vector<c10::optional<Operator>> result;

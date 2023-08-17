@@ -569,6 +569,44 @@ struct VaryingShape {
   c10::optional<ListOfOptionalElements> dims_;
 };
 
+/*
+ATen中Type继承体系的初始化
+这块的初始化有点区别，它不是global constructor，而是class中的static成员函数。众所周知，static成员函数是在main之前就要执行一次进行初始化的。通过使用static的成员函数，下面的这些Type类实现了单例模式：
+
+struct TensorType : public Type
+struct NumberType : public Type
+struct SingleElementType : public Type
+struct DictType : public Type
+struct TupleType : public Type
+struct BoolType : public Type
+struct StringType : public Type
+struct NoneType : public Type
+struct GeneratorType : public Type
+struct DeviceObjType : public Type
+struct VarType : public Type
+struct ClassType : public Type
+
+struct FutureType : public SingleElementType<TypeKind::FutureType, FutureType>
+struct ListType : public SingleElementType<TypeKind::ListType, ListType>
+struct OptionalType: public SingleElementType<TypeKind::OptionalType, OptionalType>
+
+struct FloatType : public NumberType
+struct IntType : public NumberType
+
+struct AutogradZeroTensorType : public TensorType
+struct DimensionedTensorType : public TensorType
+struct CompleteTensorType : public DimensionedTensorType
+它们都new了自己的一个实例，并由std::shared_ptr智能指针管理起来。
+
+struct TypeExtendedInterface : public Type
+struct TypeDefault : public TypeExtendedInterface
+struct CPUTypeDefault : public TypeDefault
+struct CUDATypeDefault : public TypeDefault
+struct UndefinedType final : public TypeDefault
+struct VariableType final : public at::TypeDefault
+在专栏文章https://zhuanlan.zhihu.com/p/55966063 中已经提到过了，CPUTypeDefault和CUDATypeDefault又有多个派生的子类，共同构成了Type继承体系。
+
+*/
 struct TensorType;
 // TODO: investigate making this SingletonOrSharedTypePtr<TensorType>
 using TensorTypePtr = std::shared_ptr<TensorType>;

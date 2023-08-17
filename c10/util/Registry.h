@@ -8,7 +8,33 @@
 
 // NB: This Registry works poorly when you have other namespaces.
 // Make all macro invocations from inside the at namespace.
+/*
+Registry系统的初始化
+Registry系统的本质工作就是实现了从字符串（key）到对象（value）的mapping。Registry系统是C10模块的一个组件，在PyTorch中，通过如下定义的宏来定义各种Registry：
 
+C10_DECLARE_REGISTRY
+C10_DEFINE_REGISTRY
+
+
+然后为了向这些Registry注册各种东西，PyTorch另外定义了一些helper的宏，这些helper的宏通过global consturctor在main函数之前完成了对各种Registry的初始化。比如：
+
+C10_DEFINE_bool(caffe2_report_cpu_memory_usage, false, "If set, print out detailed memory usage");
+
+将会定义一个global的对象：
+
+RegistererC10FlagsRegistry g_C10FlagsRegistry_caffe2_report_cpu_memory_usage
+
+===yk这里有个宏！！    RegistererC10FlagsRegistry g_C10FlagsRegistry_##name(                 \
+
+进而会调用::c10::Registerer的构造函数来进行初始化：
+
+class Registerer {
+ public:
+
+
+进而会调用registry->Register(key, creator, help_msg)，其中registry是RegistryName()函数中的static变量，意味着每种Registry在内存中只有一份registry实例。
+最终Register类函数的调用产生了key("caffe2_report_cpu_memory_usage")到value("RegistererC10FlagsRegistry::DefaultCreator<C10FlagParser_caffe2_report_cpu_memory_usage>")的mapping。
+*/
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -207,6 +233,7 @@ class Registerer {
 // dllexport are mixed, but the warning is fine and linker will be properly
 // exporting the symbol. Same thing happens in the gflags flag declaration and
 // definition caes.
+
 #define C10_DECLARE_TYPED_REGISTRY(                                        \
     RegistryName, SrcType, ObjectType, PtrType, ...)                       \
   C10_IMPORT ::c10::Registry<SrcType, PtrType<ObjectType>, ##__VA_ARGS__>* \

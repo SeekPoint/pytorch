@@ -538,6 +538,18 @@ OpSchema& OpSchemaRegistry::NewSchema(const string& key, const string& file, con
   return m[key];
 }
 
+/*
+Caffe2 OpSchemaRegistry的初始化
+OpSchemaRegistry维护了一个map：
+
+static CaffeMap<string, OpSchema> map
+key是op name，value是OpSchema的实例。而OpSchema维护了关于一个op应该有的所有信息（包括输入输出参数，前向要执行的函数等）——这也就意味着，使用一个name即可通过OpSchemaRegistry中的map找到对应的OpSchema。
+
+要往OpSchemaRegistry中注册一个OpSchema，通常使用OPERATOR_SCHEMA宏，并且可以在后面追加OpSchema的成员函数。假如要注册gemfield_op，有2个输入1个输出，则注册的时候可以这么写：
+
+OPERATOR_SCHEMA(gemfield_op).NumInputs(2).NumOutputs(1)
+之后，OpSchemaRegistry中的map就多了一个gemfield_op及其schema组成的 pair。
+*/
 CaffeMap<string, OpSchema>& OpSchemaRegistry::map() {
   static CaffeMap<string, OpSchema> map;
   return map;

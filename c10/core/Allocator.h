@@ -216,7 +216,26 @@ struct AllocatorRegisterer {
     SetAllocator(t, alloc);
   }
 };
+/*
+内存分配器Allocator的初始化
+这个模块也属于C10 core系统，使用了一样的手法，也即通过宏REGISTER_ALLOCATOR封装了global的对象的construct：
 
+#define REGISTER_ALLOCATOR(t, f)                    \
+  namespace {                                       \
+  static AllocatorRegisterer<t> g_allocator_##d(f); \
+  }
+整个PyTorch共register了2个Allocator，cpu的和cuda的：
+
+static DefaultCPUAllocator g_cpu_alloc;
+REGISTER_ALLOCATOR(DeviceType::CPU, &g_cpu_alloc);
+
+static DefaultCUDAAllocator g_cuda_alloc;
+REGISTER_ALLOCATOR(CUDA, &g_cuda_alloc);
+也因此会触发2次关于AllocatorRegisterer构造函数的调用，在AllocatorRegisterer的构造函数中，会调用void SetAllocator(at::DeviceType t, at::Allocator* alloc)，而这个函数是用来初始化这个global数组的：
+
+at::Allocator* allocator_array[at::COMPILE_TIME_MAX_DEVICE_TYPES];
+这个global数组的index就是DeviceType::CPU、CUDA等枚举值，而value就是g_cpu_alloc、g_cuda_alloc这样的global对象，分别定义了内存分配相关的allocator，比如CPU type对应的Allocator是posix_memalign()，CUDA type对应的是cudaMallocHost()等调用。
+*/
 #define REGISTER_ALLOCATOR(t, f)                       \
   namespace {                                          \
   static c10::AllocatorRegisterer<t> g_allocator_d(f); \

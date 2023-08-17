@@ -298,7 +298,28 @@ class C10_API DeviceGuardImplRegistrar {
  public:
   DeviceGuardImplRegistrar(DeviceType, const DeviceGuardImplInterface*);
 };
+/*
+device_guard_impl_registry数组的初始化
+device_guard_impl_registry数组存放的是DeviceGuardImplInterface的实例，DeviceGuardImplInterface是OOP中的接口，提供了RAII class 通过DeviceGuard来实现device和stream的切换。每种不同的设备, 比如CUDA和HIP,都需要继承并且实现这个接口，然后将其实现注册到device_guard_impl_registry数组中。PyTorch中有以下设备上的DeviceGuard的实现：
 
+C10_REGISTER_GUARD_IMPL(CPU, CPUGuardImpl);
+C10_REGISTER_GUARD_IMPL(CUDA, at::cuda::HIPGuardImplMasqueradingAsCUDA);
+C10_REGISTER_GUARD_IMPL(CUDA, CUDAGuardImpl);
+C10_REGISTER_GUARD_IMPL(MSNPU, MSNPUGuardImpl);
+以CPU的实现为例，C10_REGISTER_GUARD_IMPL(CPU, CPUGuardImpl)宏展开后如下所示：
+
+struct CPUGuardImpl final : public c10::impl::DeviceGuardImplInterface{
+    ......
+}
+#global construct init
+static ::c10::impl::DeviceGuardImplRegistrar g_DeviceType0(::c10::DeviceType::CPU, new CPUGuardImpl());
+global的instance的constructor会执行下面的初始化逻辑：
+
+DeviceGuardImplRegistrar::DeviceGuardImplRegistrar(DeviceType type, const DeviceGuardImplInterface* impl) {
+  device_guard_impl_registry[static_cast<size_t>(type)].store(impl);
+}
+没错，初始化了device_guard_impl_registry这个数组，device的type为这个数组的index，相应的value就是DeviceGuardImplInterface在每种设备上的具体实现（其子类）。
+*/
 #define C10_REGISTER_GUARD_IMPL(DevType, DeviceGuardImpl)              \
   static ::c10::impl::DeviceGuardImplRegistrar C10_ANONYMOUS_VARIABLE( \
       g_##DeviceType)(::c10::DeviceType::DevType, new DeviceGuardImpl());
