@@ -78,6 +78,7 @@ def _rebuild_from_type_v2(func, new_type, args, state):
 # NB: If you add a new method to Tensor, you must update
 # torch/__init__.py.in to add a type annotation for your method;
 # otherwise, it will not show up in autocomplete.
+#Tensor代表网络权重参数的类——Parameter类——就是Tensor的子类。
 class Tensor(torch._C._TensorBase):
     def __deepcopy__(self, memo):
         if has_torch_function_unary(self):

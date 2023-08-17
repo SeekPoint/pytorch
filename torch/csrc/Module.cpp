@@ -141,19 +141,84 @@ static PyObject* THPModule_initExtension(
         "initialization error - expected bytes/string object as shm_manager_path!");
     return nullptr;
   }
+    /*
+  1，torch::utils::initializeLayouts调用
+
+顾名思义，用来初始化layout。除了添加torch.strided和torch.sparse_coo符号外，还初始化了layout_registry数组。layout_registry数组的每个元素为THPLayout实例（payload为at::Layout）：
+
+THPLayout* layout_registry[static_cast<int>(at::Backend::NumOptions)] = {};
+然后通过registerLayoutObject调用向layout_registry数组添加元素：
+
+registerLayoutObject((THPLayout*)strided_layout, at::Backend::CPU);
+registerLayoutObject((THPLayout*)strided_layout, at::Backend::CUDA);
+registerLayoutObject((THPLayout*)strided_layout, at::Backend::MSNPU);
+registerLayoutObject((THPLayout*)strided_layout, at::Backend::XLA);
+registerLayoutObject((THPLayout*)sparse_coo_layout, at::Backend::SparseCPU);
+registerLayoutObject((THPLayout*)sparse_coo_layout, at::Backend::SparseCUDA);
+    */
   torch::utils::initializeLayouts();
   torch::utils::initializeMemoryFormats();
   torch::utils::initializeQSchemes();
+  /*
+  添加了以下python符号：
+
+torch.uint8
+torch.int8
+torch.int16
+torch.int32
+torch.int64
+torch.float16
+torch.float32
+torch.float64
+torch.complex32
+torch.complex64
+torch.complex128
+torch.bool
+torch.qint8
+并且初始化了dtype_registry数组：
+
+THPDtype* dtype_registry[static_cast<int>(at::ScalarType::NumOptions)] = {};
+并且通过torch::registerDtypeObject调用向dtype_registry数组添加元素。
+    */
   torch::utils::initializeDtypes();
+  /*
+  3， torch::tensors::initialize_python_bindings调用
+
+先使用initialize_aten_types调用来初始化tensor_types数组，数组的每个元素是PyTensorType实例，初始化每个实例的所有成员：
+
+static std::vector<PyTensorType> tensor_types;
+使用py_initialize_metaclass添加了python符号torch.tensortype；
+
+对于前述的tensor_types vector，初始化里面的每一个python type元素（如torch.FloatTensor, torch.DoubleTensor等等）；然后将这些类型添加到其对应的python module上，像下面这样：
+
+ByteTensor-->torch
+....
+ShortTensor-->torch.cuda.sparse
+    */
   torch::tensors::initialize_python_bindings();
   std::string path = THPUtils_unpackString(shm_manager_path);
+  /*将字符串变量manager_executable_path的值初始化为/usr/local/lib/python2.7/dist-packages/torch/bin/torch_shm_manager。*/
   libshm_init(path.c_str());
 
   auto module = THPObjectPtr(PyImport_ImportModule("torch"));
   if (!module)
     throw python_error();
 
+/*
+5，THPDoubleStorage_postInit调用（一共9种Storage）
+
+初始化了attype_to_py_storage_type和py_storage_type_to_attype表，这两个表分别是从ATen type到Python storage type的映射，以及Python storage type到ATen type的映射：
+
+std::unordered_map<at::Type*, PyTypeObject*> attype_to_py_storage_type;
+std::unordered_map<PyTypeObject*, at::Type*> py_storage_type_to_attype;
+*/
   THPStorage_postInit(module);
+  /*
+  用来初始化cpp_function_types表，这个表维护了从cpp类型的函数到python类型的映射：
+
+static std::unordered_map<std::type_index, THPObjectPtr> cpp_function_types
+这个表里存放的都是和autograd相关的函数的映射关系。
+    */
   THPAutograd_initFunctions(); // 这里调用,初始化了微分系统 初始化了torch的自动微分系统，这是PyTorch动态图框架的基础。
   Py_RETURN_NONE;
   END_HANDLE_TH_ERRORS

@@ -1202,6 +1202,7 @@ initModule之后
 
 _C._initExtension(manager_path())
 _C._init_names(list(torch._storage_classes))
+在初始化完Strorage的name后，PyTorch开始执行_initExtension调用。
 '''
 # Shared memory manager needs to know the exact location of manager executable
 _C._initExtension(manager_path()) #这些函数的作用就是将c++函数与python进行初始绑定===/csrc/Module.cpp文件中找到了这些函数
@@ -1245,6 +1246,37 @@ for name in dir(_C._VariableFunctions):
 ################################################################################
 
 # needs to be after the above ATen bindings so we can overwrite from Python side
+'''
+import出torch/functional.py中定义的函数：
+
+'btriunpack',
+'broadcast_tensors',
+'btrifact',
+'btrifact_with_info',
+'cartesian_prod',
+'chain_matmul',
+'einsum',
+'gesv',
+'isfinite',
+'isinf',
+'lu',
+'lu_unpack',
+'norm',
+'meshgrid',
+'potrf',
+'pstrf',
+'potrs',
+'split',
+'stft',
+'tensordot',
+'trtrs',
+'unique'
+实例化torch._C._EngineBase，这个会执行THPEngine_new调用。
+
+执行torch._C._autograd_init()，这个会执行C++中的THPAutograd_initExtension调用，初始化torch.autograd.ProfilerEvent符号。
+
+执行c10d_init，检查torch.distributed符号是否ready。
+'''
 from .functional import *  # noqa: F403
 
 
@@ -1326,6 +1358,10 @@ import torch.nn.qat
 import torch.nn.intrinsic
 
 #这些函数的作用就是将c++函数与python进行初始绑定===/csrc/Module.cpp文件中找到了这些函数
+#Python中的_init_names调用的是C++中的THPModule_initNames，
+# 这个函数起的作用就是给这些Storage相关的python object一个tp_name，
+# 比如，HalfStorage类的tp_name就初始化为torch.HalfStorage，
+# 其它类型Storage类的tp_name如下所示，可以看到就是在前面加上了module的名字：
 _C._init_names(list(torch._storage_classes))
 
 # attach docstrings to torch and tensor functions
@@ -1339,7 +1375,16 @@ def compiled_with_cxx11_abi():
 
 
 # Import the ops "namespace"
+'''
+通过定义_Ops类的load_library方法，实现了自定义op的动态加载。你可以使用下面的方法来加载自己编译的动态库：
+
+torch.ops.load_library('path/to/libgemfield.so')
+这样就可以将libgemfield.so 加载到当前进程的地址空间。背后使用的是python的ctypes库：
+
+ctypes.CDLL(gemfield_library_path)
+'''
 from torch._ops import ops
+
 from torch._classes import classes
 
 # quantization depends on torch.fx

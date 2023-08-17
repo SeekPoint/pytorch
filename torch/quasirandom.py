@@ -4,6 +4,7 @@ from typing import Optional
 from pydebug import debuginfo
 class SobolEngine:
     r"""
+    实现了SobolEngine，这是用来产生Sobol 序列的引擎。Sobol 序列是准随机低差异序列的一个例子，最初由俄罗斯数学家Ilya M. Sobol 于1967年提出。
     The :class:`torch.quasirandom.SobolEngine` is an engine for generating
     (scrambled) Sobol sequences. Sobol sequences are an example of low
     discrepancy quasi-random sequences.
