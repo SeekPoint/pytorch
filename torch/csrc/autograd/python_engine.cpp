@@ -482,7 +482,34 @@ PyTypeObject THPEngineType = {
 static void child_atfork() {
   _reinitialize_engine = true;
 }
+/*
+THPEngine_initModule(module)创建了torch._C._EngineBase，
+Engine实现了从中间输出的variable的grad到root variable（用户创建的Variable）之间的反向传播:
 
+
+上面的初始化代码向torch._C中注册了_ImperativeEngine属性。在variable的python接口中（torch/autograd/variable.py），会以下面的方式使用_ImperativeEngine：
+
+from torch._C import _ImperativeEngine as ImperativeEngine
+Variable._execution_engine = ImperativeEngine()
+除此之外，还需要注册默认的engine stub（其实就是返回初始化好的PythonEngine）：
+
+static torch::autograd::python::PythonEngine engine;
+
+std::atomic<EngineStub> engine_stub(get_base_engine);
+
+void set_default_engine_stub(EngineStub stub) {
+  engine_stub.store(stub);
+}
+
+static Engine& get_python_engine() {
+  return engine;
+}
+
+set_default_engine_stub(get_python_engine);
+如果Python是启用的话（当然了，毕竟是PyTorch嘛），那么base engine就是一个Python Engine。
+
+
+*/
 bool THPEngine_initModule(PyObject* module) {
 #ifndef _WIN32
   if (pthread_atfork(nullptr, nullptr, child_atfork) != 0) {

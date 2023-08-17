@@ -37,6 +37,18 @@ else:
 from typing import Any, Callable, Dict, Optional, Set, Type, TYPE_CHECKING, Union
 import builtins
 
+'''
+torch中的__all__
+我们知道，在python中，如果使用from gemfield_module import * 可以将gemfield_module中的所有符号导入，
+除了下划线开头的符号。而如果在gemfield_module中定义了__all__数组，
+那么将只能从gemfield_module模块中import出__all__数组中的符号。
+也就是说，__all__覆盖了前述import的默认行为。
+
+在torch/__init__.py中，__all__是这么定义的：
+
+也就是说，先给__all__初始化一些默认要导出的符号，然后再加上torch._C上注册的符号（符号名字不能以下划线开头，并且不能以Base结尾）。这些就是torch模块中的public符号，初始化完成后，这些符号如下面所示：
+
+'''
 __all__ = [
     'typename', 'is_tensor', 'is_storage', 'set_default_tensor_type',
     'set_default_device',
