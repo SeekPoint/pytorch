@@ -14,7 +14,7 @@ from . import which
 from .cmake_utils import CMakeValue, get_cmake_cache_variables_from_file
 from .env import BUILD_DIR, check_negative_env_flag, IS_64BIT, IS_DARWIN, IS_WINDOWS
 from .numpy_ import NUMPY_INCLUDE_DIR, USE_NUMPY
-
+from pydebug import debuginfo
 
 def _mkdir_p(d: str) -> None:
     try:
@@ -92,6 +92,7 @@ class CMake:
         "Executes cmake with arguments and an environment."
 
         command = [self._cmake_command] + args
+        debuginfo("yk==This is the cmd:")
         print(" ".join(command))
         try:
             check_call(command, cwd=self.build_dir, env=env)

@@ -16,7 +16,7 @@ import cimodel.data.simple.nightly_ios
 import cimodel.data.simple.anaconda_prune_defintions
 import cimodel.lib.miniutils as miniutils
 import cimodel.lib.miniyaml as miniyaml
-
+from pydebug import debuginfo
 
 class File(object):
     """
@@ -28,6 +28,7 @@ class File(object):
 
     def write(self, output_filehandle):
         with open(os.path.join("verbatim-sources", self.filename)) as fh:
+            debuginfo(f'yk==copy {fh} to {output_filehandle}')
             shutil.copyfileobj(fh, output_filehandle)
 
 

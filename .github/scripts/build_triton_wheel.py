@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from typing import Optional
 import sys
 import shutil
+from pydebug import debuginfo
 SCRIPT_DIR = Path(__file__).parent
 
 def read_triton_pin() -> str:
@@ -52,12 +53,14 @@ def build_triton(commit_hash: str, build_conda: bool = False, py_version : Optio
             check_call(["conda", "build", "--python", py_version,
                         "-c", "pytorch-nightly", "--output-folder", tmpdir, "."], cwd=triton_basedir)
             conda_path = list(Path(tmpdir).glob("linux-64/torchtriton*.bz2"))[0]
+            debuginfo(f'yk==copy {conda_path} to {Path.cwd()}')
             shutil.copy(conda_path, Path.cwd())
             return Path.cwd() / conda_path.name
 
         patch_setup_py(triton_pythondir / "setup.py", name="pytorch-triton", version=f"2.0.0+{commit_hash[:10]}")
         check_call([sys.executable, "setup.py", "bdist_wheel"], cwd=triton_pythondir)
         whl_path = list((triton_pythondir / "dist").glob("*.whl"))[0]
+        debuginfo(f'yk==copy {whl_path} to {Path.cwd()}')
         shutil.copy(whl_path, Path.cwd())
         return Path.cwd() / whl_path.name
 

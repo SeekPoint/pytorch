@@ -9,7 +9,7 @@ from setuptools import distutils  # type: ignore[import]
 from .setup_helpers.cmake import CMake, USE_NINJA
 
 from .setup_helpers.env import check_negative_env_flag, IS_64BIT, IS_WINDOWS
-
+from pydebug import debuginfo
 
 def _overlay_windows_vcvars(env: Dict[str, str]) -> Dict[str, str]:
     vc_arch = "x64" if IS_64BIT else "x86"
@@ -80,6 +80,7 @@ def build_caffe2(
     cmake: CMake,
 ) -> None:
     my_env = _create_build_env()
+    debuginfo("yk==my_env:", my_env)
     build_test = not check_negative_env_flag("BUILD_TEST")
     cmake.generate(
         version, cmake_python_library, build_python, build_test, my_env, rerun_cmake
@@ -91,4 +92,5 @@ def build_caffe2(
         caffe2_proto_dir = os.path.join(cmake.build_dir, "caffe2", "proto")
         for proto_file in glob(os.path.join(caffe2_proto_dir, "*.py")):
             if proto_file != os.path.join(caffe2_proto_dir, "__init__.py"):
+                debuginfo(f'yk==copy {proto_file} to {os.path.join("caffe2", "proto")}')
                 shutil.copy(proto_file, os.path.join("caffe2", "proto"))

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import torch
+from pydebug import debuginfo
 from . import _C
 
 # Top-level APIs. Please think carefully before adding something to the
@@ -25,5 +26,5 @@ from torch._functorch.make_functional import (
     FunctionalModule,
     FunctionalModuleWithBuffers,
 )
-print('yk==build')
+debuginfo('yk==build')
 __version__ = torch.__version__

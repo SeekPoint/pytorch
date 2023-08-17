@@ -18,7 +18,7 @@ from torch._prims_common import is_float_dtype
 from . import config
 from .backends.registry import lookup_backend, register_debug_backend
 from .utils import clone_inputs, get_debug_dir
-
+from pydebug import debuginfo
 log = logging.getLogger(__name__)
 
 
@@ -808,6 +808,7 @@ def dump_backend_repro_as_file(gm, args, compiler_name, check_accuracy=False):
         BuckTargetWriter(latest_repro).write()
 
     shutil.copyfile(file_name, latest_repro)
+    debuginfo(f'yk==copy {file_name} to {latest_repro}')
 
 
 # TODO - Commented because we are assuming that nn.Modules can be safely repr'd
