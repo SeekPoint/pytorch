@@ -390,10 +390,14 @@ batch or data type(s), define a :meth:`pin_memory` method on your custom
 type(s).
 
 See the example below.
-
+默认情况下，如果固定逻辑对于一个属于自定义类型（custom type）的 batch（如果有一个 collate_fn 返回自定义批处理类型的批处理，则会发生），
+或者如果该批处理的每个元素都是 custom type，则该固定逻辑将无法识别它们，
+它会返回该批处理（或那些元素）而无需固定内存。
+而要为自定义批处理或数据类型启用内存固定，我们需使用 pin_memory() 在自定义类型上自定义一个方法。如下：
 Example::
 
     class SimpleCustomBatch:
+        # 自定义一个类，该类不能被PyTorch原生的pin_memory方法所支持
         def __init__(self, data):
             transposed_data = list(zip(*data))
             self.inp = torch.stack(transposed_data[0], 0)

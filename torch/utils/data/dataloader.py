@@ -666,6 +666,13 @@ class DataLoader(Generic[T_co]):
             cuda0 = torch.device('cuda:0')  # CUDA GPU 0
             for i, x in enumerate(train_loader):
                 x = x.to(cuda0)
+                
+    +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++            
+    for data, label in train_loader:
+        ......
+    for 循环会调用 dataloader 的 __iter__(self) 方法，以此获得迭代器来遍历 dataset。
+    在 __iter__(self) 方法中，dataloader 调用了 self._get_iterator() 方法，根据 num_workers 获得迭代器，并指示是进行单进程还是多进程处理。
+
     '''
     def __iter__(self) -> '_BaseDataLoaderIter':
         # When using a single worker the returned iterator should be
@@ -688,6 +695,15 @@ class DataLoader(Generic[T_co]):
     def _auto_collation(self):
         return self.batch_sampler is not None
 
+    '''
+    从这里看出，dataloader 提供了 sampler（可以是batch_sampler 或者是其他 sampler 子类），
+    然后 _SingleProcessDataLoaderIter 迭代 sampler 获得索引。
+
+下面我们来看看 fetcher，fetcher 需要 index 来获取元素，
+并同时支持 Map-style dataset（对应 _MapDatasetFetcher）和 Iterable-style dataset（对应 _IterableDatasetFetcher），
+使其在 Dataloader 内能使用相同的接口 fetch，代码更加简洁。
+
+    '''
     #这里关键函数之一就是_index_sampler，用来让迭代器调用sampler，我们接下来就会讲到
     @property
     def _index_sampler(self): #关键函数之一就是_index_sampler，用来让迭代器调用sampler
@@ -812,9 +828,15 @@ _BaseDataLoaderIter 是迭代器基类，我们挑选关键函数看看。
 这里关键成员变量就是：
     _index_sampler：这里设置了loader 的 sampler，所以迭代器可以据此获取采样策略。
     _sampler_iter：得到 sampler 的迭代器。
+    
+_BaseDataLoaderIter 是所有 DataLoaderIter 的父类。
+dataloader获得了迭代器之后，for 循环需要调用 __next__() 来获得下一个对象，从而实现遍历。
+通过 __next__() 方法调用 _next_data() 获取数据。
 '''
 class _BaseDataLoaderIter:
     def __init__(self, loader: DataLoader) -> None:
+        # 初始化赋值一些 DataLoader 参数，
+        # 以及用户输入合法性进行校验
         self._dataset = loader.dataset
         self._shared_seed = None
         self._pg = None
@@ -875,7 +897,9 @@ class _BaseDataLoaderIter:
         通过 _worker_queue_idx_cycle 找出下一个可用的工作worker，然后把index分给它。
         并且调整主进程的信息。
     '''
-    def _next_index(self):    # 定义在基类 _BaseDataLoaderIter 之中，就是获取下一批index
+    def _next_index(self):
+        # 定义在基类 _BaseDataLoaderIter 之中，就是获取下一批index
+        # sampler_iter 来自于 index_sampler
         return next(self._sampler_iter)  # may raise StopIteration
 
     def _next_data(self):
@@ -899,7 +923,7 @@ class _BaseDataLoaderIter:
             if self._sampler_iter is None:
                 # TODO(https://github.com/pytorch/pytorch/issues/76750)
                 self._reset()  # type: ignore[call-arg]
-            data = self._next_data()  # 获取数据
+            data = self._next_data()  # 获取数据  # 重点代码行，通过此获取数据
             self._num_yielded += 1
             if self._dataset_kind == _DatasetKind.Iterable and \
                     self._IterableDataset_len_called is not None and \
@@ -931,6 +955,13 @@ _SingleProcessDataLoaderIter 继承了 _BaseDataLoaderIter，可以看到，其�
 回忆下，__next__会调用 self._next_data() 获取数据，而在这里，_next_data 就会：
     使用 self._next_index()，其又会使用 _sampler_iter（采样器的迭代器）来获取indices 。
     使用 self._dataset_fetcher.fetch(index)来依据indices获取数据。
+    
+
+从 _SingleProcessDataLoaderIter 的初始化参数可以看到，
+其在父类 _BaseDataLoaderIter 的基础上定义了 _dataset_fetcher，
+并传入 _dataset，_auto_collation，_collate_fn 等参数，
+用于定义获取数据的方式。其具体实现会在稍后解释。
+在 _next_data() 被调用后，其需要 _next_index() 获取 index，并通过获得的 index 传入 _dataset_fetcher 中获取对应样本。
 '''
 class _SingleProcessDataLoaderIter(_BaseDataLoaderIter):
     def __init__(self, loader):
@@ -1057,6 +1088,9 @@ _MultiProcessingDataLoaderIter 中的注释十分详尽，值得大家深读，�
     data_queue: 经过主进程 pin_memory 线程处理之后的数据队列，如果不需要pin，则直接会使用 _worker_result_queue。
     _worker_queue_idx_cycle 用以找出下一个工作的worker。
 
+
+
+每个 worker 一次产生一个 batch 的数据，返回 batch 数据前放入下一个批次要处理的数据下标，对应构造函数子进程初始化如下：
 '''
 class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
     '''
@@ -1403,6 +1437,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                 _sharding_worker_init_fn, self._worker_init_fn, self._world_size, self._rank)
 
         # No certainty which module multiprocessing_context is
+        # # 把该worker取出的数放入该队列，用于进程间通信
         self._worker_result_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated] # 子进程输出，读取完数据的index
         self._worker_pids_set = False
         self._shutdown = False
@@ -1412,11 +1447,14 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         self._workers = []
         for i in range(self._num_workers):
             # No certainty which module multiprocessing_context is
-            index_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated]
+            index_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated]  # 索引队列，每个子进程一个队列放要处理的下标
             # Need to `cancel_join_thread` here!
             # See sections (2) and (3b) above.
             index_queue.cancel_join_thread()
+            # _worker_loop 的作用是：从index_queue中取索引，然后通过collate_fn处理数据，
+            # 然后再将处理好的 batch 数据放到 data_queue 中。（发送到队列中的idx是self.send_idx）
             w = multiprocessing_context.Process(
+                ## 每个worker子进程循环执行的函数，主要将数据以(idx, data)的方式传入_worker_result_queue中
                 target=_utils.worker._worker_loop,  # worker进程主函数，把各种queue和函数传进去
                 args=(self._dataset_kind, self._dataset, index_queue,
                       self._worker_result_queue, self._workers_done_event,
@@ -1438,6 +1476,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             self._pin_memory_thread_done_event = threading.Event()
 
             # Queue is not type-annotated
+            # 用于存取出的数据进行 pin_memory 操作后的结果
             self._data_queue = queue.Queue()  # type: ignore[var-annotated]  # pin 处理之后的数据结果
             if self._pin_memory_device == "xpu":
                 current_device = torch.xpu.current_device()  # type: ignore[attr-defined]
@@ -1511,12 +1550,18 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         在 reset 方法最后，有一个预取数据操作。我们会在后面结合乱序处理进行讲解。
         '''
         super()._reset(loader, first_iter)
+        # 发送索引，用来记录这次要放 index_queue 中 batch 的 idx
         self._send_idx = 0  # idx of the next task to be sent to workers
+
+        #接受索引，记录要从 data_queue 中取出的 batch 的 idx
         self._rcvd_idx = 0  # idx of the next task to be returned in __next__
+
         # information about data not yet yielded, i.e., tasks w/ indices in range [rcvd_idx, send_idx).
         # map: task idx => - (worker_id,)        if data isn't fetched (outstanding)
         #                  \ (worker_id, data)   if data is already fetched (out-of-order)
         self._task_info = {}
+
+        ## _tasks_outstanding 指示当前已经准备好的 task/batch 的数量（可能有些正在准备中）
         self._tasks_outstanding = 0  # always equal to count(v for v in task_info.values() if len(v) == 1)
         # A list of booleans representing whether each worker still has work to
         # do, i.e., not having exhausted its iterable dataset object. It always
@@ -1543,8 +1588,10 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
 
         # 预取若干index，目的是为了配合后续的乱序处理。
         # prime the prefetch loop
+        #DataLoader 通过指定 prefetch_factor （默认为 2）来进行数据的预取。  prefetch 功能仅适用于多进程加载中
+        ## 初始化的时候，就将 2*num_workers 个 (batch_idx, sampler_indices) 放到 index_queue 中
         for _ in range(self._prefetch_factor * self._num_workers):
-            self._try_put_index()
+            self._try_put_index()  # 进行预取
 
     #_try_get_data 就是从 _data_queue 读取。主进程和worker进程通过queue上的put, get进行通讯交互。
     def _try_get_data(self, timeout=_utils.MP_STATUS_CHECK_INTERVAL):
@@ -1754,7 +1801,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # extra worker(s) as dead.
 
             # 找到待取idx
-            while self._rcvd_idx < self._send_idx: # 如果 待取batch idx < 已取batch idx
+            while self._rcvd_idx < self._send_idx: # 如果 待取batch idx < 已取batch idx  # 确保待处理的任务(待取的batch)下标 > 处理完毕要返回的任务(已经取完的batch)下标
                 info = self._task_info[self._rcvd_idx]
                 worker_id = info[0]
                 if len(info) == 2 or self._workers_status[worker_id]:  # has data or is still active
@@ -1775,8 +1822,8 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                 return self._process_data(data)  # 设定下一次的indx，进行下一次迭代
 
             assert not self._shutdown and self._tasks_outstanding > 0
-            idx, data = self._get_data()  # 从 self._data_queue 中取数据
-            self._tasks_outstanding -= 1  # 正在准备的batch个数需要减1
+            idx, data = self._get_data()  # 从 self._data_queue 中取数据  # 调用 self._try_get_data() 从 self._data_queue 中取数
+            self._tasks_outstanding -= 1  # 正在准备的batch个数需要减1  # 表明预备好的batch个数需要减1
             if self._dataset_kind == _DatasetKind.Iterable:
                 # Check for _IterableDatasetStopIteration
                 if isinstance(data, _utils.worker._IterableDatasetStopIteration):
@@ -1792,7 +1839,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                 self._task_info[idx] += (data,)
             else:
                 del self._task_info[idx]  # 正常数据
-                return self._process_data(data)  # 设定下一次的indx，进行下一次迭代
+                return self._process_data(data)  # 设定下一次的indx，进行下一次迭代 # 返回数据
 
     def _try_put_index(self):
         '''
@@ -1802,6 +1849,8 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             通过 _worker_queue_idx_cycle 找出下一个可用的工作worker，然后把index分给它。
             并且调整主进程的信息。
         '''
+
+        # self._prefetch_factor 默认为 2
         assert self._tasks_outstanding < self._prefetch_factor * self._num_workers
 
         try:
@@ -1817,25 +1866,26 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             return
 
         # 以下是主进程进行相关记录
-        # 给下一个工作worker放入 (任务index, 数据index), 就是给queue放入数据，所以worker loop之中就立刻会从queue中得到index，从而开始获取数据。
-        self._index_queues[worker_queue_idx].put((self._send_idx, index))
+        # 给下一个工作worker放入 (任务index, 数据index), 就是给queue放入数据，
+        # 所以worker loop之中就立刻会从queue中得到index，从而开始获取数据。
+        self._index_queues[worker_queue_idx].put((self._send_idx, index)) # 放入 任务下标 和 数据下标
 
         # 记录 将要产生的 data 信息
         self._task_info[self._send_idx] = (worker_queue_idx,)
 
         # 正在处理的batch个数+1
-        self._tasks_outstanding += 1
+        self._tasks_outstanding += 1  # _tasks_outstanding + 1，表明预备好的batch个数+1
 
-        # send_idx 记录从sample_iter中发送索引到index_queue的次数
+        # send_idx 记录从sample_iter中发送索引到index_queue的次数  # send_idx 发送索引, 记录从sample_iter中发送索引到index_queue的次数
         self._send_idx += 1 # 递增下一批发送的task index
 
     # 设置下一次迭代是使用_process_data。
     def _process_data(self, data):
         self._rcvd_idx += 1
-        self._try_put_index() # 设定下一次的indx，进行下一次迭代
+        self._try_put_index() # 设定下一次的indx，进行下一次迭代   # 同上，主要放入队列索引 以及 更新flag
         if isinstance(data, ExceptionWrapper):
             data.reraise()
-        return data # 返回数据
+        return data # 返回数据   #这样，多进程模式的 dataloader 就能通过多个 worker 的协作来共同完成数据的加载
 
     def _mark_worker_as_unavailable(self, worker_id, shutdown=False):
         # Mark a worker as having finished its work e.g., due to
