@@ -827,7 +827,11 @@ Tensor randint(
 Tensor& randint_out(int64_t high, IntArrayRef size, Tensor& result) {
   return native::randint_out(high, size, c10::nullopt, result);
 }
-
+/*
+可以清楚地看到两个函数名称相同参数输入不同，在经过不同处理后，两函数进行输出。而两个函数在最后又都调用了不同函数，这两个函数的位置与之前的函数不同，
+并不在torch包中，而是在\pytorch-master\aten\src\ATen\native\TensorFactories.cpp这个文件中，也有多种实现，在这里贴出其中两种
+可见到这里后，终于这个函数的调用要接近尾声，而这里的random_函数实质上还在另一文件中，其在pytorch-master\aten\src\ATen\native\DistributionTemplates.h中被实现，具体实现的说明如下：
+*/
 Tensor& randint_out(int64_t high,
     IntArrayRef size,
     c10::optional<Generator> generator,
