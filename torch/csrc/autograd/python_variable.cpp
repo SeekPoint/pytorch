@@ -252,7 +252,28 @@ static PyObject* getPythonTensorClass(c10::Device d) {
 void activateCUDATrace() {
   c10::impl::GPUTrace::set_trace(getPyInterpreter());
 }
+/*
+可以看到，在此处我们再观察函数的传入参数，发现是一个TensorBase类型的参数，而如果读者自己查看的话，会发现之前在上层函数传入的torch::utils::tensor_ctor函数返回的为Tensor类型。
+很明显TensorBase为Tensor类型的基类，那么为什么在已经有了Tensor类的情况下还要定义一个TensorBase类呢？
+其实，这样定义的主要原因在于工程方面，即如果只使用Tensor类，那么当我需要修改Tensor类时（例如增加一个Tensor类的函数），需要重新编译非常多的C++文件，消耗极多的时间，这是不符合工程上的要求的。
+所以，pytorch开发人员又定义了一个TensorBase类，由此修改Tensor时无需消耗大量的时间。
+而我们上文提到的元数据，即Tensor的sizes，strides，numelements等，其实是在TensorImpl类中存储和定义的。我们可以在TensorImpl.h中找到如下代码：
 
+ ExtraMeta(
+      SymDimVector sizes,
+      SymDimVector strides,
+      SymInt numel,
+
+ 同时，TensorImpl类还有一个关键的作用，即它包含一个名为引用计数的概念。当我们执行如下代码
+void func(Tensor a) {
+   Tensor b = a;
+   ...
+ }
+
+ 我们其实需要创建一个新的Tensor，其指向与a相同指向的TensorImpl，同时将TensorImpl的引用计数加一。这样的好处在于，我们不需要为每一个新创立的Tensor都分配物理上的空间，这会造成对空间的极大浪费，值得一提的是，Tensor也可以为NULL，此时它并不指向任意一个TensorImpl。
+
+到此处为止，我们已经将Tensor相关的资源分配完毕，现在我们只需要将Tensor再次包装入Variable中，再将其与python函数绑定即可。该行为由THPVariable_NewWithVar函数完成，这个函数在上文展示过的THPVariable_Wrap函数中扮演返回值的角色。
+*/
 // TODO: Make this take Variable by const reference
 PyObject* THPVariable_Wrap(at::TensorBase var) {
   if (!var.defined()) {
@@ -1851,6 +1872,12 @@ void THPVariable_subclass_dealloc(PyObject* self) {
 // TAGGED_BY_US or MAYBE_UNINITIALIZED; in other cases, you know where
 // var came from and can directly assert that it's DEFINITELY_UNINITIALIZED.
 // It's ALWAYS safe (albeit slower) to call this with MAYBE_UNINITIALIZED.
+/*
+在这一函数内，pytorch进行了Variable对TensorImpl的绑定，具体过程为首先用THPVariable_Unpack对THPVariable类进行Unpack操作，
+得到Tensor类型变量var，之后将Tensor与TensorImpl进行绑定，之后再返回THPVariable类变量obj。
+此时返回的Variable变量已经是一个与python绑定完成的变量了。
+此时，流程大体结束，我们便可以在python中对torch.tensor(...)进行操作了。
+*/
 static PyObject* THPVariable_NewWithVar(
     PyTypeObject* type,
     Variable _var,

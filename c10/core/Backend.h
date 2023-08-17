@@ -122,7 +122,10 @@ static inline Backend dispatchKeyToBackend(DispatchKey t) {
     TORCH_CHECK(false, "Unrecognized tensor type ID: ", t);
   }
 }
-
+/*
+仔细观察这个函数，我们可以看到被传入的参数为torch::utils::tensor_ctor方法的返回值，这之中的get_default_dispatch_key和get_default_scalar_type其实便是tensor模块中的动态分派过程。
+动态分派简单来讲是将要运算的tensor分派到适合的函数进行运算，例如使用CPU函数，或是使用GPU函数，使用FLOAT类型或是使用INT类型，均有不同的函数为追求更高的效率进行目的相同，过程稍有差别的计算。
+*/
 static inline DispatchKey backendToDispatchKey(Backend b) {
   switch (b) {
     case Backend::CPU:

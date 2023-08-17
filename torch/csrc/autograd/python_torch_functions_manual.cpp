@@ -570,6 +570,19 @@ static PyMethodDef torch_functions_manual[] = {
      castPyCFunctionWithKeywords(THPVariable_sparse_bsc_tensor),
      METH_VARARGS | METH_KEYWORDS | METH_STATIC,
      nullptr},
+     //pytorch中针对python函数和c语言函数的绑定大部分在python_torch_functions_manual.cpp中完成。
+     /*
+Variable除去Tensorlei外，还包含一个名为AutogradMeta的模块，这个模块即包含Tensor在进行微分时所需求的元数据。
+熟悉深度学习的读者应该了解，在深度学习进行反向传播时，每一个节点都需要一些元数据帮助进行梯度的计算，
+如本节点输入数据，下一层输出数据等等，这些数据便会存储在Variable类中，帮助进行便捷的反向传播。
+
+     当我们在python文件中运行torch.tensor(...)时，python文件将依据以上代码找到C++文件中的函数。
+
+static PyObject* THPVariable_tensor(
+
+可以看到，函数绑定到C++的第一步，pytorch便已经开始使用THPVariable_Wrap进行包装，
+将Tensor转化为Variable类型了
+    */
     {"tensor",
      castPyCFunctionWithKeywords(THPVariable_tensor),
      METH_VARARGS | METH_KEYWORDS | METH_STATIC,
