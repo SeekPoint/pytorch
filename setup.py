@@ -204,7 +204,15 @@
 #        USE_SYSTEM_CPUINFO=ON USE_SYSTEM_SLEEF=ON BUILD_CUSTOM_PROTOBUF=OFF
 
 # This future is needed to print Python2 EOL message
+'''
+setup.py与setuptools
+对于setup.py来说，它的作用是将pytorch文件进行安装（包括编译c/c++文件，检查dll文件和模组文件是否完全等等），并将该项目安装到当前环境python的‘site-packages’目录下，
+使其可以像导入标准库一样导入。
+要完成该功能，pytorch开发人员使用了setuptools工具，所以其实setup.py是按照setuptools的规定格式编写的。
+因此想要彻底理解setup.py的全部代码含义，首先要完全理解setuptools的使用方法。在后文讲解到pytorch相关代码时会引用到部分setuptools的知识，
+这里作者将setuptools的官方文档贴出，如果想详细了解setuptools工具，可以自由查阅。
 
+'''
 '''
 本文以PyTorch 1.0为基础。PyTorch的编译首先是python风格的编译，使用了python的setuptools编译系统。以最基本的编译安装命令python setup.py install 为例，这一编译过程包含了如下几个主要阶段：
 1，setup.py入口；
@@ -402,6 +410,7 @@ def check_submodules():
 
 # Windows has very bad support for symbolic links.
 # Instead of using symlinks, we're going to copy files over
+#mirror_files_into_torchgen()则是检查项目的一些临时文件是否已经被创建，若没有则创建目录和文件，保证本机环境和torch需要的安装环境相同。
 def mirror_files_into_torchgen():
     # (new_path, orig_path)
     # Directories are OK and are recursively mirrored.
@@ -433,6 +442,7 @@ def mirror_files_into_torchgen():
 
 def build_deps():
     '''
+
     build_dep()函数也是检查工作的一部分，其内部包含检查分模块，检查python包依赖以及python文件位置等等。
     值得注意的是，这些检查行为都发生在真正的setup操作之前，目的在于保证安装的正确进行，是安装pytorch必不可少的操作。
     '''
@@ -1070,7 +1080,6 @@ def print_box(msg):
         print('|{}{}|'.format(l, ' ' * (size - len(l))))
     print('-' * (size + 2))
 
-
 def main():
     # the list of runtime dependencies required by this built package
     install_requires = [
@@ -1089,6 +1098,8 @@ def main():
     # building deps and setup. We need to set values so `--help` works.
 
     #Distribution()类是定义在setuptools中的一个类，其作用就是检查主机环境是否含有项目所要求的所有的依赖，若没有则自动安装。
+    # 首先，文件实例化了一个Distribution()类变量。
+    # Distribution()类是定义在setuptools中的一个类，其作用就是检查主机环境是否含有项目所要求的所有的依赖，若没有则自动安装。
     dist = Distribution()
     dist.script_name = os.path.basename(sys.argv[0])
     dist.script_args = sys.argv[1:]
@@ -1282,13 +1293,7 @@ def main():
         'packaged/ATen/native/*',
         'packaged/ATen/templates/*',
     ]
-    '''
-    setup()函数无疑是setup.py()的核心，
-    其本身也是由setuptools实现好的函数，
-    pytorch项目将各种该函数需要的参数设计好，
-    再传入setup()函数中，
-    即可方便快捷的进行项目部署。
-    '''
+
 
     '''
     4，cmdclass，setup的操作参数，是一个字典：
@@ -1554,6 +1559,11 @@ gemfield@skyweb:~# ldd ./build/lib.linux-x86_64-3.7/torch/_C.cpython-37m-x86_64-
 
 4，而这里列出来的libtorch.so、libshm.so、libtorch_python.so、libcaffe2.so、libcaffe2_gpu.so、libc10_cuda.so、libc10.so，已经由Gemfield在前文说明过了。
     '''
+    '''
+    setup()函数无疑是setup.py()的核心，其本身也是由setuptools实现好的函数，
+    pytorch项目将各种该函数需要的参数设计好，再传入setup()函数中，即可方便快捷的进行项目部署。
+    可以清楚地看到setup()函数参数包括了项目信息、项目包需求、扩展信息等等
+    '''
     setup(
         name=package_name,
         version=version,
@@ -1561,7 +1571,7 @@ gemfield@skyweb:~# ldd ./build/lib.linux-x86_64-3.7/torch/_C.cpython-37m-x86_64-
                      "Python with strong GPU acceleration"),
         long_description=long_description,
         long_description_content_type="text/markdown",
-        ext_modules=extensions,   #这行代码将刚才我们提到的c/c++扩展包放入了安装过程中，
+        ext_modules=extensions,   #这行代码将刚才我们提到的c/c++扩展包放入了安装过程中，  最后有详细解释！！！
         cmdclass=cmdclass,
         packages=packages,
         entry_points=entry_points,
@@ -1604,3 +1614,75 @@ gemfield@skyweb:~# ldd ./build/lib.linux-x86_64-3.7/torch/_C.cpython-37m-x86_64-
 
 if __name__ == '__main__':
     main()
+
+
+'''
+ext_modules=extensions
+很明显，这行代码将刚才我们提到的c/c++扩展包放入了安装过程中，那么具体是怎样安装的呢？
+
+我们回到之前提到的configure_extension_build()函数中与c/c++相关的片段，注意到在声明Extension类时，其中提到过sources参数，而其所传递的main_sources变量在上文被定义过，即：
+
+main_sources = ["torch/csrc/stub.c"]
+显然，如何编译c++语言与这一文件由很强的相关性，我们找到这一文件，其内部关键代码如下：
+
+PyMODINIT_FUNC PyInit__C(void)
+{
+  return initModule();
+}
+再进一步探寻initModule()方法的来源，我们发现其被定义在/csrc/Module.cpp文件中，而阅览这个函数后，发现其应为整个pytorch项目初始化的关键函数，截取部分代码示例如下：
+
+PyObject* initModule() {
+  HANDLE_TH_ERRORS
+
+  c10::initLogging();
+
+  at::internal::lazy_init_num_threads();
+
+  C10_LOG_API_USAGE_ONCE("torch.python.import");
+
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define ASSERT_TRUE(cmd) \
+  if (!(cmd))            \
+  return nullptr
+
+  THPUtils_addPyMethodDefs(methods, TorchMethods);
+  THPUtils_addPyMethodDefs(methods, DataLoaderMethods);
+  THPUtils_addPyMethodDefs(methods, torch::autograd::python_functions());
+  THPUtils_addPyMethodDefs(methods, torch::multiprocessing::python_functions());
+#ifdef USE_CUDA
+  THPUtils_addPyMethodDefs(methods, THCPModule_methods());
+#endif
+#if defined(USE_DISTRIBUTED) && defined(USE_C10D)
+  THPUtils_addPyMethodDefs(
+      methods, torch::distributed::c10d::python_functions());
+#ifndef _WIN32
+  THPUtils_addPyMethodDefs(
+      methods, torch::distributed::rpc::python_functions());
+  THPUtils_addPyMethodDefs(
+      methods, torch::distributed::autograd::python_functions());
+  THPUtils_addPyMethodDefs(
+      methods, torch::distributed::rpc::testing::python_functions());
+#endif
+#endif
+
+  static struct PyModuleDef torchmodule = {
+      PyModuleDef_HEAD_INIT, "torch._C", nullptr, -1, methods.data()};
+  ASSERT_TRUE(module = PyModule_Create(&torchmodule));
+  ASSERT_TRUE(THPGenerator_init(module));
+  ASSERT_TRUE(THPException_init(module));
+  THPSize_init(module);
+  THPDtype_init(module);
+  THPDTypeInfo_init(module);
+  THPLayout_init(module);
+  THPMemoryFormat_init(module);
+  THPQScheme_init(module);
+  THPDevice_init(module);
+  THPStream_init(module);
+  ASSERT_TRUE(THPVariable_initModule(module));
+  ASSERT_TRUE(THPFunction_initModule(module));
+  ASSERT_TRUE(THPEngine_initModule(module));
+
+  ##下文过多不做赘述
+  }
+可以看到，其不但包括python函数的初始化，还包括一些项目设备、内存格式、设备信息等的初始化，还包括我们上一篇文章提到的THPVariable_initModule()函数，即使用c++实现torch包函数的初始化函数，代码后文还包括一些pybind11绑定相关代码等等。
+'''
