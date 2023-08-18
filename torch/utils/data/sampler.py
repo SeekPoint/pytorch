@@ -13,8 +13,26 @@ __all__ = [
 ]
 
 T_co = TypeVar('T_co', covariant=True)
+'''
 
+#torch.utils.data.Sampler 主要负责提供一种遍历数据集所有元素索引的方式。可支持我们自定义，也可以使用 PyTorch 本身提供的，其基类接口定义如下：
 
+特别地，__len()__ 方法虽不是必要的，但是当 DataLoader 需要计算 length 的时候必须定义，这点在源码中也有注释加以体现。
+
+同样，PyTorch 也在此基础上提供了其他类型的 Sampler 子类：
+
+· torch.utils.data.SequentialSampler：顺序采样样本，始终按照同一个顺序。
+
+· torch.utils.data.RandomSampler：可指定有无放回地，进行随机采样样本元素。
+
+· torch.utils.data.SubsetRandomSampler：无放回地按照给定的索引列表采样样本元素。
+
+· torch.utils.data.WeightedRandomSampler：按照给定的概率来采样样本。样本元素来自 [0,…,len(weights)-1] ，给定概率（权重）。
+
+· torch.utils.data.BatchSampler：在一个 batch 中封装一个其他的采样器, 返回一个 batch 大小的 index 索引。
+
+· torch.utils.data.DistributedSample：将数据加载限制为数据集子集的采样器。与 torch.nn.parallel.DistributedDataParallel 结合使用。在这种情况下，每个进程都可以将 DistributedSampler 实例作为 DataLoader 采样器传递。
+'''
 class Sampler(Generic[T_co]):
     r"""Base class for all Samplers.
 

@@ -18,12 +18,32 @@ class.  It represents a Python iterable over a dataset, with support for
 
 These options are configured by the constructor arguments of a
 :class:`~torch.utils.data.DataLoader`, which has signature::
+4. DataLoader
 
+torch.utils.data.DataLoader 是 PyTorch 数据加载的核心，负责加载数据，
+同时支持 Map-style 和 Iterable-style Dataset，支持单进程/多进程，还可以通过参数设置如 sampler, batch size, pin memory 等自定义数据加载顺序以及控制数据批处理功能。
+其接口定义如下：
     DataLoader(dataset, batch_size=1, shuffle=False, sampler=None,
                batch_sampler=None, num_workers=0, collate_fn=None,
                pin_memory=False, drop_last=False, timeout=0,
                worker_init_fn=None, *, prefetch_factor=2,
                persistent_workers=False)
+
+对于每个参数的含义，下面通过一个表格进行直观地介绍：
+图！！！！！！！
+从参数定义中，我们可以看到 DataLoader 主要支持以下几个功能：
+
+· 支持加载 map-style 和 iterable-style 的 dataset，主要涉及到的参数是 dataset。
+
+· 自定义数据加载顺序，主要涉及到的参数有 shuffle，sampler，batch_sampler，collate_fn。
+
+· 自动把数据整理成batch序列，主要涉及到的参数有 batch_size，batch_sampler，collate_fn，drop_last。
+
+· 单进程和多进程的数据加载，主要涉及到的参数有 num_workers，worker_init_fn。
+
+· 自动进行锁页内存读取 (memory pinning)，主要涉及到的参数 pin_memory。
+
+· 支持数据预加载，主要涉及的参数 prefetch_factor。
 
 The sections below describe in details the effects and usages of these options.
 
@@ -147,6 +167,16 @@ After fetching a list of samples using the indices from sampler, the function
 passed as the :attr:`collate_fn` argument is used to collate lists of samples
 into batches.
 
+
+3.1 批处理
+
+3.1.1 自动批处理（默认）
+
+DataLoader 支持通过参数 batch_size, drop_last, batch_sampler，自动地把取出的数据整理（collate）成批次样本（batch），其中 batch_size 和 drop_last 参数用于指定 DataLoader 如何获取 dataset 的 key。特别地，对于 map-style 类型的 dataset，用户可以选择指定 batch_sample 参数，一次就生成一个 keys list。
+
+在使用 sampler 产生的 indices 获取采样到的数据时，DataLoader 使用 collate_fn 参数将样本列表整理成 batch。抽象整个过程，其表示方式大致如下：
+
+
 In this case, loading from a map-style dataset is roughly equivalent with::
 
     for indices in batch_sampler:
@@ -161,6 +191,49 @@ and loading from an iterable-style dataset is roughly equivalent with::
 A custom :attr:`collate_fn` can be used to customize collation, e.g., padding
 sequential data to max length of a batch. See
 `this section <dataloader-collate_fn_>`_ on more about :attr:`collate_fn`.
+
+
+3.1.2 关闭自动批处理
+
+当我们想用 dataset 代码手动处理 batch，或仅加载单个 sample data 时，可将 batch_size 和 batch_sampler 设为 None, 将关闭自动批处理。此时，由 Dataset 产生的 sample 将会直接被 collate_fn 处理。抽象整个过程，其表示方式大致如下：
+
+# For Map-style
+for index in sampler:
+    yield collate_fn(dataset[index])
+
+# For Iterable-style
+for data in iter(dataset):
+    yield collate_fn(data)
+
+3.1.3 collate_fn
+
+当关闭自动批处理 (automatic batching) 时，collate_fn 作用于单个数据样本，只是在 PyTorch 张量中转换 NumPy 数组。
+
+而当开启自动批处理 (automatic batching) 时，collate_fn 作用于数据样本列表，将输入样本整理为一个 batch，一般做下面 3 件事情：
+
+· 添加新的批次维度（一般是第一维）。
+
+· 它会自动将 NumPy 数组和 Python 数值转换为 PyTorch 张量。
+
+· 它保留数据结构，例如，如果每个样本都是 dict，则输出具有相同键集但批处理过的张量作为值的字典（或 list，当数据类型不能转换的时候）。这在 list，tuples，namedtuples 同样适用。
+
+自定义 collate_fn 可用于自定义排序规则，例如，将顺序数据填充到批处理的最大长度，添加对自定义数据类型的支持等。
+
+5. 三者关系
+
+通过以上解析的三者工作内容，不难可以推出其内在关系：
+
+1）设置 Dataset，将数据 data source 包装成 Dataset 类，暴露出提取接口。
+
+2）设置 Sampler，决定采样方式。我们虽然能从 Dataset 中提取元素了，但还是需要设置 Sampler 告诉程序提取 Dataset 的策略。
+
+3）将设置好的 Dataset 和 Sampler 传入 DataLoader，同时可以设置 shuffle，batch_size 等参数。使用 DataLoader 对象可以方便快捷地在数据集上遍历。
+
+至此我们就可以了解到了 Dataset，Sampler，Dataloader 三个类的基本定义以及对应实现功能，同时也介绍了批处理对应参数组件。总结来说，我们需要记得的是三点，即 Dataloader 负责总的调度，命令 Sampler 定义遍历索引的方式，然后用索引去 Dataset 中提取元素。于是就实现了对给定数据集的遍历。
+
+今天的分享就到此为止啦，关于 prefetch，pin_memory 等组件的介绍，我们会在后续系列文章中和大家分享，并对其特定功能予以解读，相关的数据处理代码详解也会一并附上。
+
+
 
 Disable automatic batching
 ^^^^^^^^^^^^^^^^^^^^^^^^^^

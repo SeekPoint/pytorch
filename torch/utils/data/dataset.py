@@ -32,7 +32,59 @@ __all__ = [
 T_co = TypeVar('T_co', covariant=True)
 T = TypeVar('T')
 
+'''
+1. 迭代器介绍
 
+OK，在正式解析 PyTorch 中的 torch.utils.data 模块之前，我们需要理解一下 Python 中的迭代器（Iterator），因为在源码的 Dataset, Sampler 和 DataLoader 这三个类中都会用到包括 __len__(self)，__getitem__(self) 和 __iter__(self) 的抽象类的魔法方法。
+
+· __len__(self)：定义当被 len() 函数调用时的行为，一般返回迭代器中元素的个数。
+
+· __getitem__(self)：定义获取容器中指定元素时的行为，相当于 self[key] ，即允许类对象拥有索引操作。
+
+· __iter__(self)：定义当迭代容器中的元素时的行为。
+
+除此之外，我们也需要清楚两个概念：
+
+· 迭代（Iteration）:当我们用一个循环（比如 for 循环）来遍历容器（比如列表，元组）中的元素时，这种遍历的过程可称为迭代。
+
+· 可迭代对象（Iterable）：一般指含有 __iter__() 方法或 __getitem__() 方法的对象。我们通常接触的数据结构，如序列（列表、元组和字符串）还有字典等，都支持迭代操作,也可称为可迭代对象。
+
+那什么是迭代器（Iterator）呢？简而言之，迭代器就是一种可以被遍历的容器类对象，但它又比较特别，它需要遵循迭代器协议，那什么又是迭代器协议呢？迭代器协议（iterator protocol）是指要实现对象的 __iter()__ 和 __next__() 方法。一个容器或者类如果是迭代器，那么就必须实现 __iter__() 方法以及重点实现 __next__() 方法，前者会返回一个迭代器（通常是迭代器对象本身），而后者决定了迭代的规则。现在，为更好地理解迭代器的内部运行机制，我们可以看一个斐波那契数列的迭代器实现例子：
+
+一般而言，迭代器满足以下几种特性：
+
+· 迭代器是⼀个对象，但比较特别，需要满足迭代器协议，他还可以被 for 语句循环迭代直到终⽌。
+
+· 迭代器可以被 next() 函数调⽤，并返回⼀个值，亦可以被 iter() 函数调⽤，但返回的是一个迭代器（可以是自身）。
+
+· 迭代器连续被 next() 函数调⽤时，依次返回⼀系列的值，但如果到了迭代的末尾，则抛出 StopIteration 异常，另外他可以没有末尾，但只要被 next() 函数调⽤，就⼀定会返回⼀个值。
+
+· Python3 中， next() 内置函数调⽤的是对象的 __next__() ⽅法，iter() 内置函数调⽤的是对象的 __iter__() ⽅法。
+
+那么，了解了什么是迭代器后，我们马上开始解析 torch.utils.data 模块，对于 torch.utils.data 而言，重点是其 Dataset，Sampler，DataLoader 三个模块，辅以 collate，fetch，pin_memory 等组件对特定功能予以支持。
+
+Tips：涉及的源码皆以 PyTorch 1.7 为准
+'''
+
+'''
+Dataset 主要负责对 raw data source 封装，将其封装成 Python 可识别的数据结构，其必须提供提取数据个体的接口。Dataset 中共有 Map-style datasets 和 Iterable-style datasets 两种：
+
+1.1 Map-style dataset
+torch.utils.data.Dataset 它是一种通过实现  __len__() 和 __getitem__() 方法来获取数据的 Dataset，它表示从（可能是非整数）索引/关键字到数据样本的映射。
+因而，在我们访问 Map-style 的数据集时，使用 dataset[idx] 即可访问 idx 对应的数据。通常，我们使用 Map-style 类型的 dataset 居多，可以看到其数据接口定义如下：
+
+
+1.3 其他 Dataset
+
+除了 Map-style dataset 和 Iterable-style dataset 以外，PyTorch 也在此基础上提供了其他类型的 Dataset 子类：
+
+· torch.utils.data.ConcatDataset：用于连接多个 ConcatDataset 数据集。
+
+· torch.utils.data.ChainDataset：用于连接多个 IterableDataset 数据集，在 IterableDataset 的 __add__() 方法中被调用。
+
+· torch.utils.data.Subset：用于获取指定一个索引序列对应的子数据集。
+
+'''
 class Dataset(Generic[T_co]):
     r"""An abstract class representing a :class:`Dataset`.
 
@@ -59,7 +111,16 @@ class Dataset(Generic[T_co]):
     # See NOTE [ Lack of Default `__len__` in Python Abstract Base Classes ]
     # in pytorch/torch/utils/data/sampler.py
 
+'''
+1.2 Iterable-style dataset
 
+torch.utils.data.IterableDataset 它是一种实现 __iter__() 来获取数据的 Dataset，
+Iterable-style 的数据集特别适用于以下情况：随机读取代价很大甚至不可能，且 batch size 取决于获取到的数据。其接口定义如下：
+
+特别地，当 DataLoader 的 num_workers > 0 时， 每个 worker 都将具有数据对象的不同样本。因此需要独立地对每个副本进行配置，以防止每个 worker 产生的数据不重复。
+同时，数据加载顺序完全由用户定义的可迭代样式控制。这允许更容易地实现块读取和动态批次大小（例如，通过每次产生一个批次的样本）。
+
+'''
 class IterableDataset(Dataset[T_co]):
     r"""An iterable Dataset.
 
@@ -177,7 +238,7 @@ class IterableDataset(Dataset[T_co]):
     # No `def __len__(self)` default? Subclasses raise `TypeError` when needed.
     # See NOTE [ Lack of Default `__len__` in Python Abstract Base Classes ]
 
-
+#· torch.utils.data.TensorDataset：用于获取封装成 tensor 的数据集，每一个样本都可通过索引张量来获得。
 class TensorDataset(Dataset[Tuple[Tensor, ...]]):
     r"""Dataset wrapping tensors.
 
@@ -276,7 +337,7 @@ class ChainDataset(IterableDataset):
             total += len(d)  # type: ignore[arg-type]
         return total
 
-
+#· torch.utils.data.Subset：用于获取指定一个索引序列对应的子数据集。
 class Subset(Dataset[T_co]):
     r"""
     Subset of a dataset at specified indices.
