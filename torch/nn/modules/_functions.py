@@ -118,6 +118,10 @@ class SyncBatchNorm(Function):
 
         if saved_input.numel() > 0:
             # calculate local stats as well as grad_weight / grad_bias
+            '''
+            3.2 backward
+由于不同的进程共享同一组 BN 参数，因此在 backward 到 BN 前、后都需要做进程的通信，在_functions.SyncBatchNorm中实现：
+            '''
             sum_dy, sum_dy_xmu, grad_weight, grad_bias = torch.batch_norm_backward_reduce(
                 grad_output,
                 saved_input,
