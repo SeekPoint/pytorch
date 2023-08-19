@@ -100,6 +100,73 @@ class _NormBase(Module):
     ):
         version = local_metadata.get("version", None)
 
+        '''
+        1.4.3 _load_from_state_dict 妙用
+
+        Example: 避免 BC-breaking
+        在模型迭代的过程中，module 很容易出现 BC-breaking ，
+        PyTorch 通过 _version 和 _load_from_state_dict 来处理的这类问题（这也是 PyTorch 推荐的方式）。 
+        下面的代码是 _NormBase 类避免 BC-breaking 的方式。在 PyTorch 的开发过程中，N
+        ormalization layers 在某个新版本中 引入了 num_batches_tracked 这个 key，给 BN 记录训练过程中经历的 batch 数，
+        为了兼容旧版本训练的模型，PyTorch 修改了 _version，并修改了 _load_from_state_dict。
+        
+        
+        这里再举一个 MMCV 中的例子，DCN 经历了一次重构，属性的名字经过了重命名。
+
+        def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                                  missing_keys, unexpected_keys, error_msgs):
+            version = local_metadata.get('version', None)
+            if version is None or version < 2:
+                # the key is different in early versions
+                # In version < 2, DeformConvPack loads previous benchmark models.
+                if (prefix + 'conv_offset.weight' not in state_dict
+                        and prefix[:-1] + '_offset.weight' in state_dict):
+                    state_dict[prefix + 'conv_offset.weight'] = state_dict.pop(
+                        prefix[:-1] + '_offset.weight')
+                if (prefix + 'conv_offset.bias' not in state_dict
+                        and prefix[:-1] + '_offset.bias' in state_dict):
+                    state_dict[prefix +
+                               'conv_offset.bias'] = state_dict.pop(prefix[:-1] +
+                                                                    '_offset.bias')
+            if version is not None and version > 1:
+                print_log(
+                    f'DeformConv2dPack {prefix.rstrip(".")} is upgraded to '
+                    'version 2.',
+                    logger='root')
+            super()._load_from_state_dict(state_dict, prefix, local_metadata,
+                                          strict, missing_keys, unexpected_keys,
+                                          error_msgs)
+        Example: 模型无痛迁移
+        如果在 MMDetection 中训练了一个 detector，MMDetection3D 中的多模态检测器想要加载这个预训练的检测器，很多权重名字对不上，又不想写一个脚本手动来转，可以使用 _load_from_state_dict 来进行。通过这种方式，MMDetection3D 可以加载并使用 MMDetection 训练的任意一个检测器。
+        
+        def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                                  missing_keys, unexpected_keys, error_msgs):
+            # override the _load_from_state_dict function
+            # convert the backbone weights pre-trained in Mask R-CNN
+            # use list(state_dict.keys()) to avoid
+            # RuntimeError: OrderedDict mutated during iteration
+            for key_name in list(state_dict.keys()):
+                key_changed = True
+                if key_name.startswith('backbone.'):
+                    new_key_name = f'img_backbone{key_name[8:]}'
+                elif key_name.startswith('neck.'):
+                    new_key_name = f'img_neck{key_name[4:]}'
+                elif key_name.startswith('rpn_head.'):
+                    new_key_name = f'img_rpn_head{key_name[8:]}'
+                elif key_name.startswith('roi_head.'):
+                    new_key_name = f'img_roi_head{key_name[8:]}'
+                else:
+                    key_changed = False
+                if key_changed:
+                    logger = get_root_logger()
+                    print_log(
+                        f'{key_name} renamed to be {new_key_name}', logger=logger)
+                    state_dict[new_key_name] = state_dict.pop(key_name)
+            super()._load_from_state_dict(state_dict, prefix, local_metadata,
+                                          strict, missing_keys, unexpected_keys,
+                                          error_msgs)
+                                                  
+        '''
         if (version is None or version < 2) and self.track_running_stats:
             # at version 2: added num_batches_tracked buffer
             #               this should have a default value of 0
