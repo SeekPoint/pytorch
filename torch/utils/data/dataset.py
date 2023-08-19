@@ -33,6 +33,12 @@ T_co = TypeVar('T_co', covariant=True)
 T = TypeVar('T')
 
 '''
+可能是重复的
+PyTorch 源码解读之 torch.utils.data：解析数据处理全流程
+https://zhuanlan.zhihu.com/p/337850513
+
+
+
 1. 迭代器介绍
 
 OK，在正式解析 PyTorch 中的 torch.utils.data 模块之前，我们需要理解一下 Python 中的迭代器（Iterator），因为在源码的 Dataset, Sampler 和 DataLoader 这三个类中都会用到包括 __len__(self)，__getitem__(self) 和 __iter__(self) 的抽象类的魔法方法。
