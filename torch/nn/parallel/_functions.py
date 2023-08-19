@@ -52,6 +52,7 @@ from typing import List, Optional
 +--------------------------------------------------------------------------------------+
 
 '''
+#  Broadcast.apply
 class Broadcast(Function):
 
     @staticmethod
@@ -249,10 +250,12 @@ class Scatter(Function):
         # 对于cuda，进行处理
         if torch.cuda.is_available() and ctx.input_device == -1:
             # Perform CPU to GPU copies in a background stream
+            # 新建 cuda stream
             streams = [_get_stream(device) for device in target_gpus]
 
         # 调用C++进行操作  # 分发到其他GPU  会直接进入到C++世界  具体代码位于 torch/csrc/cuda/comm.cpp。
         outputs = comm.scatter(input, target_gpus, chunk_sizes, ctx.dim, streams)
+
         # Synchronize with the copy stream
         if streams is not None:
             for i, output in enumerate(outputs):

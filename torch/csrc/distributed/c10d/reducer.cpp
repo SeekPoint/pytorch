@@ -849,6 +849,7 @@ void Reducer::autograd_hook(size_t index) {
   // See Note [Skip allreducing local_used_map_dev]
   //在这里会记录，已经使用了。   // 动态图&找到未用张量 或者 静态图第一次迭代
   if (dynamic_graph_find_unused() || static_graph_first_iteration()) {
+  //// 在 no_sync 时，只要参数被用过一次，就会被标记为用过
     // Since it gets here, this param has been used for this iteration. We want
     // to mark it in local_used_map_. During no_sync session, the same var can
     // be set multiple times, which is OK as does not affect correctness. As

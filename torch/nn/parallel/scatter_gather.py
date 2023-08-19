@@ -52,13 +52,14 @@ def scatter(inputs, target_gpus, dim=0):
         scatter_map = None
     return res
 
-
 def scatter_kwargs(inputs, kwargs, target_gpus, dim=0):
     r"""Scatter with support for kwargs dictionary"""
     # 分发input
     inputs = scatter(inputs, target_gpus, dim) if inputs else []
 
-    # 分发kwargs
+    # 分发kwargs,'''
+    # scatter_kwargs 函数中最重要的就是 scatter 函数，负责将 tensor 分成大概相等的块并将他们分给不同的 GPU。对其他的数据类型，则是复制分散给不同的 GPU 。
+    # '''
     kwargs = scatter(kwargs, target_gpus, dim) if kwargs else []
 
     # 用空项补齐，这样可以让 inputs 和 kwargs 长度相等
@@ -100,3 +101,32 @@ def gather(outputs, target_device, dim=0):   # target_device 就是 device[0]
     finally:
         gather_map = None
     return res
+
+'''
+最后，用一张图形象地看一下 DP Module 究竟怎么执行的，具体看第一行和第三行：
+
+前向传播的时候我们会先用 Scatter 函数将数据从 device[0] 分配并复制到不同的卡，之后用 Replicate 函数将模型从 device[0] 复制到不同的卡，之后各个卡都有了同样的模型和不同的数据，分别调用 forward 计算损失和梯度。
+
+反向传播的时候，我们会将梯度收集到 device[0] 然后在 device[0] 更新参数。
+
+
+Fig. 3: DP Module流程图，原图见[4]
+
+
+
+1.4 分析
+负载不均衡
+device[0] 负载大一些
+
+通信开销
+假设有 
+ 个 GPU， 完成一次通信需要时间 
+ ，那么使用 PS 算法，总共需要花费时间 
+
+单进程
+The difference between DistributedDataParallel and DataParallel is: DistributedDataParallel uses multiprocessing where a process is created for each GPU, while DataParallel uses multithreading. By using multiprocessing, each GPU has its dedicated process, this avoids the performance overhead caused by GIL of Python interpreter.
+
+官方文档
+Global Interpreter Lock (GIL)全局解释器锁，简单来说就是，一个 Python 进程只能利用一个 CPU kernel，即单核多线程并发时，只能执行一个线程。考虑多核，多核多线程可能出现线程颠簸 (thrashing) 造成资源浪费，所以 Python 想要利用多核最好是多进程。
+
+'''

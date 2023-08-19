@@ -1,0 +1,233 @@
+https://zhuanlan.zhihu.com/p/343951042
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+
+
+本文介绍 PyTorch 里的数据并行训练，涉及 nn.DataParallel (DP) 和 nn.parallel.DistributedDataParallel (DDP) 两个模块（基于 1.7 版本），涵盖分布式训练的原理以及源码解读（大多以汉字注释，记得仔细读一下 comment ）。内容组织如下：
+
+0 数据并行
+当一张 GPU 可以存储一个模型时，可以采用数据并行得到更准确的梯度或者加速训练，即每个 GPU 复制一份模型，将一批样本分为多份输入各个模型并行计算。因为求导以及加和都是线性的，数据并行在数学上也有效。
+
+假设我们一个 batch 有
+ 个样本，一共有
+ 个 GPU 每个 GPU 分到
+ 个样本。假设样本刚好等分，则有
+ 。我们考虑总的损失函数
+ 对参数
+ 的导数：
+
+那么接下来我们看一下 PyTorch 究竟是怎么实现数据并行的。
+
+1 DP
+1.1 使用
+DP 的好处是，使用起来非常方便，只需要将原来单卡的 module 用 DP 改成多卡:
+
+model = nn.DataParallel(model)
+1.2 原理
+DP 基于单机多卡，所有设备都负责计算和训练网络，除此之外， device[0] (并非 GPU 真实标号而是输入参数 device_ids 首位) 还要负责整合梯度，更新参数。图 1 即为 GPU 0 作为 device[0] 的例子。从图中我们可以看出，有三个主要过程：
+
+过程一（图中红色部分）：各卡分别计算损失和梯度
+过程二（图中蓝色部分）：所有梯度整合到 device[0]
+过程三（图中绿色部分）：device[0] 进行参数更新，其他卡拉取 device[0] 的参数进行更新
+所有卡都并行运算（图中红色），将梯度收集到 device[0]（图中浅蓝色）和 device[0] 分享模型参数给其他 GPU（图中绿色）三个主要过程。
+
+
+图 1: GPU 0 as device[0]，原图见 [2]
+虽然 DP 只能实现单机训练不能算是严格意义上的分布式训练（多个节点），但是其原理和分布式训练算法里的 Parameter Server 架构很相近，我们借用 PS 的伪代码来说明一下。
+
+
+图 2: PS，原图见 [3]
+我们可以看到 PS 的并行梯度下降流程分为四部分：
+
+Task Scheduler：负责加载数据并分发数据至每个 worker 节点，并执行多轮迭代。
+
+在每轮迭代中，worker 负责：
+
+初始化：载入数据并将全部模型参数从 server 节点拉下来（图 1 绿色）
+梯度计算：利用该节点的数据计算梯度（图 1 红色）并将梯度更新到 server 节点（图 1 蓝色）
+Server 负责：
+
+汇总梯度
+更新参数
+OK， 现在我们已经知道了 DP 使用的算法，接下来我们看一下 PyTorch 是如何实现的。
+
+1.3 实现
+这一节主要讨论 DP 的实现，首先先贴上源码（顺便看一下comment 部分）：
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+2.2 原理
+区别
+多进程
+和 DP 不同， DDP 采用多进程，最推荐的做法是每张卡一个进程从而避免上一节所说单进程带来的影响。前文也提到了 DP 和 DDP 共用一个 parallel_apply 函数，所以 DDP 同样支持单进程多线程多卡操作，自然也支持多进程多线程，不过需要注意一下 world_size。
+通信效率
+DP 的通信成本随着 GPU 数量线性增长，而 DDP 支持 Ring AllReduce，其通信成本是恒定的，与 GPU 数量无关。
+同步参数
+DP 通过收集梯度到 device[0]，在device[0] 更新参数，然后其他设备复制 device[0] 的参数实现各个模型同步；
+DDP 通过保证初始状态相同并且改变量也相同（指同步梯度） ，保证模型同步。
+Ring AllReduce
+
+Fig. 4: Ring AllReduce 流程图，原图见 [7]
+假设我们有
+ 个 GPU，传输总量是
+ ，
+ 为每次通信上限。
+
+首先我们将要传输的梯度等分成
+ 份，则每台机器每次需要传输
+ 。传输
+ 次可以收集到一个完整梯度（如动图 5 所示），之后再传输
+ 次将梯度分给所有 GPU（如动图 6 所示）。
+
+举个例子，假设现有 5 个 GPU，那么就将梯度分为 5 份，如下图，分别是
+ , 这里的
+ 指的是 GPU 编号。
+
+Scatter Reduce 流程，从 diagonal 的位置开始传，每次传输时 GPU 之间只有一个块在传输，比如
+ ，在传播 4 次后 GPU 4 上就有了一个完整的梯度块。
+
+
+图 5: Scatter Reduce 流程图，原图见 [7]， gif 见 [8]
+All Gather 的过程也类似，只是将收集到的完整梯度通过通信传播给所有参与的 GPU。
+
+
+图 6: All Gather 流程图，原图见 [7]， gif 见 [8]
+这样，通信开销就只有
+ ，和 GPU 数量无关了。
+
+DDP
+DDP 也是数据并行，所以每张卡都有模型和输入。我们以多进程多线程为例，每起一个进程，该进程的 device[0] 都会从本地复制模型，如果该进程仍有多线程，就像 DP，模型会从 device[0] 复制到其他设备。
+
+DDP 通过 Reducer 来管理梯度同步。为了提高通讯效率， Reducer 会将梯度归到不同的桶里（按照模型参数的 reverse order， 因为反向传播需要符合这样的顺序），一次归约一个桶。其中桶的大小为参数 bucket_cap_mb 默认为 25，可根据需要调整。下图即为一个例子。
+
+可以看到每个进程里，模型参数都按照倒序放在桶里，每次归约一个桶。
+
+
+图 7: Gradient Bucketing 示意图，原图见 [10]
+DDP 通过在构建时注册 autograd hook 进行梯度同步。反向传播时，当一个梯度计算好后，相应的 hook 会告诉 DDP 可以用来归约。当一个桶里的梯度都可以了，Reducer 就会启动异步 allreduce 去计算所有进程的平均值。allreduce 异步启动使得 DDP 可以边计算边通信，提高效率。当所有桶都可以了，Reducer 会等所有 allreduce 完成，然后将得到的梯度写到 param.grad。
+
+2.3 实现
+DDP 主要基于下图所示结构，本节我们会着重讲解 distributed.py 和 reducer.cpp 两个文件。至于 backend，NCCL 已经最优化了，建议直接用 NCCL，不过 NCCL 只支持 GPU Tensor 间通信。
+
+
+图 8: 代码架构，原图见 [10]
+终于可以看 DDP 的实现了！！首先我们贴上伪代码！
+
+伪代码
+
+图 9: DDP 伪代码，原图见 [11]
+从 DDP 的伪代码我们可以看出，DDP 最重要的包括三部分：
+
+constructor
+负责在构建的时候将 rank 0 的 state_dict() 广播 ➜ 保证所有网络初始状态相同；
+初始化 buckets 并尽可能按逆序将 parameters 分配进 buckets ➜ 按桶通信提高效率；
+为每个 parameter 加上 grad_accumulator 以及在 autograd_graph 注册 autograd_hook ➜ 在 backward 时负责梯度同步。
+forward
+正常的 forward 操作；
+如果 self.find_unused_parameters 设置为 True，DDP 会在 forward 结束时 traverse autograd graph 找到所有没用过的parameters 并标记为 ready ➜ 虽说这一步开销很大，但是有时计算动态图会改变，所以很必要。
+autograd_hook
+这个 hook 是挂在 autograd graph 在 backward 时负责梯度同步的。当一个梯度计算好后，相应的 hook 会告诉 DDP 可以用来归约。当一个桶里的梯度都可以了，Reducer 就会启动异步 allreduce 去计算所有进程的平均值。当所有桶都可以了，Reducer 会等所有 allreduce 完成，然后将得到的梯度写到 param.grad。
+好的，但现在为止我们应该对 DDP 有了大致了解了，接下来就一起看一下代码是怎么实现的！
+
+通信
+因为 DDP 依赖 c10d 的 ProcessGroup 进行通信，所以开始前我们先要有个 ProcessGroup 实例。这步可以通过 torch.distributed.init_process_group 实现。
+
+构建
+我们先贴上 DDP 初始化的源码，最重要的是 _ddp_init_helper 这个函数，负责多线程时复制模型、将 parameters 分组、创建 reducer 以及为 SyncBN 做准备等。这部分代码看 comment 就能懂，我们会重点说一下 dist.Reducer，作为管理器，自然很重要了。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+实验：find_unused_params
+import os
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+import torch.nn as nn
+import torch.optim as optim
+
+from torch.nn.parallel import DistributedDataParallel as DDP
+from timeit import default_timer as timer
+
+os.environ['MASTER_ADDR'] = 'localhost'
+os.environ['MASTER_PORT'] = '12138'
+# sync
+seed = 0
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+os.environ['PYTHONHASHSEED'] = str(seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+def example(rank, world_size):
+    # create default process group
+    dist.init_process_group("gloo",rank=rank,
+world_size=world_size,init_method='env://')
+    # create local model
+    model = nn.Linear(10, 10).to(rank)
+    # construct DDP model
+    ddp_model = DDP(model, device_ids=[rank])
+    # define loss function and optimizer
+    loss_fn = nn.MSELoss()
+    optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
+
+    buf = 0
+    tmp = 0
+    for i in range(10000):
+        start = timer()
+        # forward pass
+        outputs = ddp_model(torch.randn(20, 10).to(rank))
+        end = timer()
+
+        tmp = end-start
+        buf+=tmp
+        labels = torch.randn(20, 10).to(rank)
+        # backward pass
+        loss_fn(outputs, labels).backward()
+        # update parameters
+        optimizer.step()
+    print(tmp)
+    print(buf)
+    print(buf/10000)
+
+def main():
+    world_size = 1
+    mp.spawn(example,
+        args=(world_size,),
+        nprocs=world_size,
+        join=True)
+
+if __name__=="__main__":
+   for i in range(10):
+     main()
+将 find_unused_params 分别设置成 True 或者 False 跑多次取平均，可以得到：
+
+find_unused_params=True: 0.3367 ms
+find_unused_params=False: 0.2993 ms
+小结
+关于 DP 和 DDP 的分享到这里就结束啦～

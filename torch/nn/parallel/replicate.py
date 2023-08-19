@@ -151,6 +151,9 @@ def replicate(network, devices, detach=False):
     buffer_copies_not_rg = _broadcast_coalesced_reshape(buffers_not_rg, devices, detach=True)
 
     # 准备拷贝模型网络
+    # 现在开始拷贝网络
+    # 准备过程：将 network.modules() 变成list
+    # 然后再为之后复制的模型准备好空的 list 和 indices
     modules = list(network.modules())  # modules()返回一个包含当前模型所有模块的迭代器。转变成list，可以认为把模型打平了
     module_copies = [[] for device in devices] # 为各个GPU准备好空list
     module_indices = {}
@@ -173,7 +176,9 @@ def replicate(network, devices, detach=False):
     # 2）配置操作
 
     # 这一步的目的是：把GPU中数据的reference赋值到浅拷贝之中，变成完备模型。
-    # 因为之前是把嵌套的模型网络打散了分别拷贝到GPU，buffers和parameters也分别拷贝到了GPU，现在把他们构建到浅拷贝的模型之中，把模型逻辑补齐。
+    # 因为之前是把嵌套的模型网络打散了分别拷贝到GPU，buffers和parameters也分别拷贝到了GPU，
+    # 现在把他们构建到浅拷贝的模型之中，把模型逻辑补齐。
+    # 接下来分别复制 module，param，buffer
     for i, module in enumerate(modules): # 遍历模型每个子模块，只赋值需要的部分参数
 
         # 处理其子_modules

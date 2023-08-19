@@ -70,7 +70,7 @@ def parallel_apply(modules, inputs, kwargs_tup=None, devices=None):
     element of :attr:`inputs` can either be a single object as the only argument
     to a module, or a collection of positional arguments.
     """
-    # 确保模型和输入大小一致
+    # 确保模型和输入大小一致  # 每个 GPU 都有模型和输入
     assert len(modules) == len(inputs)
 
     # 确保每个 GPU 都有相应的元数据，如没有就空白补全
@@ -117,6 +117,10 @@ def parallel_apply(modules, inputs, kwargs_tup=None, devices=None):
     if len(modules) > 1:
         # 如有一个进程控制多个 GPU ，起多个线程
         # 注意，这里就是每个 worker 调用了 modules 数组中的一个模型copy
+        # 如有一个进程控制多个 GPU ，起多个线程
+        # 需要强调一下，虽然 DDP 推荐单卡单进程，即每次调用 DDP device_ids 都只输入一张卡的 id（通常是 args.local_rank），
+        # 但是如果输入多个 device_id，此时 DDP 就是单进程多线程控制多卡，和 DP 一样，关于 DDP 的解读可以看下文
+
         threads = [threading.Thread(target=_worker,
                                     args=(i, module, input, kwargs, device, stream))
                    for i, (module, input, kwargs, device, stream) in
@@ -127,6 +131,7 @@ def parallel_apply(modules, inputs, kwargs_tup=None, devices=None):
         for thread in threads:
             thread.join()
     else:
+        # 一个 GPU 一个进程 （ DDP 推荐操作）
         _worker(0, modules[0], inputs[0], kwargs_tup[0], devices[0], streams[0])
 
     outputs = []

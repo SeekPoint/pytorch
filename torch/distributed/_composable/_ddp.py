@@ -85,7 +85,11 @@ class _DDPSink(Function):
 
         return (None, None, *grad_outputs)
 
-
+'''
+我们先贴上 DDP 初始化的源码，最重要的是 _ddp_init_helper 这个函数，
+负责多线程时复制模型、将 parameters 分组、创建 reducer 以及为 SyncBN 做准备等。
+这部分代码看 comment 就能懂，我们会重点说一下 dist.Reducer，作为管理器，自然很重要了。
+'''
 class DistributedDataParallel(Module):
     # used to track whether the given thread is inside ddp forward for torchdynamo purposes
     _active_ddp_module = None
@@ -105,21 +109,13 @@ class DistributedDataParallel(Module):
     ):
         '''
         设置设备类型。
-
         设置设备IDs。
-
         设置 self.process_group，默认就是 GroupMember.WORLD。
-
         配置各种类成员变量。
-
         检查 parameters。
-
         设定bucket大小。
-
         构建参数。
-
         将 rank 0 的state_dict() 广播到其他worker，以保证所有worker的模型初始状态相同。
-
         建立reducer。
         '''
         super().__init__()
@@ -355,6 +351,7 @@ class DistributedDataParallel(Module):
         +-----------------------------------------------------------------------+
 
         '''
+        #每个 DDP 进程都会创建本地 Reducer 在 backward 时管理梯度。
         self.reducer = dist.Reducer(
             parameters,  # parameters[0]是张量列表
             list(reversed(bucket_indices)), # 利用桶index  # 桶信息
@@ -587,7 +584,20 @@ class DistributedDataParallel(Module):
                 "init_process_group and have not passed "
                 "process_group argument to DDP constructor",
             )
+    '''
+    除了正常的前向传播，DDP 还允许在 subgraph 进行反向传播，只需将 self.find_unused_parameters 设置为 True。或许有朋友会问，如果 find_unused_parameters 设置为 True，那每次都要 traverse 计算图，明明开销很大，为什么有时候我们还要将 self.find_unused_parameters 设置为 True？ 这是因为训练时有可能某次迭代只用到整个模型的一个 subgraph， 并且这个 subgraph 迭代时可能会改变，就是说某些参数可能会在训练时被跳过。但因为所有parameters 在一开始就被分好桶了，而我们的 hook 又规定了只有整个桶 ready 了（pending==0）才会通信，如果我们不将 unused parameter 标记为 ready，整个过程会没法进行。我们在这节结束的部分附上一个小实验验证一下。
 
+DDP 通过在构建时注册 autograd hook 进行梯度同步。当一个梯度计算好后，相应的 hook 会告诉 DDP 可以用来归约。当一个桶里的梯度都可以了，Reducer 就会启动异步 allreduce 去计算所有进程的平均值。当所有桶都可以了，Reducer 会等所有 allreduce 完成，然后将得到的梯度写到 param.grad。
+
+optimizer step 独立于 DDP，所有进程的模型能够同步是因为初始状态相同并且改变量也相同。
+no_sync
+
+>>> ddp = torch.nn.DistributedDataParallel(model, pg)
+>>> with ddp.no_sync():
+>>>   for input in inputs:
+>>>     ddp(input).backward()  # 不同步梯度 
+>>> ddp(another_input).backward()  # 同步梯度
+    '''
     @contextmanager
     def no_sync(self):
         r"""

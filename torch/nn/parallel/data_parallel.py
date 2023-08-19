@@ -42,7 +42,9 @@ def _check_balance(device_ids):
     if warn_imbalance(lambda props: props.multi_processor_count):
         return
 
+'''
 
+'''
 class DataParallel(Module):
     r"""Implements data parallelism at the module level.
 
@@ -136,18 +138,18 @@ class DataParallel(Module):
         super().__init__()
         torch._C._log_api_usage_once("torch.nn.parallel.DataParallel")
 
-        # 得到可用的GPU
+        # 得到可用的GPU  # 默认使用所有可见的 GPU    # 检查是否有可用的 GPU
         device_type = _get_available_device_type()
         if device_type is None:
             self.module = module
             self.device_ids = []
             return
 
-        # 没有输入的情况下，使用所有可见的GPU
+        # 没有输入的情况下，使用所有可见的GPU  # 默认 server 是 device_ids 列表上第一个  # 默认使用所有可见的 GPU
         if device_ids is None:
             device_ids = _get_all_device_indices()
 
-        # 把GPU列表上第一个作为输出，也会作为master
+        # 把GPU列表上第一个作为输出，也会作为master   # 默认 server 是 device_ids 列表上第一个
         if output_device is None:
             output_device = device_ids[0]
 
@@ -157,7 +159,7 @@ class DataParallel(Module):
         self.output_device = _get_device_index(output_device, True)
         self.src_device_obj = torch.device(device_type, self.device_ids[0])
 
-        # 检查负载均衡
+        # 检查负载均衡  # 检查负载是否平衡， 不平衡（指内存或者处理器 max/min > 0.75 会有警告）
         _check_balance(self.device_ids)
 
         # 单卡就直接使用
@@ -185,12 +187,19 @@ class DataParallel(Module):
     也就是 parallel_apply 部分。
 
     现在要做的就是把分布式计算的梯度合并到 device[0]，就是 self.output_device。
+    
+    
+    从 forward 函数可以看出，关键函数有 scatter, replicate, parallel_apply 和 gather，我们一个一个看一下。
     '''
     def forward(self, *inputs, **kwargs):
         with torch.autograd.profiler.record_function("DataParallel.forward"):
             # 如果机器上没有GPU，则直接用CPU运行
             if not self.device_ids:
                 return self.module(*inputs, **kwargs)
+
+            # 运行前 GPU device_ids[0] （即我们的 server ）上必须有 parallelized module 的parameters 和 buffers
+            # 因为 DP 保证 GPU device_ids[0] 和 base parallelized module 共享存储
+            # 所以在device[0] 上的 in-place 更新也会被保留下来，其他的则不会
 
             # 遍历module的parameters和buffers，看看是否都在GPU[0]之上，如果不在，报错
             for t in chain(self.module.parameters(), self.module.buffers()):
@@ -199,6 +208,9 @@ class DataParallel(Module):
                                        "on device {} (device_ids[0]) but found one of "
                                        "them on device: {}".format(self.src_device_obj, t.device))
             # 现在GPU[0]上有了模型，开始训练
+
+            # nice 现在 device[0] 上已经有了 module 和 input， 接下来我们就要开始 PS 算法了
+            # 可以开始看正文了
 
             # 首先分发输入  分发数据
             inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
@@ -216,6 +228,8 @@ class DataParallel(Module):
             replicas = self.replicate(self.module, self.device_ids[:len(inputs)])
 
             # 并行训练
+            # threading 实现，用前面准备好的 replica 和输入数据，然后
+            # for 循环启动多线程
             outputs = self.parallel_apply(replicas, inputs, kwargs)
 
             # 把前向传播的结果收集到master
