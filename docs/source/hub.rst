@@ -27,6 +27,13 @@ You can see the full script in
 `pytorch/vision repo <https://github.com/pytorch/vision/blob/master/hubconf.py>`_
 
 ::
+torch.hub提供了一系列 pretrained models 来方便大家使用，我们以 'https://github.com/pytorch/vision' 为例，
+介绍怎样使用 torch.hub 提供的接口来调用 torchvision 里的 model。
+
+torch.hub主要提供了三个接口torch.hub.list(), torch.hub.help(), torch.hub.load()，我们依次介绍
+
+torch.hub.list()会从给定的 GitHub repo 中寻找hubconf.py(此文件导入 repo 里提供的所有 models)，然后返回一个 list，里面包含了提供的 model 类名。
+'https://github.com/pytorch/vision' 下的hubconf.py文件内容如下：
 
     dependencies = ['torch']
     from torchvision.models.resnet import resnet18 as _resnet18

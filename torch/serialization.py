@@ -153,7 +153,7 @@ def _meta_tag(obj):
     if obj.device.type == 'meta':
         return 'meta'
 
-
+# 将对象放到cpu上，注意可能返回None
 def _cpu_deserialize(obj, location):
     if location == 'cpu':
         return obj
@@ -176,9 +176,10 @@ def validate_cuda_device(location):
                            'to an existing device.')
     return device
 
-
+ # 将对象放到指定的cuda device上，注意可能返回None
 def _cuda_deserialize(obj, location):
     if location.startswith('cuda'):
+        ## 验证是否有显卡，以及给定的device id是否超过当前机器拥有的显卡数量
         device = validate_cuda_device(location)
         if getattr(obj, "_torch_load_uninitialized", False):
             with torch.cuda.device(device):
@@ -211,7 +212,7 @@ def location_tag(storage: Union[Storage, torch.storage.TypedStorage, torch.Untyp
     raise RuntimeError("don't know how to determine data location of "
                        + torch.typename(storage))
 
-
+# 按先cpu后cuda的优先级将数据放入cpu或cuda上
 def default_restore_location(storage, location):
     for _, _, fn in _package_registry:
         result = fn(storage, location)
@@ -384,13 +385,18 @@ def _check_save_filelike(f):
             "expected 'f' to be string, path, or a file-like object with "
             "a 'write' attribute"))
 
+'''
+本文解读基于 PyTorch 1.7 版本
 
+torch.serialization
+torch.serialization 实现对 PyTorch 对象结构的二进制序列化和反序列化，其中序列化由 torch.save 实现，反序列化由 torch.load 实现
+'''
 def save(
-    obj: object,
-    f: FILE_LIKE,
-    pickle_module: Any = pickle,
-    pickle_protocol: int = DEFAULT_PROTOCOL,
-    _use_new_zipfile_serialization: bool = True
+    obj: object,  # 待序列化的对象
+    f: FILE_LIKE,  # 带写入的文件
+    pickle_module: Any = pickle,  # 默认使用 pickle 进行序列化
+    pickle_protocol: int = DEFAULT_PROTOCOL,  # 默认使用 pickle 第2版协议
+    _use_new_zipfile_serialization: bool = True  # pytorch 1.6 之后默认使用基于 zipfile 的存储文件格式, 如果想用旧的格式, 可设为False. torch.load 同时支持新旧格式文件的读取.
 ) -> None:
     # Reference: https://github.com/pytorch/pytorch/issues/54354
     # The first line of this docstring overrides the one Sphinx generates for the
@@ -433,18 +439,22 @@ def save(
         >>> torch.save(x, buffer)
     """
     torch._C._log_api_usage_once("torch.save")
+
+    # 如果使用 dill 进行序列化操作, dill的版本需大于 0.3.1.
     _check_dill_version(pickle_module)
     _check_save_filelike(f)
 
     if _use_new_zipfile_serialization:
+        # 基于 zipfile 的存储格式
         with _open_zipfile_writer(f) as opened_zipfile:
             _save(obj, opened_zipfile, pickle_module, pickle_protocol)
             return
     else:
+        # 以二进制方式写入文件
         with _open_file_like(f, 'wb') as opened_file:
             _legacy_save(obj, opened_file, pickle_module, pickle_protocol)
 
-
+#可以看到_legacy_save()和_save() 在序列化的过程中，整体的pipeline是类似的，只是写入的内容有轻微差别
 def _legacy_save(obj, f, pickle_module, pickle_protocol) -> None:
     import torch.nn as nn
     serialized_container_types = {}
@@ -462,15 +472,15 @@ def _legacy_save(obj, f, pickle_module, pickle_protocol) -> None:
         # see
         # https://docs.python.org/2/library/pickle.html#pickling-and-unpickling-external-objects
         # https://github.com/python/cpython/blob/master/Lib/pickle.py#L527-L537
-        if isinstance(obj, type) and issubclass(obj, nn.Module):
-            if obj in serialized_container_types:
+        if isinstance(obj, type) and issubclass(obj, nn.Module):  # 记录 source code
+            if obj in serialized_container_types:  # 如果已经记录过一样的，不需要重复记录
                 return None
             serialized_container_types[obj] = True
             source_file = source = None
             try:
-                source_lines, _, source_file = get_source_lines_and_file(obj)
-                source = ''.join(source_lines)
-            except Exception:  # saving the source is optional, so we can ignore any errors
+                source_lines, _, source_file = get_source_lines_and_file(obj)  # 读取 source code
+                source = ''.join(source_lines)   # 读取 source code
+            except Exception:  # saving the source is optional, so we can ignore any errors  # 找不到的话，打印warning
                 warnings.warn("Couldn't retrieve source code for container of "
                               "type " + obj.__name__ + ". It won't be checked "
                               "for correctness upon loading.")
@@ -564,6 +574,7 @@ def _legacy_save(obj, f, pickle_module, pickle_protocol) -> None:
             return res
         return None
 
+    # 记录一些系统信息
     sys_info = dict(
         protocol_version=PROTOCOL_VERSION,
         little_endian=sys.byteorder == 'little',
@@ -574,23 +585,23 @@ def _legacy_save(obj, f, pickle_module, pickle_protocol) -> None:
         ),
     )
 
-    pickle_module.dump(MAGIC_NUMBER, f, protocol=pickle_protocol)
-    pickle_module.dump(PROTOCOL_VERSION, f, protocol=pickle_protocol)
-    pickle_module.dump(sys_info, f, protocol=pickle_protocol)
-    pickler = pickle_module.Pickler(f, protocol=pickle_protocol)
-    pickler.persistent_id = persistent_id
-    pickler.dump(obj)
+    pickle_module.dump(MAGIC_NUMBER, f, protocol=pickle_protocol)  # 记录 MAGIC_NUMBER，用于load时验证文件是否损坏
+    pickle_module.dump(PROTOCOL_VERSION, f, protocol=pickle_protocol) # 记录 pickle 协议，用于load时验证pickle协议是否一致
+    pickle_module.dump(sys_info, f, protocol=pickle_protocol) # 记录一些系统信息
+    pickler = pickle_module.Pickler(f, protocol=pickle_protocol) # 对象的结构信息即将写入文件中
+    pickler.persistent_id = persistent_id # 将对象的结构信息写入 data_buf 中，具体数据内容暂存在 serialized_storages 中
+    pickler.dump(obj) # 执行写入操作，期间会调用 persistent_id() 函数
 
     serialized_storage_keys = sorted(serialized_storages.keys())
-    pickle_module.dump(serialized_storage_keys, f, protocol=pickle_protocol)
-    f.flush()
+    pickle_module.dump(serialized_storage_keys, f, protocol=pickle_protocol) # 写入具体数据对应的 key
+    f.flush() # 刷新缓存区
     for key in serialized_storage_keys:
         storage, dtype = serialized_storages[key]
-        storage._write_file(f, _should_read_directly(f), True, torch._utils._element_size(dtype))
+        storage._write_file(f, _should_read_directly(f), True, torch._utils._element_size(dtype)) # 写入具体数据
 
-
+#总的来说 _save() 函数在将对象二进制序列化的过程中，首先写入对象的结构信息，之后再写入具体的数据内容.
 def _save(obj, zip_file, pickle_module, pickle_protocol):
-    serialized_storages = {}
+    serialized_storages = {}  # 暂存具体数据内容以及其对应的key
     id_map: Dict[int, str] = {}
 
     # Since loading storages that view the same data with different dtypes is
@@ -605,7 +616,7 @@ def _save(obj, zip_file, pickle_module, pickle_protocol):
         # see
         # https://docs.python.org/2/library/pickle.html#pickling-and-unpickling-external-objects
         # https://github.com/python/cpython/blob/master/Lib/pickle.py#L527-L537
-        if isinstance(obj, torch.storage.TypedStorage) or torch.is_storage(obj):
+        if isinstance(obj, torch.storage.TypedStorage) or torch.is_storage(obj): # 如果是需要存储的数据内容
 
             if isinstance(obj, torch.storage.TypedStorage):
                 # TODO: Once we decide to break serialization FC, this case
@@ -619,7 +630,7 @@ def _save(obj, zip_file, pickle_module, pickle_protocol):
             else:
                 storage = obj
                 storage_dtype = torch.uint8
-                storage_type = normalize_storage_type(type(obj))
+                storage_type = normalize_storage_type(type(obj))  # 存储类型，int, float, ...
                 storage_numel = storage.nbytes()
 
             # If storage is allocated, ensure that any other saved storages
@@ -635,9 +646,10 @@ def _save(obj, zip_file, pickle_module, pickle_protocol):
                     storage_dtypes[storage.data_ptr()] = storage_dtype
 
             storage_key = id_map.setdefault(storage._cdata, str(len(id_map)))
-            location = location_tag(storage)
-            serialized_storages[storage_key] = storage
+            location = location_tag(storage)            # cpu 还是cuda
+            serialized_storages[storage_key] = storage  # 数据及其对应的key
 
+            # 注意这里没有具体数据，只返回数据相关的信息
             return ('storage',
                     storage_type,
                     storage_key,
@@ -647,25 +659,25 @@ def _save(obj, zip_file, pickle_module, pickle_protocol):
         return None
 
     # Write the pickle data for `obj`
-    data_buf = io.BytesIO()
-    pickler = pickle_module.Pickler(data_buf, protocol=pickle_protocol)
-    pickler.persistent_id = persistent_id
-    pickler.dump(obj)
-    data_value = data_buf.getvalue()
-    zip_file.write_record('data.pkl', data_value, len(data_value))
+    data_buf = io.BytesIO()  # 开辟 buffer
+    pickler = pickle_module.Pickler(data_buf, protocol=pickle_protocol)  # 对象的结构信息即将写入 data_buf 中
+    pickler.persistent_id = persistent_id  # 将对象的结构信息写入 data_buf 中，具体数据内容暂存在 serialized_storages 中
+    pickler.dump(obj)  # 对对象执行写入操作，写入过程会调 persistent_id 函数
+    data_value = data_buf.getvalue()  # 将写入的对象的结构信息取出来
+    zip_file.write_record('data.pkl', data_value, len(data_value))  # 写入到存储文件 zip_file 中，注意这里写入的信息只是对象的结构   信息(通过 data.pkl 来标识)，具体数据内容还未写入
 
     # Write each tensor to a file named tensor/the_tensor_key in the zip archive
-    for key in sorted(serialized_storages.keys()):
-        name = f'data/{key}'
-        storage = serialized_storages[key]
+    for key in sorted(serialized_storages.keys()):  # 写入数据内容
+        name = f'data/{key}'  # 数据的名字
+        storage = serialized_storages[key]  # 具体数据内容
         # given that we copy things around anyway, we might use storage.cpu()
         # this means to that to get tensors serialized, you need to implement
         # .cpu() on the underlying Storage
-        if storage.device.type != 'cpu':
+        if storage.device.type != 'cpu':   #数据在 cuda 上
             storage = storage.cpu()
         # Now that it is on the CPU we can directly copy it into the zip file
-        num_bytes = storage.nbytes()
-        zip_file.write_record(name, storage.data_ptr(), num_bytes)
+        num_bytes = storage.nbytes()  # 计算占用的字节数
+        zip_file.write_record(name, storage.data_ptr(), num_bytes)  # 写入数据
 
 
 def load(
@@ -835,7 +847,7 @@ copyreg.pickle(torch.layout, lambda obj: (_get_layout, (str(obj),)))
 def _legacy_load(f, map_location, pickle_module, **pickle_load_args):
     deserialized_objects: Dict[int, Any] = {}
 
-    restore_location = _get_restore_location(map_location)
+    restore_location = _get_restore_location(map_location)  # 根据map_location来生成restore_location函数，用于将数据放在cpu或cuda上
 
     class UnpicklerWrapper(pickle_module.Unpickler):  # type: ignore[name-defined]
 
@@ -898,6 +910,7 @@ def _legacy_load(f, map_location, pickle_module, **pickle_load_args):
                 return saved_id[0]
             return deserialized_objects[int(saved_id)]
 
+        # 由于不是基于 zipfile 的存储格式，报错退出，之后代码不会执行
         with closing(tarfile.open(fileobj=f, mode='r:', format=tarfile.PAX_FORMAT)) as tar, \
                 mkdtemp() as tmpdir:
 
@@ -962,9 +975,9 @@ def _legacy_load(f, map_location, pickle_module, **pickle_load_args):
         if typename == 'module':
             # Ignore containers that don't have any sources saved
             if all(data[1:]):
-                _check_container_source(*data)
+                _check_container_source(*data)  # 检查source code是否一致
             return data[0]
-        elif typename == 'storage':
+        elif typename == 'storage':   # 注意这里并没有载入具体数据，只是恢复了对象的结构信息
             storage_type, root_key, location, numel, view_metadata = data
             location = _maybe_decode_ascii(location)
             dtype = storage_type.dtype
@@ -1008,21 +1021,21 @@ def _legacy_load(f, map_location, pickle_module, **pickle_load_args):
         else:
             raise RuntimeError("Unknown saved id type: %s" % saved_id[0])
 
-    _check_seekable(f)
-    f_should_read_directly = _should_read_directly(f)
+    _check_seekable(f) # 检查文件是否支持seek(), tell()方法。seek()用于定位到文件任意位置，tell()返回指针在文件的当前位置
+    f_should_read_directly = _should_read_directly(f)  # 是否二进制可读，比如如果是zip文件，则为False。 但由于传进来的文件格式不是zip格式，这里一般为True
 
     if f_should_read_directly and f.tell() == 0:
         # legacy_load requires that f has fileno()
         # only if offset is zero we can attempt the legacy tar file loader
         try:
-            return legacy_load(f)
+            return legacy_load(f) # 因为不是 zip 格式，报错退出
         except tarfile.TarError:
-            if _is_zipfile(f):
+            if _is_zipfile(f):   # 一般不执行
                 # .zip is used for torch.jit.save and will throw an un-pickling error here
                 raise RuntimeError(
                     f"{f.name} is a zip archive (did you mean to use torch.jit.load()?)") from None
             # if not a tarfile, reset file offset and proceed
-            f.seek(0)
+            f.seek(0)   # 定位到文件初始位置
 
     if not hasattr(f, 'readinto') and (3, 8, 0) <= sys.version_info < (3, 8, 2):
         raise RuntimeError(
@@ -1031,21 +1044,21 @@ def _legacy_load(f, map_location, pickle_module, **pickle_load_args):
             "functionality.")
 
     magic_number = pickle_module.load(f, **pickle_load_args)
-    if magic_number != MAGIC_NUMBER:
+    if magic_number != MAGIC_NUMBER:   # 检查MAGIC_NUMBER是否一致
         raise RuntimeError("Invalid magic number; corrupt file?")
     protocol_version = pickle_module.load(f, **pickle_load_args)
-    if protocol_version != PROTOCOL_VERSION:
+    if protocol_version != PROTOCOL_VERSION:  # 检查pickle协议是否一致
         raise RuntimeError("Invalid protocol version: %s" % protocol_version)
 
-    _sys_info = pickle_module.load(f, **pickle_load_args)
+    _sys_info = pickle_module.load(f, **pickle_load_args)  # 读取一些系统信息
     unpickler = UnpicklerWrapper(f, **pickle_load_args)
     unpickler.persistent_load = persistent_load
     result = unpickler.load()
 
-    deserialized_storage_keys = pickle_module.load(f, **pickle_load_args)
+    deserialized_storage_keys = pickle_module.load(f, **pickle_load_args)   # 调用persistent_load()函数读取对象的结构信息，注意此时还未读取具体的数据
 
     offset = f.tell() if f_should_read_directly else None
-    for key in deserialized_storage_keys:
+    for key in deserialized_storage_keys:  # 读取具体的数据
         assert key in deserialized_objects
         typed_storage = deserialized_objects[key]
         typed_storage._untyped_storage._set_from_file(
@@ -1070,27 +1083,39 @@ def _maybe_decode_ascii(bytes_str: Union[bytes, str]) -> str:
         return bytes_str.decode('ascii')
     return bytes_str
 
-
+'''
+在load()和_legacy_load()中都有_get_restore_location()函数生成restore_location(obj, location)函数，
+它决定将读取的对象(obj)放到 CPU or CUDA (location)上，接下来我们介绍_get_restore_location():
+'''
 def _get_restore_location(map_location):
     if map_location is None:
-        restore_location = default_restore_location
+        restore_location = default_restore_location # map_location = None : 放到location记录的cpu or cuda上
     elif isinstance(map_location, dict):
+        ## map_location = {'cpu': 'cuda:0'} : 如果location是'cpu'，则放到'cuda:0'上；否则仍放到'cpu'上
         def restore_location(storage, location):
             location = map_location.get(location, location)
             return default_restore_location(storage, location)
-    elif isinstance(map_location, str):
+    elif isinstance(map_location, str):  # map_location = 'cuda:0' : 不管location是什么，都放到'cuda:0'上
         def restore_location(storage, location):
             return default_restore_location(storage, map_location)
     elif isinstance(map_location, torch.device):
-        def restore_location(storage, location):
+        def restore_location(storage, location): # map_location = torch.device('cpu') : 不管location是什么，都放到'cpu'上
             return default_restore_location(storage, str(map_location))
     else:
+        # 可以替换default_restore_location函数，map_location是一个函数
+        # 比如 map_location = lambda storage, location: storage.cuda(1) 表示
+        # 不管location是什么，都放到'cuda:1'上
         def restore_location(storage, location):
             result = map_location(storage, location)
             if result is None:
                 result = default_restore_location(storage, location)
             return result
     return restore_location
+'''
+以上是torch.serialization的源码分析，torch.serialization主要包含torch.save(), torch.load()函数，其中torch.save()主要通过调用_save() or _legacy_save()实现， 
+torch.load()主要通过调用_load() or _legacy_load(). 
+torch.load()中的map_location参数通过_get_restore_location()函数决定将对象反序列化到 CPU 还是 CUDA 上.
+'''
 
 
 class StorageType():
@@ -1100,15 +1125,20 @@ class StorageType():
     def __str__(self):
         return f'StorageType(dtype={self.dtype})'
 
+'''
+总的来说 _load() 函数在将对象二进制反序列化的过程中，在构建对象结构信息的同时，就已经将具体的数据内容加载进来了。
 
+_legacy_load()函数与它不同，_legacy_load()是先构建对象结构信息，再加载具体的数据。
+'''
 def _load(zip_file, map_location, pickle_module, pickle_file='data.pkl', **pickle_load_args):
     restore_location = _get_restore_location(map_location)
 
     loaded_storages = {}
 
     def load_tensor(dtype, numel, key, location):
-        name = f'data/{key}'
+        name = f'data/{key}'  # 数据的key，用于寻找数据
 
+        # # 从文件中找到数据
         storage = zip_file.get_storage_from_record(name, numel, torch.UntypedStorage)._typed_storage()._untyped_storage
         # TODO: Once we decide to break serialization FC, we can
         # stop wrapping with TypedStorage
@@ -1118,7 +1148,7 @@ def _load(zip_file, map_location, pickle_module, pickle_file='data.pkl', **pickl
             _internal=True)
 
         if typed_storage._data_ptr() != 0:
-            loaded_storages[key] = typed_storage
+            loaded_storages[key] = typed_storage  # 放到 cpu 或 cuda 上
 
         return typed_storage
 
@@ -1165,11 +1195,11 @@ def _load(zip_file, map_location, pickle_module, pickle_file='data.pkl', **pickl
             return super().find_class(mod_name, name)
 
     # Load the data (which may in turn use `persistent_load` to load tensors)
-    data_file = io.BytesIO(zip_file.get_record(pickle_file))
+    data_file = io.BytesIO(zip_file.get_record(pickle_file)) # 读取对象的配置文件`data.pkl`，存储的对象的结构信息
 
     unpickler = UnpicklerWrapper(data_file, **pickle_load_args)
-    unpickler.persistent_load = persistent_load
-    result = unpickler.load()
+    unpickler.persistent_load = persistent_load  # 用于读取具体数据的persistent_load函数
+    result = unpickler.load() # 执行读取操作
 
     torch._utils._validate_loaded_sparse_tensors()
 

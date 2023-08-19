@@ -372,7 +372,9 @@ def set_dir(d):
     _hub_dir = os.path.expanduser(d)
 
 
-def list(github, force_reload=False, skip_validation=False, trust_repo=None):
+def list(github,  # repo的名字，比如`pytorch/vision`。注意没有前缀`https://github.com/`，代码里hard code进去了
+         force_reload=False,  # 是否要重新下载 repo
+         skip_validation=False, trust_repo=None):
     r"""
     List all callable entrypoints available in the repo specified by ``github``.
 
@@ -412,6 +414,10 @@ def list(github, force_reload=False, skip_validation=False, trust_repo=None):
         >>> # xdoctest: +REQUIRES(env:TORCH_DOCTEST_HUB)
         >>> entrypoints = torch.hub.list('pytorch/vision', force_reload=True)
     """
+    # 根据repo的地址下载到本地，然后返回下载到本地的repo的路径
+    # 可以通过torch.hub.get_dir()得到下载的根目录，提前通过
+    # torch.hub.set_dir(string)设置下载的根目录
+
     repo_dir = _get_cache_or_reload(github, force_reload, trust_repo, "list", verbose=True,
                                     skip_validation=skip_validation)
 
@@ -422,10 +428,12 @@ def list(github, force_reload=False, skip_validation=False, trust_repo=None):
     # We take functions starts with '_' as internal helper functions
     entrypoints = [f for f in dir(hub_module) if callable(getattr(hub_module, f)) and not f.startswith('_')]
 
-    return entrypoints
+    return entrypoints  # list(string), repo提供的model类名
 
 
-def help(github, model, force_reload=False, skip_validation=False, trust_repo=None):
+def help(github,
+         model,   # module的名字，比如'resnet50'
+         force_reload=False, skip_validation=False, trust_repo=None):
     r"""
     Show the docstring of entrypoint ``model``.
 
@@ -469,14 +477,16 @@ def help(github, model, force_reload=False, skip_validation=False, trust_repo=No
         hubconf_path = os.path.join(repo_dir, MODULE_HUBCONF)
         hub_module = _import_module(MODULE_HUBCONF, hubconf_path)
 
-    entry = _load_entry_from_hubconf(hub_module, model)
+    entry = _load_entry_from_hubconf(hub_module, model)  # 从所有modules(hub_module)里找到给定module(model)
 
-    return entry.__doc__
+    return entry.__doc__  # 返回`model`的文档
 
-
-def load(repo_or_dir, model, *args, source='github', trust_repo=None, force_reload=False, verbose=True,
+#torch.hub.load()会返回实例化后的 module
+def load(repo_or_dir,  # 本地的路径，或者github上的repo名
+         model, *args, # 用于实例化 module
+         source='github', trust_repo=None, force_reload=False, verbose=True,
          skip_validation=False,
-         **kwargs):
+         **kwargs): # 用于实例化 module
     r"""
     Load a model from a github repo or a local directory.
 
@@ -547,7 +557,7 @@ def load(repo_or_dir, model, *args, source='github', trust_repo=None, force_relo
     """
     source = source.lower()
 
-    if source not in ('github', 'local'):
+    if source not in ('github', 'local'):  # 要么从github上找repo，要么从本地找repo
         raise ValueError(
             f'Unknown source: "{source}". Allowed values: "github" | "local".')
 
@@ -583,8 +593,8 @@ def _load_local(hubconf_dir, model, *args, **kwargs):
         hubconf_path = os.path.join(hubconf_dir, MODULE_HUBCONF)
         hub_module = _import_module(MODULE_HUBCONF, hubconf_path)
 
-        entry = _load_entry_from_hubconf(hub_module, model)
-        model = entry(*args, **kwargs)
+        entry = _load_entry_from_hubconf(hub_module, model)  # 找到指定的module
+        model = entry(*args, **kwargs)   # 实例化 module
 
     return model
 
