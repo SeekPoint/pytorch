@@ -79,6 +79,12 @@ def _rebuild_from_type_v2(func, new_type, args, state):
 # torch/__init__.py.in to add a type annotation for your method;
 # otherwise, it will not show up in autocomplete.
 #Tensor代表网络权重参数的类——Parameter类——就是Tensor的子类。
+'''
+torch.autograd.functional （计算图的反向传播）
+在此前一节，我们描述了单个函数的反向传播，以及如何编写定制的 autograd function。在这一节中，我们简单介绍 pytorch 中所提供的计算图反向传播的接口。
+
+在训练过程中，我们通常利用 prediction 和 groundtruth label 来计算 loss（loss 的类型为Tensor），随后调用loss.backward()进行梯度反传。而 Tensor 类的backward方法，实际调用的就是torch.autograd.backward这一接口。这一 python 接口实现了计算图级的反向传播。
+'''
 class Tensor(torch._C._TensorBase):
     def __deepcopy__(self, memo):
         if has_torch_function_unary(self):
@@ -90,6 +96,13 @@ class Tensor(torch._C._TensorBase):
             )
         if id(self) in memo:
             return memo[id(self)]
+
+        '''
+        torch.autograd.grad_mode （设置是否需要梯度）
+            我们在 inference 的过程中，不希望 autograd 对 tensor 求导，因为求导需要缓存许多中间结构，增加额外的内存/显存开销。
+            在 inference 时，关闭自动求导可实现一定程度的速度提升，并节省大量内存及显存（被节省的不仅限于原先用于梯度存储的部分）。
+            我们可以利用grad_mode中的troch.no_grad()来关闭自动求导：
+        '''
         with torch.no_grad():
             # TODO: skipping storage copy is wrong for meta, as meta
             # does accurate alias tracking; however, the code below
@@ -487,6 +500,10 @@ class Tensor(torch._C._TensorBase):
                 provided, the gradient is accumulated into all the leaf Tensors that were
                 used to compute the attr::tensors.
         """
+        # gradient: 形状与tensor一致，可以理解为链式求导的中间结果，若tensor标量，可以省略（默认为1）
+        # retain_graph: 多次反向传播时梯度累加。反向传播的中间缓存会被清空，为进行多次反向传播需指定retain_graph=True来保存这些缓存。
+        # create_graph: 为反向传播的过程同样建立计算图，可用于计算二阶导
+
         if has_torch_function_unary(self):
             return handle_torch_function(
                 Tensor.backward,

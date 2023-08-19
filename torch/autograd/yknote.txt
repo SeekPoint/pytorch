@@ -1,0 +1,244 @@
+前言
+本篇笔记以介绍 pytorch 中的 autograd 模块功能为主，主要涉及 torch/autograd 下代码，不涉及底层的 C++ 实现。本文涉及的源码以 PyTorch 1.7 为准。
+
+torch.autograd.function （函数的反向传播）
+torch.autograd.functional （计算图的反向传播）
+torch.autograd.gradcheck （数值梯度检查）
+torch.autograd.anomaly_mode （在自动求导时检测错误产生路径）
+torch.autograd.grad_mode （设置是否需要梯度）
+model.eval() 与 torch.no_grad()
+torch.autograd.profiler （提供 function 级别的统计信息）
+
+
+
+
+
+
+
+
+
+
+        '''
+        在 pytorch 实现中，autograd 会随着用户的操作，记录生成当前 variable 的所有操作，并建立一个有向无环图 (DAG)。图中记录了操作Function，每一个变量在图中的位置可通过其grad_fn属性在图中的位置推测得到。在反向传播过程中，autograd 沿着这个图从当前变量（根节点 F）溯源，可以利用链式求导法则计算所有叶子节点的梯度。每一个前向传播操作的函数都有与之对应的反向传播函数用来计算输入的各个 variable 的梯度，这些函数的函数名通常以Backward结尾。我们构建一个简化的计算图，并以此为例进行简单介绍。
+
+A = torch.tensor(2., requires_grad=True)
+B = torch.tensor(.5, requires_grad=True)
+E = torch.tensor(1., requires_grad=True)
+C = A * B
+D = C.exp()
+F = D + E
+print(F)        # tensor(3.7183, grad_fn=<AddBackward0>) 打印计算结果，可以看到F的grad_fn指向AddBackward，即产生F的运算
+print([x.is_leaf for x in [A, B, C, D, E, F]])  # [True, True, False, False, True, False] 打印是否为叶节点，由用户创建，且requires_grad设为True的节点为叶节点
+print([x.grad_fn for x in [F, D, C, A]])    # [<AddBackward0 object at 0x7f972de8c7b8>, <ExpBackward object at 0x7f972de8c278>, <MulBackward0 object at 0x7f972de8c2b0>, None]  每个变量的grad_fn指向产生其算子的backward function，叶节点的grad_fn为空
+print(F.grad_fn.next_functions) # ((<ExpBackward object at 0x7f972de8c390>, 0), (<AccumulateGrad object at 0x7f972de8c5f8>, 0)) 由于F = D + E， 因此F.grad_fn.next_functions也存在两项，分别对应于D, E两个变量，每个元组中的第一项对应于相应变量的grad_fn，第二项指示相应变量是产生其op的第几个输出。E作为叶节点，其上没有grad_fn，但有梯度累积函数，即AccumulateGrad（由于反传时多出可能产生梯度，需要进行累加）
+F.backward(retain_graph=True)   # 进行梯度反传
+print(A.grad, B.grad, E.grad)   # tensor(1.3591) tensor(5.4366) tensor(1.) 算得每个变量梯度，与求导得到的相符
+print(C.grad, D.grad)   # None None 为节约空间，梯度反传完成后，中间节点的梯度并不会保留
+
+我们再来看下面的计算图，并在这个计算图上模拟 autograd 所做的工作：
+
+A = torch.tensor([3.], requires_grad=True)
+B = torch.tensor([2.], requires_grad=True)
+C = A ** 2
+D = B ** 2
+E = C * D
+F = D + E
+
+F.manual_grad = torch.tensor(1)                             # 我们用manual_grad表示，在已知计算图结构的情况下，我们模拟autograd过程手动算得的梯度
+D.manual_grad, E.manual_grad = F.grad_fn(F.manual_grad)
+C.manual_grad, tmp2 = E.grad_fn(E.manual_grad)
+D.manual_grad = D.manual_grad + tmp2                        # 这里我们先完成D上的梯度累加，再进行反传
+A.manual_grad = C.grad_fn(C.manual_grad)
+B.manual_grad = D.grad_fn(D.manual_grad)                    # (tensor([24.], grad_fn=<MulBackward0>), tensor([40.], grad_fn=<MulBackward0>))
+
+下面，我们编写一个简单的函数，在这个计算图上进行autograd，并验证结果是否正确：
+
+# 这一例子仅可用于每个op只产生一个输出的情况，且效率很低（由于对于某一节点，每次未等待所有梯度反传至此节点，就直接将本次反传回的梯度直接反传至叶节点）
+def autograd(grad_fn, gradient):
+    auto_grad = {}
+    queue = [[grad_fn, gradient]]
+    while queue != []:
+        item = queue.pop()
+        gradients = item[0](item[1])
+        functions = [x[0] for x in item[0].next_functions]
+        if type(gradients) is not tuple:
+            gradients = (gradients, )
+        for grad, func in zip(gradients, functions):
+            if type(func).__name__ == 'AccumulateGrad':
+                if hasattr(func.variable, 'auto_grad'):
+                    func.variable.auto_grad = func.variable.auto_grad + grad
+                else:
+                    func.variable.auto_grad = grad
+            else:
+                queue.append([func, grad])
+
+A = torch.tensor([3.], requires_grad=True)
+B = torch.tensor([2.], requires_grad=True)
+C = A ** 2
+D = B ** 2
+E = C * D
+F = D + E
+
+autograd(F.grad_fn, torch.tensor(1))
+print(A.auto_grad, B.auto_grad)         # tensor(24., grad_fn=<UnbindBackward>) tensor(40., grad_fn=<AddBackward0>)
+
+# 这一autograd同样可作用于编写的模型，我们将会看到，它与pytorch自带的backward产生了同样的结果
+from torch import nn
+
+class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(10, 5)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(5, 2)
+        self.fc3 = nn.Linear(5, 2)
+        self.fc4 = nn.Linear(2, 2)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x1 = self.fc2(x)
+        x2 = self.fc3(x)
+        x2 = self.relu(x2)
+        x2 = self.fc4(x2)
+        return x1 + x2
+
+    x = torch.ones([10], requires_grad=True)
+    mlp = MLP()
+    mlp_state_dict = mlp.state_dict()
+
+    # 自定义autograd
+    mlp = MLP()
+    mlp.load_state_dict(mlp_state_dict)
+    y = mlp(x)
+    z = torch.sum(y)
+    autograd(z.grad_fn, torch.tensor(1.))
+    print(x.auto_grad) # tensor([-0.0121,  0.0055, -0.0756, -0.0747,  0.0134,  0.0867, -0.0546,  0.1121, -0.0934, -0.1046], grad_fn=<AddBackward0>)
+
+    mlp = MLP()
+    mlp.load_state_dict(mlp_state_dict)
+    y = mlp(x)
+    z = torch.sum(y)
+    z.backward()
+    print(x.grad) # tensor([-0.0121,  0.0055, -0.0756, -0.0747,  0.0134,  0.0867, -0.0546,  0.1121, -0.0934, -0.1046])
+    pytorch 使用动态图，它的计算图在每次前向传播时都是从头开始构建，所以它能够使用python 控制语句（如 for、if 等）根据需求创建计算图。下面提供一个例子：
+
+    def f(x):
+        result = 1
+        for ii in x:
+            if ii.item()>0: result=ii*result
+        return result
+
+    x = torch.tensor([0.3071,  1.1043,  1.3605, -0.3471], requires_grad=True)
+    y = f(x)    # y = x[0]*x[1]*x[2]
+    y.backward()
+    print(x.grad)   # tensor([1.5023, 0.4178, 0.3391, 0.0000])
+
+    x = torch.tensor([ 1.2817,  1.7840, -1.7033,  0.1302], requires_grad=True)
+    y = f(x)    # y = x[0]*x[1]*x[3]
+    y.backward()
+    print(x.grad)   # tensor([0.2323, 0.1669, 0.0000, 2.2866])
+    此前的例子使用的是Tensor.backward()接口（内部调用autograd.backward），下面我们来介绍autograd提供的jacobian()和hessian()接口，并直接利用其进行自动微分。这两个函数的输入为运算函数（接受输入 tensor，返回输出 tensor）和输入 tensor，返回 jacobian 和 hessian 矩阵。对于jacobian接口，输入输出均可以为 n 维张量，对于hessian接口，输出必需为一标量。jacobian返回的张量 shape 为output_dim x input_dim（若函数输出为标量，则 output_dim 可省略），hessian返回的张量为input_dim x input_dim。除此之外，这两个自动微分接口同时支持运算函数接收和输出多个 tensor。
+
+    from torch.autograd.functional import jacobian, hessian
+    from torch.nn import Linear, AvgPool2d
+
+    fc = Linear(4, 2)
+    pool = AvgPool2d(kernel_size=2)
+
+    def scalar_func(x):
+        y = x ** 2
+        z = torch.sum(y)
+        return z
+
+    def vector_func(x):
+        y = fc(x)
+        return y
+
+    def mat_func(x):
+        x = x.reshape((1, 1,) + x.shape)
+        x = pool(x)
+        x = x.reshape(x.shape[2:])
+        return x ** 2
+
+    vector_input = torch.randn(4, requires_grad=True)
+    mat_input = torch.randn((4, 4), requires_grad=True)
+
+    j = jacobian(scalar_func, vector_input)
+    assert j.shape == (4, )
+    assert torch.all(jacobian(scalar_func, vector_input) == 2 * vector_input)
+    h = hessian(scalar_func, vector_input)
+    assert h.shape == (4, 4)
+    assert torch.all(hessian(scalar_func, vector_input) == 2 * torch.eye(4))
+    j = jacobian(vector_func, vector_input)
+    assert j.shape == (2, 4)
+    assert torch.all(j == fc.weight)
+    j = jacobian(mat_func, mat_input)
+    assert j.shape == (2, 2, 4, 4)
+    在此前的例子中，我们已经介绍了，autograd.backward()为节约空间，仅会保存叶节点的梯度。若我们想得知输出关于某一中间结果的梯度，我们可以选择使用autograd.grad()接口，或是使用hook机制：
+
+    A = torch.tensor(2., requires_grad=True)
+    B = torch.tensor(.5, requires_grad=True)
+    C = A * B
+    D = C.exp()
+    torch.autograd.grad(D, (C, A))  # (tensor(2.7183), tensor(1.3591)), 返回的梯度为tuple类型, grad接口支持对多个变量计算梯度
+
+    def variable_hook(grad):                        # hook注册在Tensor上，输入为反传至这一tensor的梯度
+        print('the gradient of C is：', grad)
+
+    A = torch.tensor(2., requires_grad=True)
+    B = torch.tensor(.5, requires_grad=True)
+    C = A * B
+    hook_handle = C.register_hook(variable_hook)    # 在中间变量C上注册hook
+    D = C.exp()
+    D.backward()                                    # 反传时打印：the gradient of C is： tensor(2.7183)
+    hook_handle.remove()                            # 如不再需要，可remove掉这一hook
+
+        '''
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+torch.autograd.gradcheck （数值梯度检查）
+在编写好自己的 autograd function 后，可以利用gradcheck中提供的gradcheck和gradgradcheck接口，对数值算得的梯度和求导算得的梯度进行比较，以检查backward是否编写正确。以函数
+ 为例，数值法求得
+ 点的梯度为：
+ 。 在下面的例子中，我们自己实现了Sigmoid函数，并利用gradcheck来检查backward的编写是否正确。
+
+class Sigmoid(Function):
+
+    @staticmethod
+    def forward(ctx, x):
+        output = 1 / (1 + torch.exp(-x))
+        ctx.save_for_backward(output)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        output,  = ctx.saved_tensors
+        grad_x = output * (1 - output) * grad_output
+        return grad_x
+
+test_input = torch.randn(4, requires_grad=True)     # tensor([-0.4646, -0.4403,  1.2525, -0.5953], requires_grad=True)
+torch.autograd.gradcheck(Sigmoid.apply, (test_input,), eps=1e-3)    # pass
+torch.autograd.gradcheck(torch.sigmoid, (test_input,), eps=1e-3)    # pass
+torch.autograd.gradcheck(Sigmoid.apply, (test_input,), eps=1e-4)    # fail
+torch.autograd.gradcheck(torch.sigmoid, (test_input,), eps=1e-4)    # fail
+我们发现：eps 为 1e-3 时，我们编写的 Sigmoid 和 torch 自带的 builtin Sigmoid 都可以通过梯度检查，但 eps 下降至 1e-4 时，两者反而都无法通过。而一般直觉下，计算数值梯度时， eps 越小，求得的值应该更接近于真实的梯度。这里的反常现象，是由于机器精度带来的误差所致：test_input的类型为torch.float32，因此在 eps 过小的情况下，产生了较大的精度误差（计算数值梯度时，eps 作为被除数），因而与真实精度间产生了较大的 gap。将test_input换为float64的 tensor 后，不再出现这一现象。这点同时提醒我们，在编写backward时，要考虑的数值计算的一些性质，尽可能保留更精确的结果。
+
+test_input = torch.randn(4, requires_grad=True, dtype=torch.float64)    # tensor([-0.4646, -0.4403,  1.2525, -0.5953], dtype=torch.float64, requires_grad=True)
+torch.autograd.gradcheck(Sigmoid.apply, (test_input,), eps=1e-4)    # pass
+torch.autograd.gradcheck(torch.sigmoid, (test_input,), eps=1e-4)    # pass
+
+torch.autograd.gradcheck(Sigmoid.apply, (test_input,), eps=1e-6)    # pass
+torch.autograd.gradcheck(torch.sigmoid, (test_input,), eps=1e-6)    # pass

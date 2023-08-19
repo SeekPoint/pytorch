@@ -465,6 +465,7 @@ class record_function(_ContextDecorator):
         >>> # xdoctest: +IGNORE_WANT
         >>> # NOTE: some columns were removed for brevity
         >>> print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+        输出为包含 CPU 时间及占比，调用次数等信息（由于一个 kernel 可能还会调用其他 kernel，因此 Self CPU 指他本身所耗时间（不含其他 kernel 被调用所耗时间））：
         -----------------------------------  ---------------  ---------------  ---------------
         Name                                 Self CPU total %  CPU time avg     Number of Calls
         -----------------------------------  ---------------  ---------------  ---------------

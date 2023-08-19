@@ -22,7 +22,8 @@ class detect_anomaly:
         will slow down your program execution.
 
     Example:
-
+torch.autograd.anomaly_mode （在自动求导时检测错误产生路径）
+可用于在自动求导时检测错误产生路径，借助with autograd.detect_anomaly(): 或是 torch.autograd.set_detect_anomaly(True)来启用：
         >>> # xdoctest: +REQUIRES(env:TORCH_DOCTEST_ANOMOLY)
         >>> import torch
         >>> from torch import autograd
@@ -55,6 +56,7 @@ class detect_anomaly:
         ...     inp = torch.rand(10, 10, requires_grad=True)
         ...     out = run_fn(inp)
         ...     out.backward()
+        # 检测到错误发生的Trace
             Traceback of forward call that caused the error:
               File "tmp.py", line 53, in <module>
                 out = run_fn(inp)

@@ -64,7 +64,13 @@ class Threshold(Module):
             self.threshold, self.value, inplace_str
         )
 
+'''
+torch.autograd.function （函数的反向传播）
+我们在构建网络的时候，通常使用 pytorch 所提供的nn.Module （例如nn.Conv2d, nn.ReLU等）作为基本单元。
+而这些 Module 通常是包裹 autograd function，以其作为真正实现的部分。
+例如nn.ReLU 实际使用torch.nn.functional.relu（F.relu）:
 
+'''
 class ReLU(Module):
     r"""Applies the rectified linear unit function element-wise:
 
@@ -105,6 +111,55 @@ class ReLU(Module):
     def extra_repr(self) -> str:
         inplace_str = 'inplace=True' if self.inplace else ''
         return inplace_str
+'''
+这里的F.relu类型为function，若再剥开一层，其实际包裹的函数类型为builtin_function_or_method，
+这也是真正完成运算的部分。这些部分通常使用 C++ 实现（如ATen）。至此我们知道，一个模型的运算部分由 autograd functions 组成，这些 autograd functions 内部定义了 forward，backward 用以描述前向和梯度反传的过程，组合后可以实现整个模型的前向和梯度反传。以torch.autograd.function中所定义的Function类为基类，
+我们可以实现自定义的autograd function，所实现的 function 需包含forward及backward两个方法。
+以下以Exp和GradCoeff两个自定义 autograd function 为例进行讲解：
+
+class Exp(Function):                    # 此层计算e^x
+
+    @staticmethod
+    def forward(ctx, i):                # 模型前向
+        result = i.exp()
+        ctx.save_for_backward(result)   # 保存所需内容，以备backward时使用，所需的结果会被保存在saved_tensors元组中；此处仅能保存tensor类型变量，若其余类型变量（Int等），可直接赋予ctx作为成员变量，也可以达到保存效果
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output):     # 模型梯度反传
+        result, = ctx.saved_tensors     # 取出forward中保存的result
+        return grad_output * result     # 计算梯度并返回
+
+# 尝试使用
+x = torch.tensor([1.], requires_grad=True)  # 需要设置tensor的requires_grad属性为True，才会进行梯度反传
+ret = Exp.apply(x)                          # 使用apply方法调用自定义autograd function
+print(ret)                                  # tensor([2.7183], grad_fn=<ExpBackward>)
+ret.backward()                              # 反传梯度
+print(x.grad)                               # tensor([2.7183])
+Exp 函数的前向很简单，直接调用 tensor 的成员方法exp即可。反向时，我们知道 
+ , 因此我们直接使用 
+ 乘以grad_output即得梯度。我们发现，我们自定义的函数Exp正确地进行了前向与反向。同时我们还注意到，前向后所得的结果包含了grad_fn属性，这一属性指向用于计算其梯度的函数（即Exp的backward函数）。关于这点，在接下来的部分会有更详细的说明。接下来我们看另一个函数GradCoeff，其功能是反传梯度时乘以一个自定义系数。
+
+class GradCoeff(Function):       
+       
+    @staticmethod
+    def forward(ctx, x, coeff):                 # 模型前向
+        ctx.coeff = coeff                       # 将coeff存为ctx的成员变量
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):             # 模型梯度反传
+        return ctx.coeff * grad_output, None    # backward的输出个数，应与forward的输入个数相同，此处coeff不需要梯度，因此返回None
+
+# 尝试使用
+x = torch.tensor([2.], requires_grad=True)
+ret = GradCoeff.apply(x, -0.1)                  # 前向需要同时提供x及coeff，设置coeff为-0.1
+ret = ret ** 2                          
+print(ret)                                      # tensor([4.], grad_fn=<PowBackward0>)
+ret.backward()  
+print(x.grad)                                   # tensor([-0.4000])，梯度已乘以相应系数
+
+'''
 
 
 class RReLU(Module):
