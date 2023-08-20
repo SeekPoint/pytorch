@@ -85,6 +85,16 @@ class ReduceLROnPlateau:
     def state_dict(self) -> Dict[str, Any]: ...
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None: ...
 
+'''
+2.2.8 CyclicLR(optimizer, base_lr, max_lr, step_size_up=2000, step_size_down=None, mode='triangular', ...)
+类似三角波形状的学习率调整策略，以下是几个重要初始化参数:
+
+base_lr: 基准学习率，也是最小的学习率
+max_lr: 学习率上限
+step_size_up: 一个周期里上升阶段 epoch 数
+step_size_down: 一个周期里下降阶段 epoch 数
+
+'''
 class CyclicLR(LRScheduler):
     max_lrs: List[float] = ...
     total_size: float = ...

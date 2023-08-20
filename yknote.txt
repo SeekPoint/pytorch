@@ -120,6 +120,9 @@ OpenMMLab：PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解
 OpenMMLab：PyTorch 源码解读之 torch.optim：优化算法接口详解
 OpenMMLab：PyTorch 源码解读之 torch.cuda.amp: 自动混合精度详解
 OpenMMLab：PyTorch 源码解读之 cpp_extension：揭秘 C++/CUDA 算子实现和调用全流程
+PyTorch 源码解读之即时编译篇
+https://zhuanlan.zhihu.com/p/361101354
+
 
 看PyTorch源代码的心路历程
 https://www.jianshu.com/p/20b92c29d571
@@ -157,8 +160,7 @@ https://blog.csdn.net/flydreamforever/article/details/127478063
 https://www.jiqizhixin.com/articles/2019-02-28-13
 
 
-PyTorch 源码解读之即时编译篇
-https://zhuanlan.zhihu.com/p/361101354
+
 
 
 

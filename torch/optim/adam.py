@@ -105,6 +105,7 @@ class Adam(Optimizer):
                     raise RuntimeError('`requires_grad` is not supported for `step` in differentiable mode')
                 state_steps.append(state['step'])
 
+    #子类如 SGD 需要实现 step 方法，如下所示:
     @_use_grad_for_differentiable
     def step(self, closure=None):
         """Performs a single optimization step.

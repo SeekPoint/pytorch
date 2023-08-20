@@ -9,7 +9,20 @@ from torch.optim.lr_scheduler import LRScheduler
 
 __all__ = ['AveragedModel', 'update_bn', 'SWALR']
 
+'''
+3 swa_utils里SWA相关类和函数
+该模块中只有 2 个类和一个函数:
 
+AveragedModel: 实现 SWA 算法的权重平均模型
+SWALR: 与AverageModel配合使用的学习率调整策略
+update_bn: 更新模型中的 bn
+3.0 SWA 简介
+随机权重平均(SWA)是一种优化算法，在SWA 论文的结果证明，取 SGD 轨迹的多点简单平均值，以一个周期或者不变的学习率，会比传统训练有更好的泛化效果。论文的结果同样了证明了，随机权重平均 (SWA) 可以找到更广的最优值域。
+
+3.1 AveragedModel
+该类实现 SWA 算法的权重平均模型，初始化时传入模型 model 和参数平均化函数 avg_fn，然后在初始化函数中对 model的参数进行深拷贝, 注册模型计数器。
+在update_parameters(self, model)方法中再次传入模型后，根据参数avg_fn对模型参数进行平均后更新 swa 模型参数。
+'''
 class AveragedModel(Module):
     r"""Implements averaged model for Stochastic Weight Averaging (SWA).
 
@@ -106,6 +119,8 @@ class AveragedModel(Module):
             self.module = self.module.to(device)
         self.register_buffer('n_averaged',
                              torch.tensor(0, dtype=torch.long, device=device))
+
+        # 默认提供了avg_fn，你可以指定
         if avg_fn is None:
             def avg_fn(averaged_model_parameter, model_parameter, num_averaged):
                 return averaged_model_parameter + \
@@ -140,7 +155,7 @@ class AveragedModel(Module):
                 b_swa.detach().copy_(b_model.detach().to(device))
         self.n_averaged += 1
 
-
+#该函数主要是通过传入的某个训练时刻的模型model 和 dataloader，来允许 swa 模型计算和更新 bn
 @torch.no_grad()
 def update_bn(loader, model, device=None):
     r"""Updates BatchNorm running_mean, running_var buffers in the model.

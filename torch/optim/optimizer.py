@@ -179,9 +179,12 @@ class Optimizer:
         在 self.defaults 之中保存 lr, momentun 等全局参数（超参数）。
         在 self.state 保存优化器当前状态。
         在 self.param_groups 之中保存所有待优化的变量。
+        
     '''
     def __init__(self, params, defaults):
         torch._C._log_api_usage_once("python.optimizer")
+
+        # 字典类型，子类传入，用于表示全部参数组的默认超参
         self.defaults = defaults  # 保存 lr, momentun 等全局参数
         self._optimizer_step_pre_hooks: Dict[int, Callable] = OrderedDict()
         self._optimizer_step_post_hooks: Dict[int, Callable] = OrderedDict()
@@ -363,6 +366,13 @@ class Optimizer:
             字典的 key 是缓存的index。
             字典的 value 也是一个字典，key 是缓存变量名，value 是相应的张量。
         param_groups : 一个包括了所有 param groups 的字典。
+        
+    1.2.5 state_dict() 和 load_state_dict
+    这两个方法实现序列化和反序列化功能。
+    
+        state_dict(): 将优化器管理的参数和其状态信息以 dict 形式返回
+        load_state_dict(state_dict): 加载之前返回的 dict，更新参数和其状态
+        两个方法可用来实现模型训练中断后继续训练功能
     '''
     def state_dict(self):
         r"""Returns the state of the optimizer as a :class:`dict`.
@@ -465,6 +475,11 @@ class Optimizer:
             update_group(g, ng) for g, ng in zip(groups, saved_groups)]
         self.__setstate__({'state': state, 'param_groups': param_groups})
 
+    '''
+    1.2.4 zero_grad
+    在反向传播计算梯度之前对上一次迭代时记录的梯度清零，参数set_to_none 设置为 True 时会直接将参数梯度设置为 None，
+    从而减小内存使用, 但通常情况下不建议设置这个参数，因为梯度设置为 None 和 0 在 PyTorch 中处理逻辑会不一样。
+    '''
     def zero_grad(self, set_to_none: bool = True):
         r"""Sets the gradients of all optimized :class:`torch.Tensor` s to zero.
 
@@ -506,6 +521,14 @@ class Optimizer:
                     for grads in per_dtype_grads.values():
                         torch._foreach_zero_(grads)
 
+    #基类 Optimizer 定义了 step 方法接口，如下所示
+    #子类如 SGD 需要实现 step 方法
+    '''
+    step 方法可传入闭包函数 closure，主要目的是为了实现如Conjugate Gradient和LBFGS等优化算法，
+    这些算法需要对模型进行多次评估
+    Python 中闭包概念：在一个内部函数中，对外部作用域的变量进行引用(并且一般外部函数的返回值为内部函数)，
+    那么内部函数就被认为是闭包
+    '''
     def step(self, closure):
         r"""Performs a single optimization step (parameter update).
 
@@ -552,6 +575,7 @@ class Optimizer:
             if not self.defaults.get('differentiable', None) and not (param.is_leaf or param.retains_grad):
                 raise ValueError("can't optimize a non-leaf Tensor")
 
+        # 利用默认参数给所有组设置统一的超参
         for name, default in self.defaults.items():  # 缺省参数也加入到 param_group 之中
             if default is required and name not in param_group:
                 raise ValueError("parameter group didn't specify a value of required optimization parameter " +
@@ -574,4 +598,5 @@ class Optimizer:
             raise ValueError("some parameters appear in more than one parameter group")
 
         # 更新自身的参数组中
+        #利用 add_param_group 函数功能，可以对模型不同的可学习参数组设定不同的超参数，初始化优化器可传入元素是 dict 的 list，每个 dict 中的 key 是 params 或者其他超参数的名字如 lr，
         self.param_groups.append(param_group) # 加入到param_groups

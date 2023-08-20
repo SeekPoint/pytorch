@@ -22,7 +22,56 @@ EPOCH_DEPRECATION_WARNING = (
     "https://github.com/pytorch/pytorch/issues/new/choose."
 )
 
+'''
+2 学习率调节器 lr_scheduler
+有了优化器，还需要根据 epoch 来调整学习率，lr_schedluer提供了在训练模型时学习率的调整策略。
 
+目前 PyTorch 提供了如下学习率调整策略:
+
+StepLR: 等间隔调整策略
+MultiStepLR: 多阶段调整策略
+ExponentialLR: 指数衰减调整策略
+ReduceLROnPlateau: 自适应调整策略
+CyclicLR: 循环调整策略
+OneCycleLR: 单循环调整策略
+CosineAnnealingLR: 余弦退火调整策略
+CosineAnnealingWarmRestarts: 带预热启动的余弦退火调整策略
+LambdaLR: 自定义函数调整策略
+MultiplicativeLR: 乘法调整策略
+学习率调整策略可粗略分为以下三大类:
+
+有序调整策略:
+StepLR
+MultiStepLR
+ExponentialLR
+CyclicLR
+OneCycleLR
+CosineAnnealingLR
+CosineAnnealingWarmRestarts
+
+
+自适应调整策略:
+ReduceLROnPlateau
+
+
+自定义调整策略:
+LambdaLR
+MultiplicativeLR
+2.1 基类: _LRScheduler
+学习率调整类主要的逻辑功能就是每个 epoch 计算参数组的学习率，更新 optimizer对应参数组中的lr值，从而应用在optimizer里可学习参数的梯度更新。所有的学习率调整策略类的父类是torch.optim.lr_scheduler._LRScheduler，基类 _LRScheduler 定义了如下方法:
+
+step(epoch=None): 子类公用
+get_lr(): 子类需要实现
+get_last_lr(): 子类公用
+print_lr(is_verbose, group, lr, epoch=None): 显示 lr 调整信息
+state_dict(): 子类可能会重写
+load_state_dict(state_dict): 子类可能会重写
+2.1.1 初始化
+基类的初始化函数可传入两个参数, 第一是optimizer就是之前我们讲过的优化器的实例，第二个参数last_epoch是最后一次 epoch 的 index，默认值是 -1，代表初次训练模型，
+此时会对optimizer里的各参数组设置初始学习率 initial_lr。若last_epoch传入值大于 -1，则代表从某个 epoch 开始继续上次训练，此时要求optimizer的参数组中有initial_lr初始学习率信息。
+初始化函数内部的 with_counter 函数主要是为了确保lr_scheduler.step()是在optimizer.step()之后调用的 (PyTorch=1.1 发生变化). 
+注意在__init__函数最后一步调用了self.step()，即_LRScheduler在初始化时已经调用过一次step()方法。
+'''
 class LRScheduler:
 
     def __init__(self, optimizer, last_epoch=-1, verbose=False):
@@ -83,7 +132,13 @@ class LRScheduler:
         self.optimizer._step_count = 0
         self._step_count = 0
         self.step()
-
+    '''
+    2.1.4 state_dict 和 load_state_dict
+        这两个方法和Optimizer里的方法功能是一样的，就是为了保存和重新加载状态信息，需要注意的是，这里不会重复记录self.optimizer属性的状态信息，因为 Optimizer 有自己实现的对应方法。
+        
+        state_dict(): 以字典 dict 形式返回当前实例除 self.optimizer 之外的其他所有属性信息
+        load_state_dict(state_dict): 重新载入之前保存的状态信息
+    '''
     def state_dict(self):
         """Returns the state of the scheduler as a :class:`dict`.
 
@@ -101,6 +156,12 @@ class LRScheduler:
         """
         self.__dict__.update(state_dict)
 
+    '''
+    2.1.3 get_last_lr、get_lr和print_lr
+        get_last_lr()方法比较简单，就是step()方法调用后，记录的最后一次 optimizer各参数组里更新后的学习率信息
+        get_lr() 方法是抽象方法，定义了更新学习率策略的接口，不同子类继承后会有不同的实现.其返回值是[lr1, lr2, ...]结构
+        print_lr(is_verbose, group, lr, epoch=None)): 该方法提供了显示 lr 调整信息的功能
+    '''
     def get_last_lr(self):
         """ Return last computed learning rate by current scheduler.
         """
@@ -123,7 +184,13 @@ class LRScheduler:
                 print('Epoch {}: adjusting learning rate'
                       ' of group {} to {:.4e}.'.format(epoch_str, group, lr))
 
-
+    '''
+    2.1.2 step
+    当模型完成一个 epoch 训练时，需要调用step()方法，该方法里对last_epoch自增之后，在内部上下文管理器类里调用子类实现的get_lr()方法获得各参数组在此次 epoch 时的学习率，
+    并更新到 optimizer的param_groups属性之中，最后记录下最后一次调整的学习率到self._last_lr，
+    此属性将在get_last_lr()方法中返回。在这个方法中用到了上下文管理功能的内部类 _enable_get_lr_call，实例对象添加了_get_lr_called_within_step属性，
+    这个属性可在子类中使用。此外，需要注意的是，step方法中的参数epoch已经废弃了，在使用时可以直接忽略这个参数。
+    '''
     def step(self, epoch=None):
         # Raise a warning if old pattern is detected
         # https://github.com/pytorch/pytorch/issues/20124
@@ -162,7 +229,6 @@ class LRScheduler:
             self.print_lr(self.verbose, i, lr, epoch)
 
         self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
-
 
 # Including _LRScheduler for backwards compatibility
 # Subclass instead of assign because we want __name__ of _LRScheduler to be _LRScheduler (assigning would make it LRScheduler).
@@ -268,7 +334,10 @@ class LambdaLR(LRScheduler):
         return [base_lr * lmbda(self.last_epoch)
                 for lmbda, base_lr in zip(self.lr_lambdas, self.base_lrs)]
 
-
+'''
+2.2.3 MultiplicativeLR(optimizer, lr_lambda, last_epoch=-1, verbose=False)
+乘法调整策略实现了学习率的衰减系数 gamma可变，即在每个调整节点，可对各参数组的学习率乘上一个不同的衰减率gamma，初始化函数中lr_lambda参数可以是一个lambda函数，也可是lambda函数列表，每个lambda函数输入是 epoch，输出是gamma。
+'''
 class MultiplicativeLR(LRScheduler):
     """Multiply the learning rate of each parameter group by the factor given
     in the specified function. When last_epoch=-1, sets initial lr as lr.
@@ -349,7 +418,11 @@ class MultiplicativeLR(LRScheduler):
         else:
             return [group['lr'] for group in self.optimizer.param_groups]
 
-
+'''
+2.2 学习率调整策略示例
+2.2.1 StepLR(optimizer, step_size, gamma=0.1, last_epoch=-1, verbose=False)
+StepLR是根据 epoch 的等间隔学习率调整策略，实现了get_lr()方法。初始化函数须传入优化器，epoch 间隔 step_size，gamma是学习率的衰减系数，默认是 0.1。
+'''
 class StepLR(LRScheduler):
     """Decays the learning rate of each parameter group by gamma every
     step_size epochs. Notice that such decay can happen simultaneously with
@@ -398,7 +471,7 @@ class StepLR(LRScheduler):
         return [base_lr * self.gamma ** (self.last_epoch // self.step_size)
                 for base_lr in self.base_lrs]
 
-
+# 多阶段学习率调整策略，参数 milestones 是包含多个学习率调整点列表
 class MultiStepLR(LRScheduler):
     """Decays the learning rate of each parameter group by gamma once the
     number of epoch reaches one of the milestones. Notice that such decay can
@@ -763,7 +836,10 @@ class PolynomialLR(LRScheduler):
             for base_lr in self.base_lrs
         ]
 
-
+'''
+2.2.6 CosineAnnealingLR(optimizer, T_max, eta_min=0, last_epoch=-1, verbose=False)
+余弦退火调整策略，T_max是最大迭代次数， eta_min是最小学习率值，其公式如下，eta_max为初始学习率，T_cur 是自重新启动后的 epoch 数
+'''
 class CosineAnnealingLR(LRScheduler):
     r"""Set the learning rate of each parameter group using a cosine annealing
     schedule, where :math:`\eta_{max}` is set to the initial lr and
@@ -909,7 +985,14 @@ class ChainedScheduler(LRScheduler):
         for idx, s in enumerate(_schedulers):
             self._schedulers[idx].load_state_dict(s)
 
+'''
+2.2.10 ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, threshold=0.0001, threshold_mode='rel', ...)
+自适应学习率调整策略，比如只有当 loss 在几个 epoch 里都不发生下降时，才调整学习率。注意在调用时，需要在其 step() 方法中传入对应的参考变量，例如: scheduler.step(val_loss)
 
+mode: 评价模型训练质量的模式, 传入值为min 或max
+factor: 学习率衰减因子, 类似gamma
+patience: 控制何时调整学习率
+'''
 class ReduceLROnPlateau:
     """Reduce learning rate when a metric has stopped improving.
     Models often benefit from reducing the learning rate by a factor
@@ -1331,8 +1414,14 @@ class CyclicLR(LRScheduler):
         super().load_state_dict(state_dict)
         self._init_scale_fn()
 
+'''
+2.2.7 CosineAnnealingWarmRestarts(optimizer, T_0, T_mult=1, eta_min=0, last_epoch=-1, verbose=False)
+在 SGDR(Stochastic Gradient Descent with Warm Restarts)中提出:
 
-
+T_0: 第一次启动时的迭代数
+T_mult: 启动后，改变周期 T 的因子
+eta_min: 学习率下限
+'''
 class CosineAnnealingWarmRestarts(LRScheduler):
     r"""Set the learning rate of each parameter group using a cosine annealing
     schedule, where :math:`\eta_{max}` is set to the initial lr, :math:`T_{cur}`
@@ -1455,7 +1544,13 @@ class CosineAnnealingWarmRestarts(LRScheduler):
 
         self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
 
+'''
+2.2.9 OneCycleLR(optimizer, max_lr, total_steps=None, epochs=None, steps_per_epoch=None, pct_start=0.3,...)
+只有 1 次循环的学习率调整策略
 
+max_lr: float/list, 学习率调整的上限
+total_steps: int 循环中的总步数
+'''
 class OneCycleLR(LRScheduler):
     r"""Sets the learning rate of each parameter group according to the
     1cycle learning rate policy. The 1cycle policy anneals the learning
