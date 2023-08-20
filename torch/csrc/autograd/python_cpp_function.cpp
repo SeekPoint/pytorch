@@ -257,7 +257,18 @@ PyTypeObject* _initFunctionPyTypeObject(
   }
   return &type;
 }
+/*
+用来初始化cpp_function_types表，这个表维护了从cpp类型的函数到python类型的映射：
+这个表里存放的都是和autograd相关的函数的映射关系，起什么作用呢？比如我在python中print一个Variable的grad_fn：
 
+>>> gemfield = torch.empty([2,2],requires_grad=True)
+>>> syszux = gemfield * gemfield
+>>> syszux.grad_fn
+<ThMulBackward object at 0x7f111621c350>
+grad_fn是一个Function的实例，我们在C++中定义了那么多反向函数（参考下文），但是怎么在python中访问呢？就靠上面这个表的映射。
+实际上，cpp_function_types这个映射表就是为了在python中打印grad_fn服务的。
+
+*/
 static std::unordered_map<std::type_index, THPObjectPtr> cpp_function_types_map;
 static std::unordered_set<PyTypeObject*> cpp_function_types_set;
 

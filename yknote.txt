@@ -59,8 +59,13 @@ https://blog.csdn.net/u012436149/article/details/78510945
 如何有效地阅读PyTorch的源代码？
 https://www.zhihu.com/question/58253344/answer/241864966
 
+Gemfield  ===有点过时
 PyTorch ATen代码的动态生成
 https://zhuanlan.zhihu.com/p/55966063
+PyTorch的动态图(下)
+https://zhuanlan.zhihu.com/p/65822256
+PyTorch的动态图(上)
+https://zhuanlan.zhihu.com/p/61765561
 
 
 Python进阶笔记C语言拓展篇（二）动态链接库pyd+存根文件pyi——学会优雅地使用C\C++拓展Python模块的正确/官方姿势
@@ -70,7 +75,8 @@ https://zhuanlan.zhihu.com/p/479371538
 一文搞懂 PyTorch 内部机制
 https://mp.weixin.qq.com/s/xYNCwmiE4PJJI_vxGEaMiA
 
-PyTorch源码浅析（目录）
+PyTorch源码浅析（目录）====时间太久，ignore
+罗秀哲
 https://zhuanlan.zhihu.com/p/34629243
 PyTorch源码浅析（一）　
 PyTorch源码浅析（二）　
@@ -79,21 +85,21 @@ PyTorch源码浅析（四）　
 
 
 https://zhuanlan.zhihu.com/p/590026101
-pytorch源码阅读
+pytorch源码阅读===内容少，ignore
 
 
 https://zhuanlan.zhihu.com/p/100000785
-pytorch源码阅读（一）Module类
-
+pytorch源码阅读（一）Module类 ====时间太久，ignore
 https://zhuanlan.zhihu.com/p/100076702
-pytorch源码阅读（二）optimizer原理
-
-https://zhuanlan.zhihu.com/p/338298069
+pytorch源码阅读（二）optimizer原理====时间太久，ignore
+https://zhuanlan.zhihu.com/p/338298069====内容少
 pytorch中的广播语义（一）
 
-OpenMMLab：PyTorch 源码解读系列
-https://zhuanlan.zhihu.com/p/328674159
 
+
+
+OpenMMLab：PyTorch 源码解读系列  ===主要基于1.7，和其他文章重复多
+https://zhuanlan.zhihu.com/p/328674159
 OpenMMLab：PyTorch 源码解读之 torch.autograd：梯度计算详解
 OpenMMLab：PyTorch 源码解读之 BN & SyncBN：BN 与 多卡同步 BN 详解
 OpenMMLab：PyTorch 源码解读之 torch.utils.data：解析数据处理全流程
@@ -108,23 +114,19 @@ https://www.jianshu.com/p/20b92c29d571
 
 
  2019-05-05
-PyTorch源码浅析(5)：Python扩展
+PyTorch源码浅析(5)：Python扩展  https://www.52coding.com.cn/2019/05/05/PyTorch5/
  2019-05-05
-PyTorch源码浅析(4)：Autograd
+PyTorch源码浅析(4)：Autograd  https://www.52coding.com.cn/2019/05/05/PyTorch4/
  2019-05-05
-PyTorch源码浅析(3)：NN
+PyTorch源码浅析(3)：NN    https://www.52coding.com.cn/2019/05/05/PyTorch3/
  2019-05-05
-PyTorch源码浅析(2)：THC
+PyTorch源码浅析(2)：THC  https://www.52coding.com.cn/2019/05/05/PyTorch2/
  2019-05-05
-PyTorch源码浅析(1)：THTensor
+PyTorch源码浅析(1)：THTensor  https://www.52coding.com.cn/2019/05/05/PyTorch1/
  2019-05-05
 PyTorch源码浅析：简介
  https://www.52coding.com.cn/archives/
 
-PyTorch源码浅析（四）
-https://zhuanlan.zhihu.com/p/34625767
-PyTorch源码浅析（五）
-https://zhuanlan.zhihu.com/p/35703294
 
 PyTorch 源码分析：Python 层
 https://www.pytorchtutorial.com/pytorch-source-python-layer/

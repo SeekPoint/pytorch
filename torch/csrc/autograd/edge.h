@@ -12,6 +12,13 @@ namespace autograd {
 struct Node;
 
 /// Represents a particular input of a function.
+/*
+Autograd graph的edge和vertices
+
+如果将PyTorch的autograd系统看作是一个图（graph）的话，那么每个Function实例就是graph中的节点（nodes/vertices），
+各个Function实例之间则是通过Edge连接的。
+Edge是个结构体，通过 (Function, input_nr) 的配对来代表graph中的edge：
+*/
 struct Edge {
   Edge() noexcept : function(nullptr), input_nr(0) {}
 
