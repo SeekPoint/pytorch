@@ -20,6 +20,16 @@ namespace c10 {
 class C10_API DataPtr {
  private:
   c10::detail::UniqueVoidPtr ptr_;
+  /*
+  device成员用来指定tensor的存储是在cpu还是cuda设备上。DataPtr使用构造函数DataPtr(void* data, void* ctx, DeleterFnPtr ctx_deleter, Device device)来构造一个实例，事实上，这个构造过程是由Allocator完成的。以CPU上的tensor为例，这个构造是由DefaultCPUAllocator类的allocate函数完成的：
+
+at::DataPtr allocate(size_t nbytes) const override {
+    ......
+    //DataPtr(void* data, void* ctx, DeleterFnPtr ctx_deleter, Device device)
+    return {data, data, &Delete, at::Device(at::DeviceType::CPU)}
+}
+假设这个调用是在x86的Linux上完成的，那么经此一役，最后return中的data来自posix_memalign调用（这是一个libc函数，用来申请对齐后的内存）；Delete来自free()调用；device_就是at::Device(at::DeviceType::CPU)了。
+    */
   Device device_;
 
  public:

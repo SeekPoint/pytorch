@@ -59,13 +59,25 @@ https://blog.csdn.net/u012436149/article/details/78510945
 如何有效地阅读PyTorch的源代码？
 https://www.zhihu.com/question/58253344/answer/241864966
 
-Gemfield  ===有点过时
-PyTorch ATen代码的动态生成
-https://zhuanlan.zhihu.com/p/55966063
-PyTorch的动态图(下)
-https://zhuanlan.zhihu.com/p/65822256
+Gemfield  ===有点过时  目录 https://www.zhihu.com/column/gemfield
 PyTorch的动态图(上)
 https://zhuanlan.zhihu.com/p/61765561
+PyTorch的动态图(下)
+https://zhuanlan.zhihu.com/p/65822256
+PyTorch的Tensor（上）
+https://zhuanlan.zhihu.com/p/54896021
+PyTorch的Tensor(中)
+https://zhuanlan.zhihu.com/p/64135058
+PyTorch的Tensor（下）
+https://zhuanlan.zhihu.com/p/69530008
+PyTorch ATen代码的动态生成
+https://zhuanlan.zhihu.com/p/55966063
+PyTorch的cpp代码生成
+https://zhuanlan.zhihu.com/p/59425970
+PyTorch Autograd代码的动态生成
+https://zhuanlan.zhihu.com/p/56924766
+详解Pytorch中的网络构造
+https://zhuanlan.zhihu.com/p/53927068
 
 
 Python进阶笔记C语言拓展篇（二）动态链接库pyd+存根文件pyi——学会优雅地使用C\C++拓展Python模块的正确/官方姿势

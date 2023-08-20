@@ -2783,6 +2783,9 @@ autograd_meta_ 是区分一个 Variable 是普通张量还是带 autograd 功能
   //    2. autograd_meta_ is default constructed (semantically, same as (1))
   //    3. autograd_meta_ has nontrivial information content
   //
+  /*
+  在TensorImpl中有一个成员是autograd_meta_，这是为自动微分服务的。如果一个tensor是Variable，那么这个成员将会被初始化（比如make_variable_consuming函数）并发挥后续作用；如果只是tensor，这个值就是nullptr。
+  */
   std::unique_ptr<c10::AutogradMetaInterface> autograd_meta_ = nullptr; // 主要关注这里
 
  protected:

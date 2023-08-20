@@ -284,7 +284,10 @@ output_nr_：是个数字。output_nr_表明是 Node 的第几个输出，比如
 其定义如下：
 
 
-
+所有和audograd相关的东西都定义在这个类，然后在TensorImpl/VariableImpl中将会包含这个类的实例：
+每个Variable都有一个独一无二的（由std::unique_ptr智能指针来保证）AutogradMeta结构体，用来做和自动微分相关的一切工作。
+而一个Variable的实例化一般是通过make_variable helper函数（在torch::autograd命名空间里）来实现的，
+这个函数根据输入的Tensor、requires_grad来产生一个Variable的实例：
 */
 struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
   std::string name_;

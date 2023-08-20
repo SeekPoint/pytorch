@@ -635,6 +635,7 @@ namespace detail {
 // Helper creator for Tensor class which doesn't requires the users to pass
 // in an intrusive_ptr instead it just converts the argument passed to
 // requested intrusive_ptr type.
+//make_tensor就是个helper function，使用了C++ template的perfect forwarding，来帮助用户简单创建一个实现了“侵入式”计数功能的tensor智能指针。
 template <typename T, typename... Args>
 Tensor make_tensor(Args&&... args) {
   return Tensor(c10::make_intrusive<T>(std::forward<Args>(args)...));

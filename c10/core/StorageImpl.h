@@ -31,6 +31,12 @@ namespace c10 {
 // - Version counts won't work correctly, because we do all VC tracking at the
 //   level of storages (unless you explicitly disconnect the VC with detach);
 //   mutation because data pointers are the same are totally untracked
+/*
+StorageImpl继承自intrusive_ptr_target，目的是借助父类实现的计数功能，
+然后结合智能指针c10::intrusive_ptr（其负责内存管理，但不负责计数）的帮助，就可以实现“侵入式”的引用计数指针。
+
+Storage类和StorageImpl之间使用了bridge设计模式，主要是为了保证ABI的兼容。
+*/
 struct C10_API StorageImpl : public c10::intrusive_ptr_target {
  public:
   struct use_byte_size_t {};
