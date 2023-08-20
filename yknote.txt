@@ -108,6 +108,25 @@ https://zhuanlan.zhihu.com/p/338298069====内容少
 pytorch中的广播语义（一）
 
 
+Mingfei  初看了一下，有价值，不是源码加注释！
+PyTorch在CPU上的一些Performance BKM
+https://zhuanlan.zhihu.com/p/79989669
+PyTorch 工程实践（一）：使用Valgrind解决内存double free的问题
+https://zhuanlan.zhihu.com/p/589912194
+只有偏执才能生存 – 记录这些年我在PyTorch优化项目上的历程
+https://zhuanlan.zhihu.com/p/634236541
+Scaled Dot Product Attention (SDPA) 在 CPU 上的 性能优化
+https://zhuanlan.zhihu.com/p/647907549
+GNN 在CPU上的性能优化
+https://zhuanlan.zhihu.com/p/587390761
+PyTorch CPU性能优化（一）：Memory Format 和 Channels Last 的性能优化
+https://zhuanlan.zhihu.com/p/494620090
+PyTorch CPU性能优化（二）：并行化优化
+https://zhuanlan.zhihu.com/p/495278415
+PyTorch CPU性能优化（三）：向量化
+https://zhuanlan.zhihu.com/p/499761288
+PyTorch CPU性能优化（四）：BFloat16
+https://zhuanlan.zhihu.com/p/499979372
 
 
 OpenMMLab：PyTorch 源码解读系列  ===主要基于1.7，和其他文章重复多
@@ -118,16 +137,59 @@ OpenMMLab：PyTorch 源码解读之 torch.utils.data：解析数据处理全流�
 OpenMMLab：PyTorch 源码解读之 nn.Module：核心网络模块接口详解
 OpenMMLab：PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
 OpenMMLab：PyTorch 源码解读之 torch.optim：优化算法接口详解
-OpenMMLab：PyTorch 源码解读之 torch.cuda.amp: 自动混合精度详解
-OpenMMLab：PyTorch 源码解读之 cpp_extension：揭秘 C++/CUDA 算子实现和调用全流程
-PyTorch 源码解读之即时编译篇
-https://zhuanlan.zhihu.com/p/361101354
+OpenMMLab：PyTorch 源码解读之 torch.cuda.amp: 自动混合精度详解 https://zhuanlan.zhihu.com/p/348554267  TBD
+OpenMMLab：PyTorch 源码解读之 cpp_extension：揭秘 C++/CUDA 算子实现和调用全流程  https://zhuanlan.zhihu.com/p/348555597 TBD
+PyTorch 源码解读之分布式训练了解一下？ https://zhuanlan.zhihu.com/p/361314953 TBD
+PyTorch 源码解读之即时编译篇 https://zhuanlan.zhihu.com/p/361101354
 
+
+TorchScript 系列解读 --- 1-4 TBD
+TorchScript 解读（一）：初识 TorchScript
+https://zhuanlan.zhihu.com/p/486914187
+TorchScript 解读（四）：Torch jit 中的别名分析
+https://zhuanlan.zhihu.com/p/530242380
+模型部署入门教程（一）：模型部署简介
+https://zhuanlan.zhihu.com/p/477743341
+
+
+看PyTorch源代码的心路历程  过时
+https://www.jianshu.com/p/20b92c29d571
+Python调用C++之PYBIND11源码分析
+https://www.jianshu.com/p/a7130aa71eda
+ONNX Runtime 源码阅读：模型推理过程概览
+https://www.jianshu.com/p/c50953e8d828
+ONNX Runtime 源码阅读：模型结点串行执行顺序的确定
+https://www.jianshu.com/p/9bdba87315c1
+
+https://cloud.tencent.com/developer/article/2010635
+构造、读取、调试，带你系统探究 ONNX 模型
+
+https://zhuanlan.zhihu.com/p/96879939
+Pytorch机制，源代码分析与内存管理调研
 
 看PyTorch源代码的心路历程
 https://www.jianshu.com/p/20b92c29d571
 
+https://zhuanlan.zhihu.com/p/644590863
+PyTorch 2.0 编译基础设施解读——计算图捕获（Graph Capture）
+PyTorch分布式训练DDP中的find_unused_parameters参数含义
+https://zhuanlan.zhihu.com/p/592515484
 
+
+https://www2.jianshu.com/p/7c50b1480130
+pytorch2.1 GPU Add算子调用流程代码走读
+
+https://segmentfault.com/a/1190000043740846
+Pytorch2 如何通过算子融合和 CPU/GPU 代码生成加速深度学习
+
+
+https://zhuanlan.zhihu.com/p/589115427
+PyTorch Dynamo 初探：Python ByteCode 的动态修改
+https://juejin.cn/post/7178750704499523641
+PyTorch 2.0 之 Dynamo: 窥探加速背后的真相
+
+
+=====有点旧
  2019-05-05
 PyTorch源码浅析(5)：Python扩展  https://www.52coding.com.cn/2019/05/05/PyTorch5/
  2019-05-05

@@ -1027,7 +1027,6 @@ def poisson_nll_loss(
         loss = loss + stirling_term.masked_fill(target <= 1, 0)
     return _apply_loss_reduction(loss, reduction)
 
-
 @register_decomposition(aten.prelu)
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a", "weight"),

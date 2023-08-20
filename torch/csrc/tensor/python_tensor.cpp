@@ -361,23 +361,32 @@ static void initialize_aten_types(std::vector<PyTensorType*>& tensor_types) {
   set_default_tensor_type(Backend::CPU, ScalarType::Float);
 }
 
+/*
+这个函数由Python调用，调用的代码在 torch/__init__.py中（_C._initExtension()）。
+调用时 torch.Tensor已经定义，这个函数要做的就是定义其他Tensor类型，然后把Tensor类型的方法直接拷贝给它们，最后在设置一下默认类型的Tensor。
+为什么数据类型不同却可以直接拷贝？因为 at::Tensor可以针对不同数据类型调用不同的方法，类型多态已经在ATen内部实现了。
+*/
 void initialize_python_bindings() {
   // Initialize the at::Type* pointers, name, and properties of the PyTensorType
   // vector. After this call, the vector must not be resized.
+  /* 把ATen里的Tensor类型转化为Python里的PyTypeObject */
   initialize_aten_types(tensor_types);
 
   // Initialize the Python metaclass for the torch.FloatTensor, etc. types.
   // The metaclass handles __instancecheck__ checks and binds the dtype property
   // on the type objects.
+  /* 初始化上面转化来的PyTypeObject */
   py_initialize_metaclass(metaclass);
 
   // Get the tp_dict of the Variable class. We copy function definitions
   // onto each Tensor type object so that they can be accessed via e.g.
   // `torch.FloatTensor.add`.
+  /* 获取 torch.Tensor 的所有方法 */
   auto tensor_dict = get_tensor_dict();
 
   // Initialize each Python type object torch.FloatTensor, torch.DoubleTensor,
   // etc.
+  /* 把torch.Tensor的方法复制给每个类型，如torch.FloatTensor等 */
   for (auto& tensor_type : tensor_types) {
     py_initialize_tensor_type(
         tensor_type->py_type, tensor_type->name, tensor_dict.get());
@@ -386,6 +395,7 @@ void initialize_python_bindings() {
   // Add the type objects to their corresponding modules. e.g. torch.FloatTensor
   // is added to the `torch` module as `FloatTensor`. Also add all the type
   // objects to the set torch._tensor_classes.
+  /* 向torch模块绑定这些各种类型的Tensor */
   py_bind_tensor_types(tensor_types);
 }
 

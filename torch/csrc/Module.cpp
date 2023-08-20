@@ -1316,8 +1316,10 @@ extern "C"
     __declspec(dllexport)
 #endif
         TORCH_API PyObject* initModule();
+
 // separate decl and defn for msvc error C2491
 //initModule函数是对python环境中的torch module进行初始化。其定义在 torch/csrc/Module.cpp
+
 /*
 1，torch._C的诞生：
 这一步就是产生torch._C类，并在这个python类上面注册众多函数：
