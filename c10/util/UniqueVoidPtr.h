@@ -4,12 +4,14 @@
 #include <c10/macros/Macros.h>
 
 namespace c10 {
-
+// 定义 DeleterFnPtr 为一个函数指针，该函数接受一个 void* 类型的参数并返回 void
+// 删除器 作用是释放 void* 类型指针所指向的内存块。
 using DeleterFnPtr = void (*)(void*);
 
 namespace detail {
 
 // Does not delete anything
+// 默认删除器
 C10_API void deleteNothing(void*);
 
 // A detail::UniqueVoidPtr is an owning smart pointer like unique_ptr, but
@@ -41,6 +43,7 @@ class UniqueVoidPtr {
  private:
   // Lifetime tied to ctx_
   void* data_;
+  // 用于管理与 data_ 相关的上下文，其中包含一个删除器指针。
   std::unique_ptr<void, DeleterFnPtr> ctx_;
 
  public:
@@ -90,7 +93,19 @@ class UniqueVoidPtr {
     return ctx_.get_deleter();
   }
 };
+/*
+在pytorch/c10/util/UniqueVoidPtr.h文件中定义了UniqueVoidPtr类，相当于C++中的unique_ptr。
 
+unique_ptr是C++标准库中的一个智能指针，用于自动管理动态分配的对象的生命周期。
+它在单个编译单元内通常可以很好地工作，但在跨编译单元边界时，由于不同编译单元的内存管理可能不一致，可能会导致内存泄漏或者释放错误的内存。
+因此，为了避免这些问题，PyTorch选择将unique_ptr封装为UniqueVoidPtr来进行统一的内存管理。
+
+UniqueVoidPtr提供了一个统一的接口来管理内存资源，特别是在涉及到跨编译单元的情况下，可以更好地保证内存的正确释放。
+通过使用UniqueVoidPtr，PyTorch可以自行管理内存资源，并在需要释放资源时进行正确的处理，从而避免内存泄漏等问题。
+
+此外，UniqueVoidPtr还提供了更多的灵活性，因为它可以持有任意类型的内存块，而不仅仅局限于特定的数据类型。
+这在处理不同类型的资源时非常有用。详见注释：
+*/
 // Note [How UniqueVoidPtr is implemented]
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // UniqueVoidPtr solves a common problem for allocators of tensor data, which
@@ -108,6 +123,10 @@ class UniqueVoidPtr {
 // directly in the unique pointer, and attach the deleter to the context
 // pointer itself.  In simple cases, the context pointer is just the pointer
 // itself.
+/*
+与intrusive_ptr 不同的是，UniqueVoidPtr并没有采用模版编程，而是将数据指针声明为void* data_，即data_可以指向任意数据类型连续内存的起始地址。
+UniqueVoidPtr.h 中还定义了负责释放void*类型指针的删除器。
+*/
 
 inline bool operator==(const UniqueVoidPtr& sp, std::nullptr_t) noexcept {
   return !sp;

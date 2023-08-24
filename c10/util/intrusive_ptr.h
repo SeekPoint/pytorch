@@ -52,7 +52,38 @@ struct DontIncreaseRefcount {};
 // be zero, but the weak refcount better not be zero), because that
 // tells us if the object was allocated by us.  If it wasn't, no
 // intrusive_ptr for you!
+/*
+Tensor最重要的特性之一就是多个Tensor可以指向相同的内存区域，这样在拷贝过程中可以减少内存消耗，显然该特性是使用共享指针实现的。
+我们都知道C++的共享指针并不是线程安全的，同时还会出现循环引用的问题。
+PyTorch自己封装实现了智能指针intrusive_ptr和weak_intrusive_ptr以及独占指针uniqueViodPtr。
+下面我们来看看它们是如何被实现的，并尝试在源码的基础上复现。
 
+源码分析
+为方便讲解，文中的源码有部分删减和调整顺序。
+
+intrusive_ptr.h
+在pytorch/c10/util/intrusive_ptr.h文件中定义了intursive_ptr_target、intrusive_ptr和weak_intrusive_ptr类。
+intursive_ptr_target类中有两个成员变量refcount_和weakcount_，分别表示强引用计数和弱引用计数，类中声明intrusive_ptr和weak_intrusive_ptr作为友元类，它们即PyTorch自己封装实现的shared_ptr和unique_ptr。
+当某个类需要被intrusive_ptr或weak_intrusive_ptr管理时，这个类必须先继承自intrusive_ptr_target类，例如：
+
+class Solution : public c10::intrusive_ptr_target {
+ public:
+    Solution(int a, int b) : a_(a), b_(b) {}
+ private:
+     int a_, b_;
+};
+
+c10::intrusive_ptr<Solution> a = c10::make_intrusive<Solution>(1, 2);
+注：intrusive_ptr_target、intrusive_ptr和weak_intrusive_ptr都包含在namespace c10{}内，需要通过c10::显式调用。
+
+Solution类是我希望使用intrusive_ptr进行管理的类，那Solution类就必须继承自intrusive_ptr_target类，
+并且调用make_intrusive<>函数为intrusive_ptr分配内存空间。
+以下是intrusive_ptr_target类的源码：
+
+
+在intrusive_ptr_target中，强引用计数和弱引用计数被定义为原子操作，这样修改引用计数就不会被中断，从而保证线程安全。
+同时定义weakcount_和weak_intrusive_ptr的目的是为了防止循环引用，指针的释放规则详见注释：
+*/
 class C10_API intrusive_ptr_target {
   // Note [Weak references for intrusive refcounting]
   // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -76,15 +107,15 @@ class C10_API intrusive_ptr_target {
   //    atomically increment the use count, if it is greater than 0.
   //    If it is not, you must report that the storage is dead.
   //
-  mutable std::atomic<size_t> refcount_;
-  mutable std::atomic<size_t> weakcount_;
+  mutable std::atomic<size_t> refcount_;  // 强引用计数
+  mutable std::atomic<size_t> weakcount_; // 弱引用计数
 
   template <typename T, typename NullType>
-  friend class intrusive_ptr;
+  friend class intrusive_ptr;  // 友元类
   friend inline void raw::intrusive_ptr::incref(intrusive_ptr_target* self);
 
   template <typename T, typename NullType>
-  friend class weak_intrusive_ptr;
+  friend class weak_intrusive_ptr;  // 友元类
   friend inline void raw::weak_intrusive_ptr::incref(
       intrusive_ptr_target* self);
 
@@ -94,6 +125,7 @@ class C10_API intrusive_ptr_target {
  protected:
   // protected destructor. We never want to destruct intrusive_ptr_target*
   // directly.
+  // 虚析构函数
   virtual ~intrusive_ptr_target() {
 // Disable -Wterminate and -Wexceptions so we're allowed to use assertions
 // (i.e. throw exceptions) in a destructor.
@@ -138,21 +170,23 @@ class C10_API intrusive_ptr_target {
 #endif
   }
 
+  // 初始化引用计数
   constexpr intrusive_ptr_target() noexcept : refcount_(0), weakcount_(0) {}
 
   // intrusive_ptr_target supports copy and move: but refcount and weakcount
   // don't participate (since they are intrinsic properties of the memory
   // location)
+  // 移动构造
   intrusive_ptr_target(intrusive_ptr_target&& /*other*/) noexcept
       : intrusive_ptr_target() {}
-
+  // 移动赋值
   intrusive_ptr_target& operator=(intrusive_ptr_target&& /*other*/) noexcept {
     return *this;
   }
-
+  // 拷贝构造
   intrusive_ptr_target(const intrusive_ptr_target& /*other*/) noexcept
       : intrusive_ptr_target() {}
-
+  // 拷贝赋值
   intrusive_ptr_target& operator=(
       const intrusive_ptr_target& /*other*/) noexcept {
     return *this;
@@ -170,10 +204,16 @@ class C10_API intrusive_ptr_target {
    * If there are no weak references (i.e. your class is about to be
    * destructed), this function WILL NOT be called.
    */
-  virtual void release_resources() {}
+  virtual void release_resources() {} // 可以自定义指针的删除器
 };
 
+/*
+intrusive_ptr的定义使用了模板编程的偏特化。
+在模板编程中，我们有时候希望为某种特定的类型或者某种具体的情况提供一个特殊的实现，
+这时候就需要用到模板特化或偏特化。
+*/
 namespace detail {
+// 对于模板参数 TTarget 返回空指针
 template <class TTarget>
 struct intrusive_target_default_null_type final {
   static constexpr TTarget* singleton() noexcept {
@@ -181,6 +221,7 @@ struct intrusive_target_default_null_type final {
   }
 };
 
+//在intrusive_ptr的移动构造和拷贝构造中会用到assign_ptr_函数：
 template <class TTarget, class ToNullType, class FromNullType>
 TTarget* assign_ptr_(TTarget* rhs) {
   if (FromNullType::singleton() == rhs) {
@@ -192,6 +233,7 @@ TTarget* assign_ptr_(TTarget* rhs) {
 
 // Increment needs to be acquire-release to make use_count() and
 // unique() reliable.
+// 以下是暴露给外部调用的修改引用计数的函数：
 inline size_t atomic_refcount_increment(std::atomic<size_t>& refcount) {
   return refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
 }
@@ -216,11 +258,36 @@ inline size_t atomic_weakcount_decrement(std::atomic<size_t>& weakcount) {
 
 template <class TTarget, class NullType>
 class weak_intrusive_ptr;
-
+// 偏特化 NullType = 默认类型
 template <
     class TTarget,
+    /*
+    这里的TTarget就是intrusive_ptr所管理的目标对象的类型。
+    NullType是一个模板参数，用于定义一个特殊的值，它在intrusive_ptr中表示空指针。
+    默认情况下，这个特殊的值就是nullptr，通过intrusive_target_default_null_type类的singleton方法返回。
+    当然，如果希望为某种类型的intrusive_ptr定义一个特殊的空值，可以通过提供一个不同的NullType参数来实现。
+例如，假设有一个Solution类，假设我们希望intrusive_ptr<Solution>的空值是通过调用Solution::getNull()方法来实现，可以这样写：
+
+class Solution : public c10::intrusive_ptr_target {
+ public:
+    Solution(int a, int b) : a_(a), b_(b) {}
+    // 静态成员函数，可在没有具体的 MyObject 实例时被调用
+    static Solution* getNull() { return nullptr; }
+ private:
+    int a_, b_;
+};
+
+struct SolutionNullType {
+    static Solution* singleton() {
+        return Solution::getNull();
+    }
+};
+
+c10::intrusive_ptr<Solution, SolutionNullType> a =
+    c10::make_intrusive<Solution, SolutionNullType>(1, 2);
+    */
     class NullType = detail::intrusive_target_default_null_type<TTarget>>
-class intrusive_ptr final {
+class intrusive_ptr final {   // final 关键字表示 intrusive_ptr 类无法被继承
  private:
 //  the following static assert would be nice to have but it requires
 //  the target class T to be fully defined when intrusive_ptr<T> is instantiated
@@ -302,6 +369,10 @@ class intrusive_ptr final {
   // which wrap the intrusive_ptr holder around the raw pointer and incref
   // correspondingly (pybind11 requires raw pointer constructor to incref by
   // default).
+  /*
+初始化 intrusive_ptr，并设置 refcount_ = 1，weakcount_ = 1
+raw::DontIncreaseRefcount{}是一个 struct 型参数，表示在某些情况下不增加强引用计数
+  */
   explicit intrusive_ptr(TTarget* target)
       : intrusive_ptr(target, raw::DontIncreaseRefcount{}) {
     if (target_ != NullType::singleton()) {
@@ -332,9 +403,11 @@ class intrusive_ptr final {
   // This constructor will not increase the ref counter for you.
   // We use the tagged dispatch mechanism to explicitly mark this constructor
   // to not increase the refcount
+  // 初始化 intrusive_ptr 但不增加引用计数
   explicit intrusive_ptr(TTarget* target, raw::DontIncreaseRefcount) noexcept
       : target_(target) {}
 
+  // 移动构造
   explicit intrusive_ptr(std::unique_ptr<TTarget> rhs) noexcept
       : intrusive_ptr(rhs.release()) {}
 
@@ -352,10 +425,12 @@ class intrusive_ptr final {
     rhs.target_ = FromNullType::singleton();
   }
 
+// 拷贝构造
   intrusive_ptr(const intrusive_ptr& rhs) : target_(rhs.target_) {
     retain_();
   }
-
+  // 这里的移动构造支持类型转换
+  // intrusive_ptr<From, FromNullType> -> intrusive_ptr<TTarget, NullType>
   template <class From, class FromNullType>
   /* implicit */ intrusive_ptr(const intrusive_ptr<From, FromNullType>& rhs)
       : target_(
@@ -363,9 +438,9 @@ class intrusive_ptr final {
     static_assert(
         std::is_convertible<From*, TTarget*>::value,
         "Type mismatch. intrusive_ptr copy constructor got pointer of wrong type.");
-    retain_();
+    retain_();  // refcount_ + 1
   }
-
+// 释放内存
   ~intrusive_ptr() noexcept {
     reset_();
   }
@@ -373,7 +448,8 @@ class intrusive_ptr final {
   intrusive_ptr& operator=(intrusive_ptr&& rhs) & noexcept {
     return operator=<TTarget, NullType>(std::move(rhs));
   }
-
+  // 这里的移动赋值支持类型转换
+  // intrusive_ptr<From, FromNullType> -> intrusive_ptr<TTarget, NullType>
   template <class From, class FromNullType>
   intrusive_ptr& operator=(intrusive_ptr<From, FromNullType>&& rhs) & noexcept {
     static_assert(
@@ -383,11 +459,12 @@ class intrusive_ptr final {
     swap(tmp);
     return *this;
   }
-
+// 拷贝赋值
   intrusive_ptr& operator=(const intrusive_ptr& rhs) & noexcept {
     return operator=<TTarget, NullType>(rhs);
   }
-
+  // 这里的拷贝赋值支持类型转换
+  // intrusive_ptr<From, FromNullType> -> intrusive_ptr<TTarget, NullType>
   template <class From, class FromNullType>
   intrusive_ptr& operator=(const intrusive_ptr<From, NullType>& rhs) & {
     static_assert(
@@ -430,7 +507,8 @@ class intrusive_ptr final {
   bool defined() const noexcept {
     return target_ != NullType::singleton();
   }
-
+  // 由于 target 指针指向的类必定继承自 intrusive_ptr_target 类
+  // 所以可以通过 target_->refcount_ 直接访问引用计数
   size_t use_count() const noexcept {
     if (target_ == NullType::singleton()) {
       return 0;
@@ -456,6 +534,7 @@ class intrusive_ptr final {
    * intrusive_ptr::reclaim(ptr) to properly destruct it.
    * This is helpful for C APIs.
    */
+   // 解除 intrusive_ptr 对 target_ 的管理，但不释放 target_ 的内存
   TTarget* release() noexcept {
     // NOLINTNEXTLINE(clang-analyzer-core.uninitialized.Assign)
     TTarget* result = target_;
@@ -469,6 +548,7 @@ class intrusive_ptr final {
    * This is the counter-part to intrusive_ptr::release() and the pointer
    * passed in *must* have been created using intrusive_ptr::release().
    */
+   // 由 intrusive_ptr 接管 TTarget，但不增加引用计数，相当于 release() 的反向操作
   static intrusive_ptr reclaim(TTarget* owning_ptr) {
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
         owning_ptr == NullType::singleton() ||
@@ -482,6 +562,7 @@ class intrusive_ptr final {
    * representing a new reference, i.e. the raw pointer retains
    * ownership.
    */
+    // 由 intrusive_ptr 接管 TTarget，增加引用计数
   static intrusive_ptr reclaim_copy(TTarget* owning_ptr) {
     auto ret = reclaim(owning_ptr);
     ret.retain_();
@@ -493,6 +574,7 @@ class intrusive_ptr final {
    * incref. This is a helper function to let make_intrusive() access private
    * intrusive_ptr constructors.
    */
+   // 分配一块堆内存给 TTarget 并返回指针，使用完美转发传递 TTarget 构造函数所需的参数
   template <class... Args>
   static intrusive_ptr make(Args&&... args) {
     return intrusive_ptr(new TTarget(std::forward<Args>(args)...));
@@ -570,11 +652,17 @@ class intrusive_ptr final {
   }
 };
 
+/*
+weak_intrusive_ptr源码与intrusive_ptr接近，感兴趣可自行阅读。
+以下是用于创建intrusive_ptr和weak_intrusive_ptr的函数make_intrusive和make_weak，
+用法与C++中用于创建shared_ptr的函数make_shared<>()类似。
+*/
 template <
     class TTarget,
     class NullType = detail::intrusive_target_default_null_type<TTarget>,
     class... Args>
 inline intrusive_ptr<TTarget, NullType> make_intrusive(Args&&... args) {
+// 调用 make
   return intrusive_ptr<TTarget, NullType>::make(std::forward<Args>(args)...);
 }
 
@@ -667,7 +755,7 @@ struct MaybeOwnedTraits<c10::intrusive_ptr<T>> {
 
 template <
     typename TTarget,
-    class NullType = detail::intrusive_target_default_null_type<TTarget>>
+    class NullType = detail::intrusive_target_default_null_type<TTarget>> // 偏特化
 class weak_intrusive_ptr final {
  private:
   static_assert(
@@ -693,6 +781,7 @@ class weak_intrusive_ptr final {
   friend class weak_intrusive_ptr;
 
   void retain_() {
+  //// 拷贝时调用 实现 refcount_ + 1
     if (target_ != NullType::singleton()) {
       size_t new_weakcount =
           detail::atomic_weakcount_increment(target_->weakcount_);
@@ -703,6 +792,7 @@ class weak_intrusive_ptr final {
   }
 
   void reset_() noexcept {
+  //// 根据 refcount_ 和 weakcount_ 决定是否释放内存
     if (target_ != NullType::singleton() &&
         detail::atomic_weakcount_decrement(target_->weakcount_) == 0) {
       // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDelete)
@@ -1039,6 +1129,10 @@ inline size_t use_count(weak_intrusive_ptr_target* self) {
 
 } // namespace c10
 
+/*
+为了让intrusive_ptr和weak_intrusive_ptr可以使用C++的unordered_map和unordered_set，
+PyTorch重新定义了std::hash：
+*/
 namespace std {
 // To allow intrusive_ptr and weak_intrusive_ptr inside std::unordered_map or
 // std::unordered_set, we need std::hash
