@@ -19,18 +19,23 @@ at::DataPtr InefficientStdFunctionContext::makeDataPtr(
       device};
 }
 
+//Allocator.cpp中根据PyTorch支持的设备类型数初始化了一个Allocator*类型的数组，并设置每种设备的初始优先级为0：
+// 根据设备数初始化分配器
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables,modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
 C10_API at::Allocator* allocator_array[at::COMPILE_TIME_MAX_DEVICE_TYPES];
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables,modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
+// 设置所有设备的初始优先级
 C10_API uint8_t allocator_priority[at::COMPILE_TIME_MAX_DEVICE_TYPES] = {0};
 
+// 当分配器 alloc 的优先级大于等于设备 t 的分配器的优先级时
+// 将设备 t 的分配器替换为 alloc，并更改相应优先级
 void SetAllocator(at::DeviceType t, at::Allocator* alloc, uint8_t priority) {
   if (priority >= allocator_priority[static_cast<int>(t)]) {
     allocator_array[static_cast<int>(t)] = alloc;
     allocator_priority[static_cast<int>(t)] = priority;
   }
 }
-
+// 获取设备 t 的分配器
 at::Allocator* GetAllocator(const at::DeviceType& t) {
   auto* alloc = allocator_array[static_cast<int>(t)];
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(alloc, "Allocator for ", t, " is not set.");

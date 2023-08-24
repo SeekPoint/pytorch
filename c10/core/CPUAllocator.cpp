@@ -14,30 +14,30 @@ C10_DEFINE_bool(
     "If set, print out detailed memory usage");
 
 namespace c10 {
-
-struct C10_API DefaultCPUAllocator final : at::Allocator {
+//DefaultCPUAllocator是默认的CPU内存分配器：
+struct C10_API DefaultCPUAllocator final : at::Allocator {  // 继承自 Allocator
   DefaultCPUAllocator() = default;
-  at::DataPtr allocate(size_t nbytes) const override {
+  at::DataPtr allocate(size_t nbytes) const override { // 重写 allocate
     void* data = nullptr;
     try {
-      data = c10::alloc_cpu(nbytes);
-    } catch (c10::Error& e) {
-      profiledCPUMemoryReporter().OutOfMemory(nbytes);
+      data = c10::alloc_cpu(nbytes);   // 分配 CPU 内存
+    } catch (c10::Error& e) {  // 内存分配失败则抛出异常
+      profiledCPUMemoryReporter().OutOfMemory(nbytes);  // 打印 log
       throw e;
     }
-    profiledCPUMemoryReporter().New(data, nbytes);
+    profiledCPUMemoryReporter().New(data, nbytes);  // 打印 log
     return {data, data, &ReportAndDelete, at::Device(at::DeviceType::CPU)};
   }
 
-  static void ReportAndDelete(void* ptr) {
+  static void ReportAndDelete(void* ptr) { // 自定义删除器
     if (!ptr) {
       return;
     }
-    profiledCPUMemoryReporter().Delete(ptr);
+    profiledCPUMemoryReporter().Delete(ptr);  // 打印 log
     free_cpu(ptr);
   }
 
-  at::DeleterFnPtr raw_deleter() const override {
+  at::DeleterFnPtr raw_deleter() const override {  // 重写 raw_deleter
     return &ReportAndDelete;
   }
 };

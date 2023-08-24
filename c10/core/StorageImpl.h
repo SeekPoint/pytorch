@@ -7,7 +7,17 @@
 #include <c10/util/intrusive_ptr.h>
 
 namespace c10 {
+/*
+Tensor底层数据结构
+在PyTorch中，Storage和StorageImpl是Tensor的内部类，它们的主要作用是管理数据和管理存储。
+Storage类封装一个intrusive_ptr<StorageImpl>类型的成员变量，面向上层给Tensor提供访问和修改底层信息的方法。
+而StorageImpl类面向底层，负责内存分配和管理。Tensor是通过类内继承的方式，即声明一个Storage类型的成员变量来使用相应的方法。
 
+通过将Storage和StorageImpl解耦，使得PyTorch具有更高的灵活性和性能，同时隐藏了底层数据管理的复杂性。
+但是也有人吐槽说Storage需要设计包含设备参数的全新API，现有的设计比较容易出bug。
+
+
+*/
 // A storage represents the underlying backing data buffer for a
 // tensor.  This concept was inherited from the original Torch7
 // codebase; we'd kind of like to get rid of the concept
@@ -36,8 +46,10 @@ StorageImpl继承自intrusive_ptr_target，目的是借助父类实现的计数�
 然后结合智能指针c10::intrusive_ptr（其负责内存管理，但不负责计数）的帮助，就可以实现“侵入式”的引用计数指针。
 
 Storage类和StorageImpl之间使用了bridge设计模式，主要是为了保证ABI的兼容。
+
+StorageImpl主要封装了指向内存的指针、分配器等。
 */
-struct C10_API StorageImpl : public c10::intrusive_ptr_target {
+struct C10_API StorageImpl : public c10::intrusive_ptr_target {  // 继承自 intrusive_ptr
  public:
   struct use_byte_size_t {};
 
@@ -53,12 +65,15 @@ struct C10_API StorageImpl : public c10::intrusive_ptr_target {
         resizable_(resizable),
         received_cuda_(false),
         allocator_(allocator) {
-    if (resizable) {
+    if (resizable) { // 如内存大小可调整，则必须指定分配器
       TORCH_INTERNAL_ASSERT(
           allocator_, "For resizable storage, allocator must be provided");
     }
   }
 
+    // 分配一块大小为 size_bytes 的内存，根据该内存创建 StorageImpl
+  // .is_symbolic() 返回 bool 值，判断 size_bytes 是否越界
+// 从现有内存创建 StorageImpl
   StorageImpl(
       use_byte_size_t /*use_byte_size*/,
       SymInt size_bytes,
@@ -72,11 +87,14 @@ struct C10_API StorageImpl : public c10::intrusive_ptr_target {
                 : allocator->allocate(size_bytes.as_int_unchecked()),
             allocator,
             resizable) {}
-
+// 默认移动赋值
   StorageImpl& operator=(StorageImpl&& other) = default;
+// 禁用拷贝赋值
   StorageImpl& operator=(const StorageImpl&) = delete;
   StorageImpl() = delete;
+// 默认移动构造
   StorageImpl(StorageImpl&& other) = default;
+// 禁用拷贝构造
   StorageImpl(const StorageImpl&) = delete;
   ~StorageImpl() override = default;
 
@@ -90,7 +108,7 @@ struct C10_API StorageImpl : public c10::intrusive_ptr_target {
   inline T* data() const {
     return unsafe_data<T>();
   }
-
+// 返回指向内存的指针并转换为 T*
   template <typename T>
   inline T* unsafe_data() const {
     return static_cast<T*>(this->data_ptr_.get());
@@ -98,6 +116,7 @@ struct C10_API StorageImpl : public c10::intrusive_ptr_target {
 
   // Destructor doesn't call release_resources because it's
   // unnecessary; don't forget to change that if needed!
+  // 重写 intursive_ptr 的方法
   void release_resources() override {
     data_ptr_.clear();
   }
@@ -220,13 +239,20 @@ struct C10_API StorageImpl : public c10::intrusive_ptr_target {
   }
 
  private:
+ // 指针 指向内存
   DataPtr data_ptr_;
+    // 表示内存大小（字节数）
+  // 这里的 SymInt 类封装一个 int64_t 类型的成员变量
   SymInt size_bytes_;
+  // size_bytes_ 越界标志
   bool size_bytes_is_symbolic_;
+
+  // 标记内存能否被重分配
   bool resizable_;
   // Identifies that Storage was received from another process and doesn't have
   // local to process cuda memory allocation
   bool received_cuda_;
+  // 分配器指针
   Allocator* allocator_;
 };
 } // namespace c10

@@ -4,6 +4,7 @@
 
 namespace c10 {
 
+//Storage被定义为结构体，事实上C++中结构体和类已经没有太大区别。
 struct C10_API Storage {
  public:
   struct use_byte_size_t {};
@@ -13,6 +14,9 @@ struct C10_API Storage {
       : storage_impl_(std::move(ptr)) {}
 
   // Allocates memory buffer using given allocator and creates a storage with it
+// 使用分配器 allocator 分配内存（调用 StorageImpl 构造函数）
+  // 并创建 Storage
+
   Storage(
       use_byte_size_t /*use_byte_size*/,
       SymInt size_bytes,
@@ -27,6 +31,8 @@ struct C10_API Storage {
   // Creates storage with pre-allocated memory buffer. Allocator is given for
   // potential future reallocations, however it can be nullptr if the storage
   // is non-resizable
+ // 从已经分配好的内存上创建 Storage，allocator 可以用来重分配内存
+  // 如果内存不可被重分配，则 allocator = nullptr
   Storage(
       use_byte_size_t /*use_byte_size*/,
       size_t size_bytes,
@@ -59,18 +65,20 @@ struct C10_API Storage {
     set_nbytes(0);
     set_data_ptr_noswap(allocator()->allocate(0));
   }
-
+ // 返回指向内存的指针，返回值为 T*
   template <typename T>
   T* data() const {
     return storage_impl_->data<T>();
   }
-
+// 返回指向内存的指针，返回值为 T*
   template <typename T>
   T* unsafe_data() const {
     return storage_impl_->unsafe_data<T>();
   }
 
   // TODO: remove later
+  // 这里的 get() 方法来自 intrusive_ptr
+  // 返回指向 StorageImpl 的指针
   void set_nbytes(size_t size_bytes) const {
     storage_impl_.get()->set_nbytes(size_bytes);
   }

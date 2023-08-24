@@ -17,9 +17,10 @@ namespace c10 {
 // nullptr DataPtrs can still have a nontrivial device; this allows
 // us to treat zero-size allocations uniformly with non-zero allocations.
 //
+//allocate方法的返回类型是DataPtr，DataPtr是PyTorch定义的类，作用是封装指针ptr_与设备类型参数device_：
 class C10_API DataPtr {
  private:
-  c10::detail::UniqueVoidPtr ptr_;
+  c10::detail::UniqueVoidPtr ptr_;  // 指向内存的指针
   /*
   device成员用来指定tensor的存储是在cpu还是cuda设备上。DataPtr使用构造函数DataPtr(void* data, void* ctx, DeleterFnPtr ctx_deleter, Device device)来构造一个实例，事实上，这个构造过程是由Allocator完成的。以CPU上的tensor为例，这个构造是由DefaultCPUAllocator类的allocate函数完成的：
 
@@ -30,12 +31,12 @@ at::DataPtr allocate(size_t nbytes) const override {
 }
 假设这个调用是在x86的Linux上完成的，那么经此一役，最后return中的data来自posix_memalign调用（这是一个libc函数，用来申请对齐后的内存）；Delete来自free()调用；device_就是at::Device(at::DeviceType::CPU)了。
     */
-  Device device_;
+  Device device_;  // 设备类型
 
  public:
   // Choice of CPU here is arbitrary; if there's an "undefined" device
   // we could use that too
-  DataPtr() : ptr_(), device_(DeviceType::CPU) {}
+  DataPtr() : ptr_(), device_(DeviceType::CPU) {}  // 默认设备为 CPU
   DataPtr(void* data, Device device) : ptr_(data), device_(device) {}
   DataPtr(void* data, void* ctx, DeleterFnPtr ctx_deleter, Device device)
       : ptr_(data, ctx, ctx_deleter), device_(device) {}
@@ -157,17 +158,26 @@ inline bool operator!=(std::nullptr_t, const DataPtr& dp) noexcept {
 // the raw interface is not implemented.  Be sure to implement it whenever
 // possible, or the raw interface will incorrectly reported as unsupported,
 // when it is actually possible.
+/*
+上一篇文章分析PyTorch管理Tensor内存空间所用到的指针，本篇文章分析PyTorch为Tensor分配内存空间的相关机制。
 
+源码分析
+为方便讲解，文中的源码有部分删减和调整顺序。
+
+Tensor内存分配
+Allocator.h
+PyTorch定义了Allocator结构体作为接口，它是内存分配的关键组件之一，允许用户自定义Tensor在CPU、GPU或者其它设备上的内存分配策略。Allocator声明了纯虚函数allocate，通过重写allocate可以自定义内存分配逻辑。Allocator源码如下：
+*/
 struct C10_API Allocator {
   virtual ~Allocator() = default;
 
-  virtual DataPtr allocate(size_t n) const = 0;
+  virtual DataPtr allocate(size_t n) const = 0;  // 分配器 需要重写
 
   // If this returns a non nullptr, it means that allocate()
   // is guaranteed to return a unique_ptr with this deleter attached;
   // it means the rawAllocate and rawDeallocate APIs are safe to use.
   // This function MUST always return the same BoundDeleter.
-  virtual DeleterFnPtr raw_deleter() const {
+  virtual DeleterFnPtr raw_deleter() const {   // 删除器 可选择是否重写
     return nullptr;
   }
   void* raw_allocate(size_t n) {
@@ -217,6 +227,7 @@ struct C10_API InefficientStdFunctionContext {
  *  is 0, which means the lowest. Only higher or equal priority can overwrite
  *  existing ones.
  */
+//Allocator.h中还声明了设置分配器的函数SetAllocator和获取分配器的函数GetAllocator，它们被定义在Allocator.cpp内。
 C10_API void SetAllocator(DeviceType t, Allocator* alloc, uint8_t priority = 0);
 C10_API Allocator* GetAllocator(const DeviceType& t);
 

@@ -29,7 +29,7 @@ namespace c10 {
   _(Meta, extra)                                  \
   _(MTIA, extra)                                  \
   _(PrivateUse1, extra)
-
+//PyTorch总计支持21种设备类型，并定义了一个枚举类DeviceType管理设备类型：
 enum class DeviceType : int8_t {
   CPU = 0,
   CUDA = 1, // CUDA.
@@ -56,7 +56,7 @@ enum class DeviceType : int8_t {
   //  - Change the implementations of DeviceTypeName and isValidDeviceType
   //    in DeviceType.cpp
   //  - Change the number below
-  COMPILE_TIME_MAX_DEVICE_TYPES = 21,
+  COMPILE_TIME_MAX_DEVICE_TYPES = 21, // 设备总数
 };
 
 constexpr DeviceType kCPU = DeviceType::CPU;

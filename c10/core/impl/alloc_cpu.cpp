@@ -42,7 +42,7 @@ void memset_junk(void* data, size_t num) {
 }
 
 } // namespace
-
+//DefaultCPUAllocator中使用了内存分配函数alloc_cpu：
 void* alloc_cpu(size_t nbytes) {
   if (nbytes == 0) {
     return nullptr;
@@ -56,7 +56,7 @@ void* alloc_cpu(size_t nbytes) {
 
   // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   void* data;
-#ifdef __ANDROID__
+#ifdef __ANDROID__   // 如果是在安卓平台上编译
   data = memalign(gAlignment, nbytes);
   CAFFE_ENFORCE(
       data,
@@ -64,6 +64,9 @@ void* alloc_cpu(size_t nbytes) {
       nbytes,
       " bytes.");
 #elif defined(_MSC_VER)
+  // 如果 C++ 编译器为 MSVC
+  // _aligned_malloc 成功时会返回一个指针，指向一段大小为 nbytes 字节的动态内存，
+  // 并且这块内存的地址是 gAlignment 的倍数，这样做主要是为了实现内存对齐
   data = _aligned_malloc(nbytes, gAlignment);
   CAFFE_ENFORCE(
       data,
@@ -71,6 +74,9 @@ void* alloc_cpu(size_t nbytes) {
       nbytes,
       " bytes.");
 #else
+  // posix_memalign 用来开辟一段大小为 nbytes 字节的动态内存 分配成功返回 0
+  // data 是指向这段内存的指针
+  // 并且这块内存的地址是 gAlignment 的倍数，这样做主要是为了实现内存对齐
   int err = posix_memalign(&data, gAlignment, nbytes);
   CAFFE_ENFORCE(
       err == 0,
@@ -84,6 +90,7 @@ void* alloc_cpu(size_t nbytes) {
 #endif
 
   // move data to a thread's NUMA node
+  // 将数据移动到线程的 NUMA node
   NUMAMove(data, nbytes, GetCurrentNUMANode());
   CHECK(
       !FLAGS_caffe2_cpu_allocator_do_zero_fill ||
@@ -97,9 +104,9 @@ void* alloc_cpu(size_t nbytes) {
 
   return data;
 }
-
+//关于非一致性内存访问架构NUMA，可参考链接。DefaultCPUAllocator中使用了内存释放函数free_cpu：
 void free_cpu(void* data) {
-#ifdef _MSC_VER
+#ifdef _MSC_VER   // 如果 C++ 编译器为 MSVC
   _aligned_free(data);
 #else
   // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
