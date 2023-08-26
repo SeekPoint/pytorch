@@ -1,0 +1,3 @@
+pytorch的C++ extension写法 https://zhuanlan.zhihu.com/p/100459760
+
+C:\yk_repo\pytorch\pt_ext_01> python .\setup.py install
