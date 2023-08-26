@@ -1,3 +1,10 @@
 pytorch的C++ extension写法 https://zhuanlan.zhihu.com/p/100459760
 
-C:\yk_repo\pytorch\pt_ext_01> python .\setup.py install
+https://blog.csdn.net/huyaoyu/article/details/103107133
+PyTorch 学习笔记 (3) PyTorch 1.0+ C++/CUDA extension
+
+
+https://blog.csdn.net/weixin_42930699/article/details/121584651
+Pytorch C++/CUDA Extension
+
+
