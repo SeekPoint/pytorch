@@ -1,0 +1,36 @@
+PS C:\yk_repo\pytorch>
+PS C:\yk_repo\pytorch> git submodule add https://github.com/pytorch/extension-cpp extension-cpp
+Cloning into 'C:/yk_repo/pytorch/extension-cpp'...
+remote: Enumerating objects: 125, done.
+Receiving objects:  56% (70/125)sed 0 (delta 0), pack-reused 125
+Receiving objects: 100% (125/125), 30.20 KiB | 315.00 KiB/s, done.
+Resolving deltas: 100% (61/61), done.
+warning: in the working copy of '.gitmodules', LF will be replaced by CRLF the next time Git touches it
+PS C:\yk_repo\pytorch>
+
+
+
+
+https://pytorch.org/tutorials/advanced/cpp_extension.html
+
+C:\yk_repo\pytorch\pt_ext_01> python .\setup.py install  ==ok
+
+PS C:\yk_repo\pytorch\extension-cpp\cpp> python .\setup.py install   ===ok
+PS C:\yk_repo\pytorch\extension-cpp\cuda> python .\setup.py install   ===ok
+    如果出现的错误
+      File "C:\Python310\lib\site-packages\pkg_resources\_vendor\packaging\version.py", line 264, in __init__
+        match = self._regex.search(version)
+    TypeError: expected string or bytes-like object
+
+实际上是cuda的version返回none
+原因是没有安装cuda的pytorch引起的，也就是
+torch.cuda.is_available()
+返回False
+
+只有先安装合适的cuda，
+再pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+才能安装到cuda的pytorch！！！！
+也就是torch.cuda.is_available()返回True
+---win11+conda环境也是这样，
+
+而不是官方的conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia  ===不成功！
