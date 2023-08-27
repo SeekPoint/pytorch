@@ -1,0 +1,21 @@
+https://blog.csdn.net/weixin_42930699/article/details/121584651
+Pytorch C++/CUDA Extension
+
+https://zhuanlan.zhihu.com/p/348555597
+PyTorch 源码解读之 cpp_extension：揭秘 C++/CUDA 算子实现和调用全流程
+
+https://zhuanlan.zhihu.com/p/158643792
+PyTorch扩展自定义PyThon/C++(CUDA)算子的若干方法总结
+
+https://mp.weixin.qq.com/s/acBe9TCEJubv8VcjKI4ZDQ
+扩展Pytorch：实现自定义算子（一）
+
+https://blog.csdn.net/God_WeiYang/article/details/115059829
+详解PyTorch编译并调用自定义CUDA算子的三种方式
+
+
+https://blog.csdn.net/weixin_42930699/article/details/121584651
+Pytorch C++/CUDA Extension
+
+https://www.zhihu.com/question/354886894
+Pytorch cuda extension的例子有没有简单点的啊....?
