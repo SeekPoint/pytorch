@@ -14,8 +14,20 @@ https://blog.csdn.net/God_WeiYang/article/details/115059829
 详解PyTorch编译并调用自定义CUDA算子的三种方式
 
 
-https://blog.csdn.net/weixin_42930699/article/details/121584651
-Pytorch C++/CUDA Extension
-
 https://www.zhihu.com/question/354886894
 Pytorch cuda extension的例子有没有简单点的啊....?
+
+
+
+https://blog.csdn.net/weixin_44966641/article/details/125609129
+Pytorch自定义C++/CUDA扩展
+
+
+
+
+扩展Pytorch（四）：利用C++调用部署pytorch模型
+扩展Pytorch：加速MixConv算子（三）
+扩展Pytorch：利用CUDA实现算子（二）
+扩展Pytorch：实现自定义算子（一）
+we_gzh:  Young样说
+https://mp.weixin.qq.com/s?__biz=MzIwMTYyNjY0NQ==&mid=2247483695&idx=1&sn=3f0922b1178293967592c5962db7d7aa&chksm=96ea4455a19dcd43de8a3f2abc98077b23d518db1c2a762d5d5d65867c2681c967d1d07b65d8&cur_album_id=1728226856098725892&scene=190#rd

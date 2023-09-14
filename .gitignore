@@ -7,7 +7,7 @@
 # refactoring this file!
 
 ## PyTorch
-
+ext_prj/
 .coverage
 coverage.xml
 .dmypy.json
