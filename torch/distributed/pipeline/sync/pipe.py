@@ -388,7 +388,13 @@ class Pipe(Module):
         if not self.devices:
             # Empty sequential module is not illegal.
             return RRef(input)
-
+        '''
+        0x01 分割小批次
+        我们首先看看如何把一个 mini-batch 分割为多个 micro-batches。
+        
+        1.1 使用
+        从下面示例代码可以看出来，具体使用scatter方法进行了分割。
+        '''
         # Divide a mini-batch into micro-batches.
         batches = microbatch.scatter(input, self.chunks)
 

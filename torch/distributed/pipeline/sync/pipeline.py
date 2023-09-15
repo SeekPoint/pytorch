@@ -95,6 +95,12 @@ class Pipeline:
         self.checkpoint_stop = checkpoint_stop
         (self.in_queues, self.out_queues) = create_workers(devices)
 
+'''
+2.5 使用
+2.5.1 何时生成worker
+使用例子位于 torchgpipe/pipeline.py，在 Pipeline 类之中的 run 函数中会生成workers。
+我们可以看到，对于 Pipeline 来说，有意义的就是 (in_queues, out_queues)。
+'''
     def run(self, batches: List[Batch]) -> None:
         """Runs pipeline parallelism.
 
@@ -110,8 +116,10 @@ class Pipeline:
 
         skip_trackers = [SkipTrackerThroughPotals(skip_layout) for _ in batches]
 
+        # 这里是按照算法有次序的运行多个fence, compute  , yknote代码有不同
         for schedule in _clock_cycles(m, n):
             self.fence(batches, schedule, skip_trackers)
+            # 把队列传递进去
             self.compute(batches, schedule, skip_trackers)
 
     def fence(
@@ -138,7 +146,28 @@ class Pipeline:
             if j != 0:
                 prev_stream = copy_streams[j - 1][i]
                 _copy(batches[i], prev_stream, next_stream)
+'''
+2.5.2 剖析
+Torchgpipe 使用了 Python 的 Queue 数据结构。
+Queue 类实现了一个基本的先进先出（FIFO）容器。
+    A multi-producer, multi-consumer queue.
+其主要方法是：
+    Queue.get([block, [timeout]]) 读队列，从队列尾部移除元素，timeout为等待时间，如果队列满，则阻塞。
+    Queue.put(item, [block, [timeout]]) 写队列，将元素添加到序列尾端，timeout为等待时间，如果队列空，则阻塞。
+我个人更习惯于把 (in_queues, out_queues) 理解为类似 Linux 的 管道（Pipe）。
+Linux 管道是一种最基本的IPC机制，作用于有血缘关系的进程之间，完成数据传递，具体特性如下：
+    管道是由核函数管理的一个FIFO文件，其实是一个缓冲区，相当于我们放入内存中的一个管道，两个进程分别处于管道两端，通过这个管道来传递信息。
+    管道的一端连接一个进程的输出。这个进程会向管道中放入信息。当管道被放满信息的时候，尝试放入信息的进程会等待，直到另一端的进程取出信息。
+    管道的另一端连接另一个进程的输入，这个进程取出被放入管道的信息。当管道中没有信息的话，从管道中读取的进程会等待，直到另一端的进程放入信息。
+具体回到 TorchPipe，我们提前看看论文的内容：
+    对于这种细粒度的顺序控制，torchgpipe把checkpointing 使用两个单独的autograd函数Checkpoint和Recompute来实现。
+    在任务 F′i,j 的执行时间之内，生成一对具有共享内存的Checkpoint和Recompute。
+    该共享内存在向后传播中被使用，用于将通过执行Recompute生成的本地计算图传输到Checkpoint来进行反向传播。
 
+于是，这里就有很多并行处理的需求，
+于是我们可以看到 Pipeline 类的 compute 方法（省略部分代码）中有向 in_queues 之中放入 Task，
+从 out_queues 之中去除 Task 的执行结果。
+'''
     def compute(
         self, batches: List[Batch], schedule: List[Tuple[int, int]], skip_trackers: List[SkipTrackerThroughPotals],
     ) -> None:
@@ -181,7 +210,7 @@ class Pipeline:
         # ┌─────┸──────┐   (fence)
         # │    Copy    │
         # └─────┰──────┘
-        for i, j in schedule:
+        for i, j in schedule:   # 并行执行
             batch = batches[i]
             partition = partitions[j]
 
@@ -218,15 +247,16 @@ class Pipeline:
                 ) -> Batch:
                     with use_skip_tracker(skip_tracker), record_function("chunk%d-part%d" % (chunk_id, part_id)):
                         return batch.call(partition)
-
+                # 生成一个Task
                 task = Task(streams[j], compute=compute, finalize=None)
                 del compute
 
             # Compute tasks in parallel. ([2] in the diagram)
+            # 给第j个partition放入一个新的task。因为 i, j 已经在clock算法中设定了，所以前向传播就是按照这个来走的。
             self.in_queues[j].put(task)
 
         for i, j in schedule:
-            ok, payload = self.out_queues[j].get()
+            ok, payload = self.out_queues[j].get()  # 取出第j个partition的运行结果
 
             # Hold the first exception.
             if exc_info is not None:

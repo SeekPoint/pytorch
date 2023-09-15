@@ -150,25 +150,26 @@ def check(input: TensorOrTensors) -> None:
     if not isinstance(input, Tensor):
         raise TypeError(f"expected Tensor, but got {input.__class__.__name__}")
 
-
+# 1.3 分割 & 聚合
+# 具体回到分割批次，我们来看看Scatter 代码。
 def scatter(input: TensorOrTensors, chunks: int) -> List[Batch]:
     """Splits an input mini-batch into multiple micro-batches."""
     inputs: Iterable[TensorOrTensors]
 
     if isinstance(input, Tensor):
-        inputs = input.chunk(chunks)
+        inputs = input.chunk(chunks)  # 如果是张量，则直接分割
     else:
         rotated: List[Tensors] = []
 
-        for tensor in input:
-            tensors = tensor.chunk(chunks)
-            rotated.append(cast(Tensors, tensors))
+        for tensor in input:   # 如果是张量数组，则遍历
+            tensors = tensor.chunk(chunks)   # 对于每一个张量进行分割
+            rotated.append(cast(Tensors, tensors))  # 分割结果映射为 Tuple list
 
-        inputs = zip(*rotated)
+        inputs = zip(*rotated)   # 把 list 之中的Tuple 分别聚合
 
-    return [Batch(x) for x in inputs]
+    return [Batch(x) for x in inputs]  # 映射成 Batch 列表返回
 
-
+# gather 方法则是把scatter的结果重新聚集起来，就是一个逆向操作。
 def gather(outputs: List[Batch]) -> TensorOrTensors:
     """Concatenates output micro-batches into a mini-batch."""
     output: TensorOrTensors

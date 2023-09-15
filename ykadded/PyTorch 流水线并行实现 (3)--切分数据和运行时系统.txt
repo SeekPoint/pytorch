@@ -1,0 +1,298 @@
+https://www.cnblogs.com/rossiXYZ/p/15339953.html
+PyTorch 流水线并行实现 (3)--切分数据和运行时系统
+
+0x00 摘要
+前几篇文章我们介绍了 PyTorch 流水线并行的基本知识和自动平衡机制，本文我们介绍如何切分数据和运行时系统。
+
+流水线并行其他文章链接如下:
+
+[源码解析] 深度学习流水线并行Gpipe(1)---流水线基本实现
+
+[源码解析] 深度学习流水线并行GPipe (2) ----- 梯度累积
+
+[源码解析] 深度学习流水线并行 GPipe(3) ----重计算
+
+[源码解析] 深度学习流水线并行之PipeDream(1)--- Profile阶段
+
+[源码解析] 深度学习流水线并行 PipeDream(2)--- 计算分区
+
+[源码解析] 深度学习流水线并行 PipeDream(3)--- 转换模型
+
+[源码解析] 深度学习流水线并行 PipeDream(4)--- 运行时引擎
+
+[源码解析] 深度学习流水线并行 PipeDream(5)--- 通信模块
+
+[源码解析] 深度学习流水线并行 PipeDream(6)--- 1F1B策略
+
+[源码解析] PyTorch 流水线并行实现 (1)--基础知识
+
+[源码解析] PyTorch 流水线并行实现 (2)--如何划分模型
+
+最后得出运行时系统如下：
+
+01-05.png
+
+....
+
+
+1.2 PyTorch 基础
+我们先看看 PyTorch 的一些基础代码。
+
+1.2.1 chunk
+chunk方法可以对张量分块，返回一个张量列表，其参数是：
+    ensor ：要分割的张量。
+    chunks ： 分割的块数
+    dim ：沿着哪个轴分块
+具体举例如下：
+
+    import numpy as np
+    import torch
+
+    data = torch.from_numpy(np.random.rand(3, 5))
+    print(str(data))
+
+    for i, data_i in enumerate(data.chunk(3, 0)): # 沿0轴分为3块
+        print(str(data_i))
+
+输出
+    tensor([[0.1208, 0.3428, 0.4586, 0.9372, 0.6410],
+            [0.7889, 0.4480, 0.7607, 0.7903, 0.4118],
+            [0.8391, 0.6649, 0.8338, 0.3477, 0.3953]], dtype=torch.float64)
+
+    tensor([[0.1208, 0.3428, 0.4586, 0.9372, 0.6410]], dtype=torch.float64)
+    tensor([[0.7889, 0.4480, 0.7607, 0.7903, 0.4118]], dtype=torch.float64)
+    tensor([[0.8391, 0.6649, 0.8338, 0.3477, 0.3953]], dtype=torch.float64)
+
+1.2.2 cat
+cat 的用法则是把张量拼接在一起，或者把一个张量列表拼接起来。
+
+    Z = torch.cat( (X,Y),0 )  # 按维数0拼接，就是竖着拼
+    Z = torch.cat( (X,Y),1 )  # 按维数1拼接，就是横着拼
+我们用示例看看：
+
+    X = torch.ones(2, 5)
+    Y = torch.ones(4, 5)
+    Z = torch.cat((X, Y), 0)
+    print(Z)
+结果是：
+
+    tensor([[1., 1., 1., 1., 1.],
+            [1., 1., 1., 1., 1.],
+            [1., 1., 1., 1., 1.],
+            [1., 1., 1., 1., 1.],
+            [1., 1., 1., 1., 1.],
+            [1., 1., 1., 1., 1.]])
+
+....
+
+1.4 剖析
+我们看看如何使用，下面代码是把ab这个张量列表打散，分割成两个块。
+
+    def test_scatter_tuple():
+        ab = (torch.ones(2, 1), torch.zeros(4, 2), torch.zeros(6, 3))
+
+        a, b = scatter(ab, chunks=2)
+
+        assert a.tensors[0].size() == (1, 1)
+        assert b.tensors[0].size() == (1, 1)
+        assert a.tensors[1].size() == (2, 2)
+        assert b.tensors[1].size() == (2, 2)
+        assert a.tensors[2].size() == (3, 3)
+        assert b.tensors[2].size() == (3, 3)
+我们画个图来看看。
+
+    +-------------------------------------------------------------+
+    | ab                                                          |
+    |                                                             |
+    |    +-----------+         +---------+        +----------+    |
+    |    |           |         |         |        |  0 0 0   |    |
+    |    |           |         |   0 0   |        |  0 0 0   |    |
+    |    |     1     |         |   0 0   |        |  0 0 0   |    |
+    |    |     1     |         |   0 0   |        |  0 0 0   |    |
+    |    |           |         |   0 0   |        |  0 0 0   |    |
+    |    |           |         |         |        |  0 0 0   |    |
+    |    +-----------+         +---------+        +----------+    |
+    |                                                             |
+    +-------------------------------+-----------------------------+
+                                    |
+                                    |
+                                    |
+                         a, b = scatter(ab, chunks=2)
+                                    |
+                                    |
+                                    |
+                                    |
+                                    |
+                                    v
+
+
++------------------------------+         +-----------------------------+
+| a                            |         |b                            |
+|  +---+  +-----+  +--------+  |         |  +---+  +-----+ +--------+  |
+|  | 1 |  | 0 0 |  | 0 0 0  |  |         |  | 1 |  | 0 0 | | 0 0 0  |  |
+|  +---+  | 0 0 |  | 0 0 0  |  |         |  +---+  | 0 0 | | 0 0 0  |  |
+|         +-----+  | 0 0 0  |  |         |         +-----+ | 0 0 0  |  |
+|                  +--------+  |         |                 +--------+  |
++------------------------------+         +-----------------------------+
+使用下面的示例代码也可以看到如何聚合。
+
+    def test_gather_tensors():
+        a = torch.zeros(1, 1)
+        b = torch.zeros(1, 1)
+        ab = gather([Batch(a), Batch(b)])
+
+        assert ab.size() == (2, 1)
+
+
+    def test_gather_tuples():
+        a = (torch.zeros(1, 1), torch.zeros(2, 2))
+        b = (torch.zeros(1, 1), torch.zeros(2, 2))
+        ab = gather([Batch(a), Batch(b)])
+
+        assert isinstance(ab, tuple)
+        assert ab[0].size() == (2, 1)
+        assert ab[1].size() == (4, 2)
+
+
+2.2 Task
+Task 表示如何在一个分区上计算微批次数据（micro-batch）。它由两部分组成：
+    compute应在工作线程中并发执行。
+    finalize应在工作线程完成后执行。
+可以理解为一个业务处理逻辑。如果有安卓经验的同学，可以理解为类似于 业务Message。其实 Android message也叫task，其封装了本任务携带的信息和处理该任务的handler。
+
+这里的 Task 也是类似的，在构建Task 时候，就传入了 compute 方法和finalize方法，举例如下：
+
+    task = Task(streams[j], compute=chk.checkpoint, finalize=chk.recompute)
+或者如下：
+
+    def compute(batch: Batch = batch,
+                partition: nn.Sequential = partition,
+                skip_tracker: SkipTrackerThroughPotals = skip_trackers[i],
+                ) -> Batch:
+        with use_skip_tracker(skip_tracker):
+            return batch.call(partition)
+
+    task = Task(streams[j], compute=compute, finalize=None)
+具体Task定义如下，Task是绑定在 Stream 之上，即可以运行在任何device之上，这就用到了上一节的内容。
+
+....
+
+2.6 总结
+我们总结梳理一下大致业务逻辑（后文还会细化）：
+    系统调用 spawn_workers 来生成若干 workers。
+
+    spawn_workers 为每个 device 生成了一个 Thread，这个 Thread 的执行函数是 worker。
+    spawn_workers 内部也会针对每一个device生成一个 in_queue, out_queue。所以可保证每个device之上是串行来执行业务操作。
+
+    这些 queues 被添加到 (in_queues, out_queues) 之中。然后把 (in_queues, out_queues) 返回给 Pipeline 主线程。
+    之后就是使用 (in_queues, out_queues) 作为各个task 之间传递信息的上下文。
+
+    Pipeline 主线程得到 (in_queues, out_queues) 之后，如果要通过 compute 方法运行一个Task，就找到其device对应的in_queue，把Task插进去。
+
+    Worker Thread 阻塞在 in_queue 之上，如果发现有内容，就读取 Task，运行Task。
+
+    Worker Thread 把运行结果插入到 out_queue之中。
+
+    Pipeline 的 compute 方法会取出 out_queue 之中的运行结果，进行后续处理。
+如下图所示：
+
+                           +-------------------------------------------------------------------------+
+                           |                                1                                        |
+                           |     +--------------------------------------------------------------+    |
+                           |     |               3   (in_queues, out_queues)                    |    |
+                           |     v                                                              |    v
++--------------------------------+---------+                                             +------+----+-----------------------------------------------------------------------+
+| Pipeline                 |               |                                             | spawn_workers                                                                     |
+|                          |               |                                             |                                                                                   |
+|                          |               |                                             | +-------------------------------------+                                           |
+|                          |               |                                             | | workers                             |                                           |
+|                          |               |                                             | |                                     |     t = Thread(                           |
+|                          +               |                                             | |                                     |       target=worker,                      |
+|                 spawn_workers(devices)   |                                             | |  device 1 : in_queue 1, out_queue 1 |       args=(in_queue, out_queue, device), |
+|                                          |                                             | |                                     |       daemon=True,                        |
+|                                          |                                             | |  device 2 : in_queue 2, out_queue 2 |     )                                     |
+| +--------------------------------------+ |                                             | |                                     |     t.start()                             |
+| | compute                              | |                                             | |  device 3 : in_queue 3, out_queue 3 |          +                                |
+| |                                      | |                                             | |                                     |          |                                |
+| |                                      | |    4                                        | |                                     |          |                                |
+| |  in_queues[j].put(task)  +-----------------------+                                   | +-------------------------------------+          |                                |
+| |                                      | |         |                                   +-----------------------------------------------------------------------------------+
+| |                                      | |         |                                                                                      | 2
+| |  ok, payload = out_queues[j].get()<--------+     |         +---------------------+                                                      |
+| |                                      | |   |     |         | in_queues           |                                                      v
+| +--------------------------------------+ |   |     |         |                     |
+|                                          |   |     +------------> in_queue 1 +--------+          +---------------------------------------------------------------------+
++------------------------------------------+   |               |    in_queue 2       |  |          | Thread                                                              |
+                                               |               |    in_queue 3       |  |          |                                                                     |
+                                               |               |                     |  | 5        |    +------------------------------------------------------------+   |
+                                               | 7             +---------------------+  |          |    | Worker                                                     |   |
+                                               |               +---------------------+  |          |    |                                                            |   |
+                                               |               | out_queues          |  |          |    |        device 1      task = in_queue.get()                 |   |
+                                               |               |                     |  |  task    |    |                                                            |   |
+                                               +------------------+ out_queue 1 <--+ |  +----------------------> in_queue 1    batch = task.compute()                |   |
+                                      (True, (task,,batch))    |    out_queue 2    | |             |    |                                                            |   |
+                                                               |    out_queue 3    +---------------------------+ out_queue 1   out_queue.put((True, (task, batch)))  |   |
+                                                               |                     |      6      |    |                                                            |   |
+                                                               +---------------------+             |    +------------------------------------------------------------+   |
+                                                                                                   +---------------------------------------------------------------------+
+
+手机如下：  01-06.png
+
+至此，我们分析了如何切分数据和一些运行时机制，下一篇我们结合论文看看具体实现。
+
+0xFF 参考
+Markdown公式用法大全
+
+markdown中公式编辑教程
+
+https://docs.nvidia.com/cuda/cuda-runtime-api/stream-sync-behavior.html#stream-sync-behavior
+
+CUDA学习：基础知识小结
+
+CUDA随笔之Stream的使用
+
+NVIDIA解决方案架构师深度解析大规模参数语言模型Megatron-BERT
+
+Accelerating Wide & Deep Recommender Inference on GPUs
+
+HugeCTR: High-Performance Click-Through Rate Estimation Training
+
+https://discuss.pytorch.org/t/how-to-prefetch-data-when-processing-with-gpu/548
+
+https://github.com/NVIDIA/apex/
+
+https://github.com/justheuristic/prefetch_generator
+
+https://pytorch.org/tutorials/intermediate/model_parallel_turotial.html
+
+https://pytorch.org/docs/stable/autograd.html
+
+https://pytorch.org/docs/notes/cuda.html
+
+https://zhuanlan.zhihu.com/p/61765561
+
+https://pytorch.apachen.org/docs/1.7/64.html
+
+https://zhidx.com/p/217999.html
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
