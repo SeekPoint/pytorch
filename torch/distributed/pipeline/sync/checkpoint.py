@@ -69,7 +69,8 @@ class Function(Protocol):
     def __call__(self, input: TensorOrTensors) -> TensorOrTensors:
         ...
 
-
+# 3.2 封装API
+# torchgpipe/checkpoint.py 之中有一个 checkpoint 方法，这是对外提供了一个简单API。
 def checkpoint(function: Function, input: TensorOrTensors) -> TensorOrTensors:
     """Makes a checkpoint with a simple interface like
     :func:`torch.utils.checkpoint.checkpoint`. It's only used to test or debug
@@ -83,7 +84,8 @@ def checkpoint(function: Function, input: TensorOrTensors) -> TensorOrTensors:
 
     return batch.tensor_or_tensors
 
-
+# checkpoint API 调用了 Checkpointing，所以我们看看其实现。
+# 其实现是提供了 checkpoint 和 recompute 两个方法。分别调用了两个类。
 class Checkpointing:
     """Generates a pair of :class:`Checkpoint` and :class:`Recompute`."""
 
@@ -245,7 +247,18 @@ def restore_rng_states(device: torch.device, rng_states: Deque[RNGStates],) -> G
             torch.cuda.set_rng_state(gpu_rng_state, device)
         yield
 
+'''
+3.3 实现
+Checkpoint 和下面的 Recompute 就是把普通模式下的 checkpoint 代码分离成两个阶段（forward函数被分成两段，backward 函数也被分成两段），从而可以更好的利用流水线。
 
+对应论文中就是：
+    此段文字由图表示 yknote 01-38.png
+对于这种细粒度的顺序控制，torchgpipe把checkpointing 操作改为使用两个单独的autograd函数Checkpoint和Recompute来实现。
+在任务 F'i,j 的执行时间之内，生成一对具有共享内存的Checkpoint和Recompute。
+该共享内存在向后传播中被使用，用于将通过执行Recompute生成的本地计算图传输到Checkpoint来进行反向传播。
+
+3.3.1 Checkpoint
+'''
 class Checkpoint(torch.autograd.Function):
     @staticmethod
     # type: ignore[override]
@@ -261,12 +274,16 @@ class Checkpoint(torch.autograd.Function):
         ctx.recomputed = recomputed
         ctx.rng_states = rng_states
 
+        # 存RNG状态
         save_rng_states(input[0].device, ctx.rng_states)
 
         ctx.function = function
         ctx.input_atomic = input_atomic
+
+        # 为BP做准备，其实目前没有实现
         ctx.save_for_backward(*input)
 
+        # 进行前向计算
         with torch.no_grad(), enable_checkpointing():
             output = function(input[0] if input_atomic else input)
 
@@ -274,6 +291,7 @@ class Checkpoint(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Context, *grad_output: Tensor,) -> Tuple[Optional[Tensor], ...]:  # pragma: no cover
+        # 从保存的重计算变量中弹出所需变量
         output, input_leaf = ctx.recomputed.pop()
 
         if isinstance(output, tuple):
@@ -282,13 +300,15 @@ class Checkpoint(torch.autograd.Function):
             tensors = (output,)
         if any(y.requires_grad for y in tensors):
             tensors = tuple([x for x in tensors if x.requires_grad])
+            # 进行自动微分
             torch.autograd.backward(tensors, grad_output)
 
         grad_input: List[Optional[Tensor]] = [None, None, None, None, None]
         grad_input.extend(x.grad for x in input_leaf)
         return tuple(grad_input)
 
-
+# 3.3.2 Recompute
+# Recompute 就是依据保存的信息，重新计算中间变量。
 class Recompute(torch.autograd.Function):
     @staticmethod
     # type: ignore[override]
@@ -314,11 +334,11 @@ class Recompute(torch.autograd.Function):
     def backward(ctx: Context, *grad_output: Tensor) -> Tuple[None, ...]:  # pragma: no cover
         input = ctx.saved_tensors
         input_leaf = tuple(x.detach().requires_grad_(x.requires_grad) for x in input)
-
+        # 取出保存的RNG状态，进行前向计算，得到中间变量
         with restore_rng_states(input[0].device, ctx.rng_states):
             with torch.enable_grad(), enable_recomputing():
                 output = ctx.function(input_leaf[0] if ctx.input_atomic else input_leaf)
-
+        # 保存变量，为Checkpoint使用
         ctx.recomputed.append((output, input_leaf))
 
         grad_input: List[None] = [None, None, None, None, None]

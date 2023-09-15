@@ -26,6 +26,7 @@ class Context:
     prev_stream: AbstractStream
     next_stream: AbstractStream
 
+#Copy 拓展了torch.autograd.Function，主要就是应用record_stream来协助完成拷贝业务。
 # 6.3.2 Copy 算子
 class Copy(torch.autograd.Function):
     """Copies tensors on specific streams."""
@@ -38,20 +39,20 @@ class Copy(torch.autograd.Function):
         ctx.next_stream = next_stream
 
         output = []
-        output_stream = current_stream(get_device(next_stream))
+        output_stream = current_stream(get_device(next_stream))   # 得到下一个流
 
         with use_stream(prev_stream), use_stream(next_stream):
             for x in input:
-                y = x.to(get_device(next_stream), non_blocking=True) # 进行拷贝操作
+                y = x.to(get_device(next_stream), non_blocking=True) # 进行拷贝操作  # 把 input 拷贝到 next_stream
                 output.append(y)
 
                 # 'prev_stream' is not where 'x' has been allocated.
-                record_stream(x, prev_stream)
+                record_stream(x, prev_stream)  # 记录流，确保拷贝完成之前不会使用 x
                 # 'y' has been allocated on 'next_stream'.
                 # It might be used on the current stream captured as 'output_stream'.
-                record_stream(y, output_stream)
+                record_stream(y, output_stream)  # 记录流，确保拷贝完成之前不会使用 y
 
-        return tuple(output)
+        return tuple(output)  # 返回输出
 
     @staticmethod
     def backward(ctx: Context, *grad_output: Tensor,) -> Tuple[Optional[Tensor], ...]:

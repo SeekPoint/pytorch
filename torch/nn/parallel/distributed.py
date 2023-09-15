@@ -845,19 +845,30 @@ class DistributedDataParallel(Module):
                 if not self.use_side_stream_for_tensor_copies:
                     return (obj.to(target_gpu),)
                 else:
+                    '''
+                    2.3.1 PyTorch 样例
+                    因为 torchgpipe 用到了 wait_stream 和 record_stream，而网上相关资料较少，
+                    如果深入 CUDA 或者 PyTorch 相关部分又容易耗费太多时间，
+                    所以我们通过 torch/nn/parallel/distributed.py 中的代码来看看如何使用，可以看到。
+                    
+                    wait_stream 起到等待作用：一个流等待另一个流完成。
+                    record_stream 起到确保作用：保证张量内存在操作完成之前不会被重用。
+                    结合其他资料，我们可以理解为确保某一个流上记录的操作完成，才能进行下一步。
+                    具体代码如下：
+                    '''
                     # Perform CPU -> GPU copies in a background stream. This code is
                     # motivated from similar logic in torch/nn/parallel/_functions.py
                     stream = _get_stream(target_gpu)
                     with torch.cuda.stream(stream):
-                        output = obj.to(target_gpu)
+                        output = obj.to(target_gpu)  # 拷贝
                     # synchronize with the copy stream
                     with torch.cuda.device(target_gpu):
                         current_stream = torch.cuda.current_stream()
                         # Sync the current stream with the copy stream
-                        current_stream.wait_stream(stream)
+                        current_stream.wait_stream(stream) # 等待
                         # Ensure tensor memory is not reused until work on
                         # main stream is complete
-                        output.record_stream(current_stream)
+                        output.record_stream(current_stream)  # 确保
                     return (output,)
             if is_namedtuple(obj):
                 return [type(obj)(*args) for args in zip(*map(to_map, obj))]

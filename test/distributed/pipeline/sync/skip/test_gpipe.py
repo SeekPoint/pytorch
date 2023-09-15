@@ -13,7 +13,8 @@ from torch.distributed.pipeline.sync.skip import pop, skippable, stash
 from torch.distributed.pipeline.sync.skip.portal import PortalBlue, PortalCopy, PortalOrange
 from torch.distributed.pipeline.sync.utils import partition_model
 
-
+# 1.1 使用
+# 我们使用源码中的测试例子来进行分析。示例中有一个由三个层组成的Sequential模型，被GPipe封装之后，进行前向和后向传播。
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda required")
 @pytest.mark.parametrize("balance", [[3], [1, 2], [2, 1], [1, 1, 1]], ids=["3", "1:2", "2:1", "1:1:1"])
 @pytest.mark.parametrize("checkpoint", ["never", "always", "except_last"])
@@ -52,17 +53,17 @@ def test_1to3(balance, checkpoint, setup_rpc):
             output = self.conv(input) + skip_1to3
             return output
 
-    model = nn.Sequential(Layer1(), Layer2(), Layer3())
+    model = nn.Sequential(Layer1(), Layer2(), Layer3())  # 构建了一个Sequential
     model = partition_model(model, balance)
-    model = Pipe(model, chunks=3, checkpoint=checkpoint)
+    model = Pipe(model, chunks=3, checkpoint=checkpoint) #在 Sequential 基础上构建 GPipe
 
     in_device = model.devices[0]
     out_device = model.devices[-1]
 
     input = torch.rand(30, 3, 224, 224, device=in_device, requires_grad=True)
-    output = model(input)
+    output = model(input)  # 这里将调用到 GPipe.forward
     loss = output.local_value().mean()
-    loss.backward()
+    loss.backward()  # 这里会进行反向传播
 
     assert torch.allclose(output.local_value().norm(), torch.tensor(1039.0, device=out_device), atol=6e-1)
     assert torch.allclose(input.grad.norm(), torch.tensor(0.0004533053, device=in_device))

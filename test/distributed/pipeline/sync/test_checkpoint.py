@@ -19,7 +19,12 @@ devices = ["cpu"]
 if torch.cuda.is_available():
     devices.append("cuda")
 
-
+'''
+具体使用参见tests/test_checkpoint.py。
+其通过log的巧妙打印，可以让我们看出来运行时候，checkpoint在前向后向传播之中的使用。
+timeline 最后结果是 ["a:forward", "b:forward", "b:forward", "b:backward", "a:forward", "a:backward"]，
+其中两两一组，分别对应了 forward pass ，Checkpoint(Log[b])，Checkpoint(Log[a])。
+'''
 @pytest.mark.parametrize("device", devices)
 def test_serial_checkpoints(device):
     # Copied from https://github.com/pytorch/pytorch/pull/18568.
@@ -43,12 +48,12 @@ def test_serial_checkpoints(device):
 
     # Increase the next function sequence number.
     _ = a + 1 + 2 + 3 + 4 + 5
-
+    # 这里意味着最后 backward 实际会运行"a:forward", "a:backward"
     a = checkpoint(partial(Log.apply, "a"), a)
 
     a, phony = fork(a)
     b = join(b, phony)
-
+    # 这里意味着最后 backward 实际会运行"b:forward", "b:backward"
     b = checkpoint(partial(Log.apply, "b"), b)
 
     c = torch.cat((a, b))

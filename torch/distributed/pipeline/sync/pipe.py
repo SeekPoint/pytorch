@@ -277,7 +277,7 @@ class Pipe(Module):
         self._skip_layout = inspect_skip_layout(self.partitions)
 
         # Separate CUDA streams for copy.
-        copy_streams = self._ensure_copy_streams()
+        copy_streams = self._ensure_copy_streams() # 这里会生成拷贝转专用流
 
         # The micro-batch index where the checkpointing stops.
         checkpoint_stop = {"always": self.chunks, "except_last": self.chunks - 1, "never": 0}[self.checkpoint]
@@ -348,6 +348,8 @@ class Pipe(Module):
 6.3.1 _copy_streams
 _copy_streams 定义如下：
        self._copy_streams: List[List[AbstractStream]] = []
+       
+_ensure_copy_streams 方法就是针对每个设备生成新的 CUDA stream。
 '''
     def _ensure_copy_streams(self) -> List[List[AbstractStream]]:
         """Ensures that :class:`Pipe` caches CUDA streams for copy.
@@ -359,7 +361,7 @@ _copy_streams 定义如下：
         """
         #chunks 是micro-batches 的数目。
         # _ensure_copy_streams 就是针对每一个设备的每一个macro-batch，都生成了一个专用流。
-        '''
+        ''' 
         假设有3个devices，模型被分成3个子网络，小批次被分割成 4个微批次。
         则具体如下：就是说 _copy_streams[i][j] 之中，i 表示 device 的序列，j 表示 batch 序列。（后续的文章之中，有对如何使用的详述）
 
@@ -423,6 +425,15 @@ _copy_streams 定义如下：
             TypeError: input is not a tensor or sequence of tensors.
 
         """
+        '''
+        1.2 前向传播
+        GPipe 的前向传播之中做了如下操作：  ==yknote这里和torchGpipe代码有些不同！
+            利用 scatter 函数把输入分割，就是把 mini-batch 分割为 micro-batches。
+            利用 _ensure_copy_streams 方法针对每个设备生成新的 CUDA stream。
+            生成一个 Pipeline，并且运行。
+            运行结束之后，利用 gather 方法把micro-batches 合并成一个 mini-batch。
+        因此我们可以看到，对于每次迭代的 forward 操作，都会生成一个 Pipeline 类进行操作，返回给调用者。
+        '''
         microbatch.check(input)
 
         if not self.devices:

@@ -25,7 +25,16 @@ CPUStream = CPUStreamType()
 # It represents both CUDA streams and the CPU stream.
 AbstractStream = Union[torch.cuda.Stream, CPUStreamType]
 
+'''
+2.3.2 生成/获取
+关于生成和获取的函数为：
 
+    new_stream 会生成一个新的stream。
+    
+    current_stream 返回当前流。
+    
+    default_stream 返回了缺省流。
+'''
 def new_stream(device: torch.device) -> AbstractStream:
     """Creates a new stream for either CPU or CUDA device."""
     if device.type != "cuda":
@@ -75,7 +84,18 @@ def get_device(stream: AbstractStream) -> torch.device:
         return as_cuda(stream).device
     return torch.device("cpu")
 
+'''
+2.3.4 等待
+以下方法封装了CUDA wait_stream 。
+    如果两个流都是CUDA流，则就是一个流等待另外一个流完成。
+    否则采用 synchronize() 来保证 CPU 等待 CUDA 完成。
+因为这里流操作是异步的，所以当函数返回时候无法确定操作是否已经完成，所以将CPU和主机进行同步，或者CUDA流之间进行同步，以确保GPU完成流操作。
 
+这里wait_stream和synchronize最终都会完成等待操作，比如synchronize最终调用到了 cudaDeviceSynchronize，
+该方法将停止CPU端线程的执行，直到GPU端完成此前CUDA上的任务（包括kernel函数、数据拷贝等）。
+
+既然已经把 Stream 操作进行了基础封装，torchgpipe 接下来就使用这些封装函数实现了拷贝操作和等待操作，我们接下来看看。
+'''
 def wait_stream(source: AbstractStream, target: AbstractStream) -> None:
     """:meth:`torch.cuda.Stream.wait_stream` for either CPU or CUDA stream. It
     makes the source stream wait until the target stream completes work queued.
@@ -90,7 +110,8 @@ def wait_stream(source: AbstractStream, target: AbstractStream) -> None:
 
     # If the target is CPU, synchronization is not required.
 
-
+# 2.3.3 记录
+# 以下方法用来封装了CUDA record_stream。
 def record_stream(tensor: torch.Tensor, stream: AbstractStream) -> None:
     """:meth:`torch.Tensor.record_stream` for either CPU or CUDA stream."""
     if is_cuda(stream):
