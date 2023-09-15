@@ -1,0 +1,444 @@
+增加的文本和图片保存在ykadded目录中
+
+文本中特别注意 yknote  包含不明白的地方
+
+
+代码变化随机调查  没有max那么默认是tag2.0.0
+    def _shutdown(self) -> None:   ===only 1.9.1
+    """Represents a rendezvous join operation."""  --min 1.9.1
+    # At this point either the rendezvous is not complete, but we are part  --min 1.9.1 --max1.10.2
+    class _BaseDataLoaderIter(object): --min 1.7.1  --max1.10.2
+    def _add_to_participants(self)   --min 1.9.1
+    PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwargs)  --min 1.8.2 --max1.10.2
+    class _RendezvousState:  --min 1.9.1
+    c10::intrusive_ptr<c10::ivalue::Future> DistEngine:: --min 1.9.1
+    c10::intrusive_ptr<c10::ivalue::Future> DistEngine::executeSendFunctionAsync(  --min 1.9.1
+    output_edges.emplace_back(std::make_shared<Identity>(), 0);  --min 1.9.1
+    class BatchUpdateParameterServer(object): --min 1.8.2
+    class BatchUpdateParameterServer(object):  --min 1.8.2
+    // The constructor takes a list of variables for every model replica  --min 1.8.2  --max1.10.2
+所以决定选定 1.9.1 ==  和大多数文章发表时间也最接近
+
+主要版本的日期：
+2021-12-14 09:24:18 -0800  (tag: v1.10.2-rc1, tag: v1.10.2, upstream/release/1.10, origin/release/1.10)
+2021-09-13 21:13:35 -0700  (tag: v1.9.1-rc2, tag: v1.9.1)
+2021-07-23 11:17:46 -0700  (tag: v1.8.2-rc1, tag: v1.8.2)
+2020-12-07 11:28:38 -0800  (tag: v1.7.1-rc3, tag: v1.7.1)
+
+以下是tag_v2.0.0的日志修改：
+PS C:\yk_repo\pytorch-repo\tag_v2.0.0> git log
+commit 89bea92a9e05be6a5e404f0f067408c2814a2ae7 (HEAD -> tag_v2.0.0)
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 27 15:29:41 2023 +0800
+
+    re-org ext prj
+
+commit 75f03060d3f2d626b948510cdc868429a4df92da
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 27 01:20:37 2023 +0800
+
+    re-org ext prj
+
+commit 42072b4263cd9f435a0d32d836c8cd216e8d85de
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 27 01:16:56 2023 +0800
+
+    add official extension-cpp project
+
+commit 78326148778fa75c1d263d29363e40659aa032f9
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 26 12:14:18 2023 +0800
+
+    pytorch的C++ extension写法 https://zhuanlan.zhihu.com/p/100459760
+
+commit 4e84964395173d5669cc3a2bc3f3c3b2a1d51881
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 24 12:29:03 2023 +0800
+
+    Tensor源码分析与复现（2）
+
+commit 4a4b33fd41ef6d99613ca940a85ad5e033c713b9
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 24 11:48:55 2023 +0800
+
+    Tensor源码分析与复现（1）
+
+commit a92bf6d72965cbc27be29aa914603be574c59274
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 20 21:26:50 2023 +0800
+
+    update
+
+commit eb9b387f43749bd8715d71d47a54adae0fe5f40b
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 20 13:36:22 2023 +0800
+
+    PyTorch 源码解读之 torch.optim：优化算法接口详解
+
+commit 1aa5283b64a8a481c42c188d86dcccafcb23d088
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 20 12:57:56 2023 +0800
+
+    update
+
+commit bec367e0e834b3b98e1c6ffb241e1631fc5f221f
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 20 12:24:08 2023 +0800
+
+    PyTorch的动态图(上) and PyTorch的动态图(下)---有效内容少，大多已经过时
+
+commit f0a997fb4e0bee4eb03c21a14c02b678c042ad75
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 20 00:03:43 2023 +0800
+
+    PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+
+commit e018398806a28df13ecf0bd861ce049757c3e82d
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 19 17:02:59 2023 +0800
+
+    PyTorch 源码解读之 BN & SyncBN：BN 与 多卡同步 BN 详解
+
+commit 80033fb9b954f1b92fc481db5aa48b2a737d8a6d
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 19 16:46:52 2023 +0800
+
+    PyTorch 源码解读之 torch.autograd：梯度计算详解
+
+commit 17d85ec7b01c00d6da56576b5fa83abbfce2f8e0
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 19 14:11:19 2023 +0800
+
+    PyTorch 源码解读之 nn.Module：核心网络模块接口详解
+
+commit 3c988ab66fc7b5be1985c8589b4443d62b6ee85c
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 19 13:04:51 2023 +0800
+
+    PyTorch 源码解读之 torch.utils.data：解析数据处理全流程
+
+commit 69e9d701f48dcf18eead4df7df2babe45858a9c6
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 19 13:01:30 2023 +0800
+
+    PyTorch 源码解读之 torch.serialization & torch.hub
+
+commit 89a722060fd220b9766887663e88e3df4fa75cc9
+Author: yuanke <yuanke@microsoft.com>
+Date:   Fri Aug 18 10:47:34 2023 +0800
+
+    PyTorch 小课堂开课啦！带你解析数据处理全流程（一）
+
+commit a0318a5cf5b7872a85b1e7143f2a3f6b65a7fe1b
+Author: yuanke <yuanke@microsoft.com>
+Date:   Fri Aug 18 00:27:06 2023 +0800
+
+    PyTorch 小课堂！带你解析数据处理全流程（二）
+
+commit 18247a50fbcdc137325736e7aabe3f0a30f4e217
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 23:21:12 2023 +0800
+
+    PyTorch 2.0 之 Dynamo: 窥探加速背后的真相
+
+commit 8e5f1934ea93bdd324f6fd9b9bb0febcb3fd4da2
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 23:08:38 2023 +0800
+
+    小白学习pytorch源码（一）：torch包函数如何实现？揭秘__init__.py
+
+commit 58d78f4a2daeb333688eb983ebcf72c61d61618f
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 22:58:44 2023 +0800
+
+    小白学习pytorch源码（三）：理解torch.tensor模块
+
+commit 3c06d7f3148a09fd2d93a2b7f124cfd693475547
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 22:04:51 2023 +0800
+
+    小白学习pytorch源码（二）：setup.py最详细解读
+
+commit 2d87281f9ee7cc6a61080e8a1e7ee6e7e69419b8
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 21:50:07 2023 +0800
+
+    再谈PyTorch的初始化（下）
+
+commit f99865f4df4ef6c5926c4c945838e56a768e05aa
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 17:04:08 2023 +0800
+
+    再谈PyTorch的初始化（中）
+
+commit 52462034f98ea79e8c96cdd4165b46be71283b4c
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 16:59:59 2023 +0800
+
+    再谈PyTorch的初始化（上）
+
+commit 202b97e522250d45a5232eea943506a751f9099e
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 14:50:04 2023 +0800
+
+    PyTorch的编译系统
+
+commit 2df7151a2878772067833d2e96b6c1eb513434c9
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 01:05:58 2023 +0800
+
+    PyTorch的初始化
+
+commit 76cfc3f000eea0bf3a6eff0922ceccb076c65e13
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 17 00:38:43 2023 +0800
+
+    Pytorch CUDA源码解析 - BlockReduceSum
+
+commit d1f60bbf995756541ab242ae3f17a96a0dd8cd49 (origin/tag_v2.0.0)
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 20:38:34 2023 +0800
+
+    PyTorch 分布式之弹性训练(6)---监控/容错
+
+commit d2eee0bdd8709afbd972f90171bdc54527d9b4df
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 19:42:17 2023 +0800
+
+    PyTorch 分布式之弹性训练(5)---Rendezvous 引擎
+
+commit bbea800cf1acf27f6bf21a659fe53bb423a6f9e2
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 19:02:53 2023 +0800
+
+    PyTorch 分布式之弹性训练(4)---Rendezvous 架构和逻辑
+
+commit 25ced0ccb41878b0f7cb279b89cfdbf8ef484dc5
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 18:17:56 2023 +0800
+
+    PyTorch 分布式之弹性训练(3)---代理
+
+commit b03d6ae8ed1fbfd09bcbafd5e2ea6b3ece885922
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 16:45:39 2023 +0800
+
+    PyTorch 分布式之弹性训练(2)---启动&单节点流程
+
+commit fbf3148369d33e0e5b62a3a6a6947c6f4c920023
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 13:16:12 2023 +0800
+
+    PyTorch 分布式(13) ----- DistributedDataParallel 之 反向传播
+
+commit 9a3899a9e2d5957a80763afbd8b7836c885d7a62
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 12:28:05 2023 +0800
+
+    PyTorch 分布式(12) ----- DistributedDataParallel 之 前向传播
+
+commit 9f58b7ba55c4b88a7f011e924aa5f717134199c8
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 01:16:53 2023 +0800
+
+    PyTorch 分布式(11) ----- DistributedDataParallel 之 构建Reducer和Join操作
+
+commit c0b53f5076d7cd3ad1528d1e19838054763f892a
+Author: yuanke <yuanke@microsoft.com>
+Date:   Mon Aug 14 00:49:40 2023 +0800
+
+    PyTorch 分布式(10)------DistributedDataParallel之Reducer静态架构
+
+commit 53b15fdde23934cfebde5fb7f381f3d9910c36f9
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 20:24:47 2023 +0800
+
+    PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+
+commit 28e5b3c1c2ea00f052132b61e2e179a1cd25ec16
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 19:41:44 2023 +0800
+
+    PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+
+commit bc08a7a14193e23e0ca7547f5eedb18d11093d8a
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 18:27:51 2023 +0800
+
+    PyTorch分布式(6) ---DistributedDataParallel -- init_method&store
+
+commit ad5f2ec50a621cd656c71d0a5386bfd5eb87505c
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 17:17:04 2023 +0800
+
+    PyTorch 分布式(3) ----- DataParallel(下)
+
+commit a0f58f29ecb875557b0ef6a41abe3b7554db6309
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 15:57:37 2023 +0800
+
+    PyTorch 分布式(2) ----- DataParallel(上)
+
+commit 7196025c96a7494fe32597b0f69a5bd31f3062cd
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 14:09:49 2023 +0800
+
+    PyTtorch 分布式 Autograd (6) ---- 引擎(下)
+
+commit d6e35d7ffd29f55a858248ec4c17a4f7ee1270ff
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 13:36:48 2023 +0800
+
+    PyTorch 分布式 Autograd (5) ---- 引擎(上)
+
+commit 23bc746095d71ec7e687a8ec9b0f502ab9bb0eee
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 11:16:26 2023 +0800
+
+    PyTorch 分布式 Autograd (4) ---- 如何切入引擎
+
+commit b2eaed822ec2684e1a3889876ab5296e7e0ea577
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 01:57:27 2023 +0800
+
+    PyTorch 分布式 Autograd (3) ---- 上下文相关
+
+commit 8f544d65473cf8345895fe71be4280f11835c7fe
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sun Aug 13 00:26:53 2023 +0800
+
+    PyTorch 分布式 Autograd (2) ---- RPC基础
+
+commit d21b1d1260943ccfd3826269ce9b63488e948ea1
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 21:55:02 2023 +0800
+
+    PyTorch 分布式 Autograd (1) ---- 设计  主要是翻译
+
+commit f8e2df87e52a96a197d112d6f0e01fe89dfd0e7b
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 21:42:43 2023 +0800
+
+    PyTorch 流水线并行实现 (6)--并行计算
+
+commit 773bed4f62e409b8c713c85406b8513a4b29504c
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 21:14:44 2023 +0800
+
+    PyTorch 流水线并行实现 (5)--计算依赖
+
+commit 78a1dd24f511466e920a4f26397e1809b5900931
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 20:38:30 2023 +0800
+
+    PyTorch 流水线并行实现 (4)--前向计算
+
+commit fece135ecde176925b4a54f0b6bb82b1ab3ec238
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 20:33:46 2023 +0800
+
+    PyTorch 流水线并行实现 (3)--切分数据和运行时系统
+
+commit 65503c1da8e8bf274eb84587149635aea8f08190
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 18:43:31 2023 +0800
+
+    PyTorch 流水线并行实现 (1)--基础知识 (2)--如何划分模型
+
+commit a1705b2db582be249e222f4dd8a594ea87d97300
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 18:36:19 2023 +0800
+
+    PyTorch 流水线并行实现 (1)--基础知识 (2)--如何划分模型
+
+commit 58e68a205a9f6f094cd12d60caf93c6501e2ea3d
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 18:08:52 2023 +0800
+
+    PyTorch分布式优化器(3)---- 模型并行---例子待调试
+
+commit 86b60abfb510b88bce5299ac26cbc95d8fcb4caf
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 15:10:12 2023 +0800
+
+    PyTorch分布式优化器(2)----数据并行优化器
+
+commit 916c9d9fb7b861e2af5f224dd1a3d0a58a95a1be
+Author: yuanke <yuanke@microsoft.com>
+Date:   Sat Aug 12 02:08:27 2023 +0800
+
+    PyTorch分布式优化器(1)----基石篇
+
+commit 9ca7142a3d02bcd7b8f3a1206d53ad1a18ce9156
+Author: yuanke <yuanke@microsoft.com>
+Date:   Fri Aug 11 19:08:15 2023 +0800
+
+    comment on 数据加载之DistributedSampler and 数据加载之DataLoader
+
+commit b7a370f373cd5f873a7abd1cf2509b4d872a9701
+Author: yuanke <yuanke@microsoft.com>
+Date:   Fri Aug 11 16:13:06 2023 +0800
+
+    comment on PyTorch autograd 暂时告一段落
+
+commit 995695cea911377be0a157c99dfef69114d6c3a0
+Author: yuanke <yuanke@microsoft.com>
+Date:   Fri Aug 11 13:39:21 2023 +0800
+
+    comment on PyTorch autograd (可以继续补充！)
+
+commit a238dd69a88e5fe1b28460947be9555c4043529a
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 10 17:40:07 2023 +0800
+
+    comment on PyTorch autograd
+
+commit 2694f6f47e398b1e74697fa8ed5adff5f1be7553
+Author: yuanke <yuanke@microsoft.com>
+Date:   Thu Aug 10 15:34:26 2023 +0800
+
+    comment on PyTorch 分布式
+
+commit 86cbb4c7ec929e21251325da37fe983472afcc59
+Author: yuanke <yuanke@microsoft.com>
+Date:   Wed Aug 2 12:42:50 2023 +0800
+
+    update ref
+
+commit 19aff33e7589624c8b00a934601a08ab1842dbac
+Author: yuanke <yuanke@microsoft.com>
+Date:   Tue Aug 1 17:15:45 2023 +0800
+
+    add ref and pydebug
+
+commit 77b45b70b4fa560da0cc292359d8ed0c8471c1e4
+Author: yuanke <yuanke@microsoft.com>
+Date:   Tue Aug 1 12:18:51 2023 +0800
+
+    add note
+
+commit bf24f6d94d85ade80d69d6998ad0dd789711df70
+Author: yuanke <yk_data@126.com>
+Date:   Tue Aug 1 11:38:09 2023 +0800
+
+    build log
+
+commit c263bd43e8e8502d4726643bc6fd046f0130ac0e (tag: v2.0.0-rc6, tag: v2.0.0)
+Author: Andrey Talman <atalman@fb.com>
+Date:   Thu Mar 9 17:42:00 2023 -0500
+
+    [inductor] use triu ref instead of lowering (#96040) (#96462)
+
+    Fixes #95958
+    Generated code is functionally identical with ref and lowering, only minor differences
+
+    Pull Request resolved: https://github.com/pytorch/pytorch/pull/96040
+    Approved by: https://github.com/jansel
+
+    Co-authored-by: Natalia Gimelshein <ngimel@fb.com>
+
+commit c9913cf66fda1ccec49a70ffb0304401eadd9d52
+Author: Andrey Talman <atalman@fb.com>
+Date:   Thu Mar 9 17:31:12 2023 -0500
+
+
