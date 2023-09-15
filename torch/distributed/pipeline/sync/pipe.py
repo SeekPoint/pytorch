@@ -342,7 +342,13 @@ class Pipe(Module):
                 raise MOVING_DENIED
 
         return super().to(*args, **kwargs)
-
+'''
+6.3 实现
+我们接下来看看具体实现，依次验证我们的推论。
+6.3.1 _copy_streams
+_copy_streams 定义如下：
+       self._copy_streams: List[List[AbstractStream]] = []
+'''
     def _ensure_copy_streams(self) -> List[List[AbstractStream]]:
         """Ensures that :class:`Pipe` caches CUDA streams for copy.
 
@@ -351,6 +357,40 @@ class Pipe(Module):
         fragementation when the number of micro-batches is small.
 
         """
+        #chunks 是micro-batches 的数目。
+        # _ensure_copy_streams 就是针对每一个设备的每一个macro-batch，都生成了一个专用流。
+        '''
+        假设有3个devices，模型被分成3个子网络，小批次被分割成 4个微批次。
+        则具体如下：就是说 _copy_streams[i][j] 之中，i 表示 device 的序列，j 表示 batch 序列。（后续的文章之中，有对如何使用的详述）
+
+                  +----------------------------------+
+                  | _copy_streams                    |
+                  |                                  |
+                  |     +----------------------+     |
+                  |     |                      |     |
+                  |     |  [1,1] [1,2] [1,3]+--------------------------------+
+                  |     |                      |     |                       |
+                  |     |  [2,1] [2,2] [2,3]+------------------------------------------+
+                  |     |                      |     |                       |         |
++-------------------------+[3,1] [3,2] [3,3]   |     |                       |         |
+|                 |     |                      |     |                       |         |
+|                 |     +----------------------+     |                       |         |
+|                 |                                  |                       |         |
+|                 +----------------------------------+                       |         |
+|                                                                            |         |
+|                                                                            v         |
+|   +------------------------------------------------------------------------+------+  |
+|   | Stream of device 1, Stream of device 1, Stream of device 1, Stream of device 1|  |
+|   +-------------------------------------------------------------------------------+  |
+|                                                                                      |
+|   +-------------------------------------------------------------------------------+  |
+|   | Stream of device 2, Stream of device 2, Stream of device 2, Stream of device 2+<-+
+|   +-------------------------------------------------------------------------------+
+|
+|   +-------------------------------------------------------------------------------+
++-->+ Stream of device 3, Stream of device 3, Stream of device 3, Stream of device 3|
+    +-------------------------------------------------------------------------------+
+    '''
         if not self._copy_streams:
             for device in self.devices:
                 self._copy_streams.append([new_stream(device) for _ in range(self.chunks)])

@@ -1,0 +1,768 @@
+https://www.cnblogs.com/rossiXYZ/p/15370448.html
+PyTorch 流水线并行实现 (5)--计算依赖
+
+
+
+0x00 摘要
+前几篇文章我们介绍了 PyTorch 流水线并行的基本知识，自动平衡机制和切分数据等，
+本文我们结合论文内容来看看如何实现流水线依赖，核心就是如何建立这些小批次之间的跨设备依赖关系。
+
+流水线并行其他文章链接如下:
+
+[源码解析] 深度学习流水线并行Gpipe(1)---流水线基本实现
+
+[源码解析] 深度学习流水线并行GPipe (2) ----- 梯度累积
+
+[源码解析] 深度学习流水线并行 GPipe(3) ----重计算
+
+[源码解析] 深度学习流水线并行之PipeDream(1)--- Profile阶段
+
+[源码解析] 深度学习流水线并行 PipeDream(2)--- 计算分区
+
+[源码解析] 深度学习流水线并行 PipeDream(3)--- 转换模型
+
+[源码解析] 深度学习流水线并行 PipeDream(4)--- 运行时引擎
+
+[源码解析] 深度学习流水线并行 PipeDream(5)--- 通信模块
+
+[源码解析] 深度学习流水线并行 PipeDream(6)--- 1F1B策略
+
+[源码解析] PyTorch 流水线并行实现 (1)--基础知识
+
+[源码解析] PyTorch 流水线并行实现 (2)--如何划分模型
+
+[源码解析] PyTorch 流水线并行实现 (3)--切分数据和运行时系统
+
+[源码解析] PyTorch 流水线并行实现 (4)--前向计算
+
+本文图片来自论文和github源码。
+
+0x01 前文回顾
+为了更好的理解本文，我们首先看看前文之中的关键部分。
+
+原始流水线状态如下：
+管道并行的策略是根据分区索引 j 分配任务，以便第 j 个分区完全位于第 j 个设备中。
+持有模型后期部分的设备必须等待，直到持有模型早期部分的设备计算结束。
+01-19
+
+目标流水线状态如下：
+01-20
+
+    目前问题：
+
+        如果分成若干个微批次，则需要强制要求 Fi,j必须在 Fi+1,j之前完成，以及 Bi,j必须在执行Bi−1,j之前完成。
+
+        后向传播的计算图是在前向传播过程中动态构造的。
+        PyTorch既不记录正向计算图，也不维护一个梯度磁带（gradient tape），
+        PyTorch的自动微分（autograd）引擎仅对计算图进行反向传播。
+        这意味着自动加载引擎可能不会完全按照与正向过程相反的执行顺序运行，除非由图的结构强制执行。
+
+    目前难点：
+
+        如何在每个设备中以正确的顺序发布那些绑定到设备的任务，
+        以避免由于Python解释器未能提前请求而延迟在设备上（与CPU异步）执行任务。[这个前文已经介绍]
+
+        如何建立这些小批次之间的跨设备依赖关系。
+
+    实现方案：
+
+        如何保证正确执行顺序？torchgpipe引入了确定性时钟周期（deterministic clock-cycle），它给出了任务的总体顺序。[这个前文已经介绍]
+
+        如何保证计算图中的动态显式依赖关系？针对clock_cycles产生的每一个运行计划：
+            利用 fence 函数调用“fork”和“join”，以此在向后计算图中动态创建显式后向传播依赖关系。
+            利用 compute(schedule, skip_trackers, in_queues, out_queues) 进行计算。
+
+因为前文已经介绍了执行顺序方案，所以本文介绍如何计算依赖。
+
+0x02 计算依赖
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+| Layer 1 +--->  Layer 2 +-----> Layer 3 +----->  Layer 4 +-----> Layer 5  +---> Layer 6  |
+|                                                                                         |
++--------------------------+---------------------------+----------------------------------+
+                                          +
+                                          |
+                                          |
+                                          v
+ +------------------------------------------------------------------------------------+
+ | +--------------------+         +---------------------+      +--------------------+ |
+ | |Partition 1         |         |Partition 2          |      |Partition 3         | |
+ | |                    |         |                     |      |                    | |
+ | |      Layer 1       |    +---------> Layer 4        |      |                    | |
+ | |         +          |    |    |         +           |  +------->   Layer 6      | |
+ | |         |          |    |    |         |           |  |   |                    | |
+ | |         v          |    |    |         |           |  |   |                    | |
+ | |      Layer 2       |    |    |         |           |  |   |                    | |
+ | |         +          |    |    |         v           |  |   |                    | |
+ | |         |          |    |    |      Layer 5 +---------+   |                    | |
+ | |         v          |    |    |                     |      |                    | |
+ | |      Layer 3  +---------+    |                     |      |                    | |
+ | |                    |         |                     |      |                    | |
+ | +---------+----------+         +---------+-----------+      +-----------+--------+ |
+ |                                                                                    |
+ +------------------------------------------------------------------------------------+
+为什么需要计算依赖？
+
+    因为模型已经被分层，模型的不同部分拆开放到不同设备上，数据也分成微批次，
+    所以本来模型内部是线性依赖关系，现在需要变成流水线依赖关系。
+    因此原始计算图不能满足需求，因此需要有针对性的补充。
+    就像上图那样，6个层被分成了三个partitions，这三个partitons 之间的依赖如何构建？
+
+    之前的线性依赖关系其实是在模型定义时候就基本确定了，现在则需要每次运行时候建立一个动态依赖关系。
+
+所以针对流水线并行，torchgpipe需要自己补充一个本机跨设备伪分布式依赖关系。
+torchgpipe 通过在前向计算图和后向计算图做各种调整来达到目的。
+计算图就意味着各种依赖逻辑，依赖逻辑的补足就是依靠本节介绍的 Fork 和 Join 两个函数完成的。
+
+这里最初有一个疑问，就是Torchgpipe怎么在不使用 PyTorch RPC 和 p2p的情况下，构建出来一个异地反向计算图。
+后来发现，原来是我想多了，因为Torchgpipe没有考虑到这种情况，它针对都是在同一个主机之上的GPU，不涉及异地多机器计算。
+
+Torchgpipe 本质上还是一个进程内运行多个线程进行计算，是 DP 的替代。比如源码中就有对比如下：
+
+    ### ResNet-101 Accuracy Benchmark
+
+    Batch size | torchgpipe | nn.DataParallel | Goyal et al.
+    ---------- | ---------: | --------------: | -----------:
+    256        | 21.99±0.13 |      22.02±0.11 |   22.08±0.06
+    1K         | 22.24±0.19 |      22.04±0.24 |          N/A
+    4K         | 22.13±0.09 |             N/A |          N/A
+再比如代码中明确提到：
+
+    If you decide not to use checkpointing at all, :class:`nn.DataParallel
+    <torch.nn.DataParallel>` might be more efficient than GPipe.
+
+
+0x03 反向传播依赖
+我们首先看看反向传播依赖，这个是论文的重点。
+
+2.1 解析
+我们还是要回忆一下前面两个图例。
+
+图1    01-08
+
+图2    01-10
+
+这里需要完成两种依赖：
+
+    行间依赖，就是 batch 之间的依赖，就是设备内的依赖。
+    从图上看，就是蓝色列内的 F1,1必须在 F2,1之前完成，B2,1必须在B1,1之前完成。
+
+    列间依赖，就是 partitions（设备） 之间的依赖。从图上看，就是蓝色 F1,1必须在黄色 F1,2之前完成，
+    即第一个设备必须在第二个设备之前完成，而且第一个设备的输出是第二个设备的输入。
+
+假定我们依据确定性时钟周期（deterministic clock-cycle）算法来运行一个前向传播。
+即使前向传播是按照在第j个设备上应该执行的顺序来执行任务 F1,j,...,Fm,j，得到的后向传播结果计算图看起来也更像图1而非图2，
+
+从图1上看，PyTorch 的 autograd 引擎不知道 Bi+1,j必须在 Bi,j之前运行，因此会打乱后向传播的时间流。
+因此，虚拟依赖（图2的虚线箭头）必须在前向传播中被显式绘制出来。
+
+我们再仔细分析一下图2。
+图2之中，每一行都表示一个 micro-batch 在训练中的运行流，这个流的前向是由clock算法确定的。
+后向关系是由前向传播中自动确定完成的。
+
+现在的问题是：一个 mini-batch 被分成了4个 micro-batch，分别在不同时钟周期进入训练。就是每一列。
+这一列由上到下的传播也是由clock算法确定，但是反向传播（由下自上）目前是不确定的。
+比如最后一列中，反向传播的顺序应是：B4,1,B3,1,B2,1,B1,1。
+但是这个目前从前向传播的结果来看，无法确定这个顺序。
+
+所以需要依靠本节介绍的 Fork 和 Join 两个函数完成这个依赖关系。
+图中斜线表示checkpoint之中需要先有一个重计算，然后才能由下往上走。
+
+因此，torchpipe定义两个基础函数，Fork 和 Join 来表达这种依赖关系：
+
+    Fork 是 auto grad 函数，其把一个张量 x 映射到 pair(x, ϕ)，这里 ϕ 是一个空张量。
+
+    Join 是 auto grad 函数，其把 pair(x, ϕ) 映射到一个张量 x ，这里 ϕ 是一个空张量。
+
+现在，Fi+1,j对于 Fi,j的依赖（其在后向传播计算图中被转换为 Bi,j到 Bi+1,j的依赖关系）可以被如下表示：
+    01-21.png
+所以，图中这里实线都是前向传播时候构建的，虚线是由 fork & join 构建的。
+
+原则上，表示虚拟依赖关系的张量可以是任意的。然而，torchgpipe选择使用空张量，以消除由张量引起的任何不必要的计算，例如PyTorch中的梯度累积。
+
+具体如下图。就是使用 Fork 和 Join 的后向计算图。
+图中，不同颜色对应不同的设备。箭头依据后向传播图的方向来绘制，这些联系是在前向传播中被构建的。
+因此，F′i,j对于 Bi+1,j的虚拟依赖通过 Fork 和 Join 被构建出来，用虚线表示。
+    01-22.png
+
+
+
+
+2.3 使用
+在 Pipeline 之中我们可以看到具体的使用方法，fence 方法（省略部分代码）利用 depend 来构建后向传播的依赖关系，
+确保 batches[i-1] 在 batches[i] 之后完成。
+    def fence(self,
+              schedule: List[Tuple[int, int]],
+              skip_trackers: List[SkipTrackerThroughPotals],
+              ) -> None:
+        """Copies micro-batches after computation for the previous
+        micro-batches.
+        """
+        batches = self.batches
+        copy_streams = self.copy_streams
+        skip_layout = self.skip_layout
+
+        for i, j in schedule:
+            # Ensure that batches[i-1] is executed after batches[i] in
+            # backpropagation by an explicit dependency.
+            if i != 0:
+                depend(batches[i-1], batches[i]) # 在这里建立了后向传播依赖关系
+
+            next_stream = copy_streams[j][i]
+
+            for prev_j, ns, name in skip_layout.copy_policy(j):
+                prev_stream = copy_streams[prev_j][i]
+                skip_trackers[i].copy(batches[i], prev_stream, next_stream, ns, name)
+
+            if j != 0:
+                prev_stream = copy_streams[j-1][i]
+                copy(batches[i], prev_stream, next_stream)
+
+具体 depend 代码如下： yknote--对应于 def _depend
+
+    def depend(fork_from: Batch, join_to: Batch) -> None:
+        fork_from[0], phony = fork(fork_from[0])
+        join_to[0] = join(join_to[0], phony)
+我们结合示例代码把传入的参数赋值一下，重新把方法解释如下，这样大家就可以更好的理解。
+
+    def depend(batches[i-1]: Batch, batches[i]: Batch) -> None:
+        batches[i-1][0], phony = fork(batches[i-1][0])
+        batches[i][0] = join(batches[i][0], phony)
+具体逻辑如下，通过 phony 完成了一个桥接，即在正向传播之中，batches[i] 依赖 batches[i-1] 的执行结果。
+
+      +----------------+          +--------------+
+      |                |          |              |
+      |  batches[i-1]  |          |  batches[i]  |
+      |                |          |              |
+      +----------+-----+          +-----+--------+
+                 |                      |
+                 |                      |
+                 |                      |
+                 v                      v
++--------------------------------------------------------+
+| depend         |                      |                |
+|                |                      |                |
+|                |                      |                |
+|                v                      |                |
+|        +-----------------------+      |                |
+|        | fork  |               |      |                |
+|        |       |    get_phony  |      |                |
+|        |       |        +      |      |                |
+|        |       |        |      |      |                |
+|        |       |        |      |      |                |
+|        +-----------------------+      |                |
+|                |        |             |                |
+|                |        |             |                |
+|                |        |             |                |
+|                v        v             |                |
+|    +-----------+--+  +--+-----+       |                |
+|    |              |  |        |       |                |
+|    | batches[i-1] |  | phony  |       |                |
+|    |              |  |        |       |                |
+|    +--------------+  +--+-----+       |                |
+|                         |             |                |
+|                         |             |                |
+|                         v             v                |
+|                      +--+------------------+           |
+|                      |Join            |    |           |
+|                      |                |    |           |
+|                      |                |    |           |
+|                      |                v    |           |
+|                      +---------------------+           |
+|                                       |                |
+|                                       |                |
+|                                       |                |
+|                                       v                |
+|                                 +-----+------+         |
+|                                 |            |         |
+|                                 | batches[i] |         |
+|                                 |            |         |
+|                                 +------------+         |
+|                                                        |
++--------------------------------------------------------+
+我们把多个 batches 联合起来看看，这样就能看出来一个依赖链条。
+
+                  +----------------------------------------------------------+
+                  | depend                                                   |
+                  |                                                          |
+                  | +------------+                                           |
+ +-------------   | |fork        |     +-----------+                         |
+ |            |   | |            |     |           |                         |
+ |batches[i]  +----------------------> | batches[i]|                         |
+ |            |   | |            |     |           |                         |
+ +-------------   | |            |     +-----------+                         |
+                  | |            |             +-------+                     |
+                  | |            +-----------> | Join  |                     |
+                  | |            |             |       |                     |
+                  | +------------+             |       |                     |
+ +-------------   |                            |       |    +--------------+ |
+ |            |   |                            |       |    |              | |
+ |batches[i+1]+-------------------------------------------->+ batches[i+1] | |
+ |            |   |                            |       |    |              | |
+ +---------+---   |                            |       |    +--------------+ |
+           |      |                            +-------+                     |
+           |      |                                                          |
+           |      +----------------------------------------------------------+
+           |      +----------------------------------------------------------+
+           |      | depend                                                   |
+           |      |                                                          |
+           |      | +-------------+                                          |
+           |      | |fork         |     +------------+                       |
+           |      | |             |     |            |                       |
+           +--------------------------> |batches[i+1]|                       |
+                  | |             |     |            |                       |
+                  | |             |     +------------+                       |
+                  | |             |           +-------+                      |
+                  | |             +---------> |Join   |                      |
+                  | +-------------+           |       |                      |
++------------+    |                           |       |     +-------------+  |
+|            |    |                           |       |     |             |  |
+|batches[i+2]+--------------------------------------------> | batches[i+2]|  |
+|            |    |                           |       |     |             |  |
++----------+-+    |                           |       |     +-------------+  |
+           |      |                           +-------+                      |
+           |      |                                                          |
+           |      +----------------------------------------------------------+
+           |
+           |      +-----------------------------------------------------------+
+           |      | depend                                                    |
+           |      |                                                           |
+           +----------------------------->    ......                          |
+                  |                                                           |
+                  |                                                           |
+                  +-----------------------------------------------------------+
+这样，上图就是前向计算图，于是在后向传播之中，batches[i] 就 必须在 batches[i-1] 之前完成了。
+
+我们再结合论文的图来看看。
+本来示例代码中是：
+    depend(batches[i-1], batches[i])
+为了和论文中的图对应，我们修改为：
+    depend(batches[i], batches[i+1])
+depend 代码也变化为：
+    def depend(batches[i]: Batch, batches[i+1]: Batch) -> None:
+        batches[i][0], phony = fork(batches[i][0])
+        batches[i+1][0] = join(batches[i+1][0], phony)
+对应下图，就是在后向传播计算图之中 batches[i+1] 通过一个join, 一个fork，排在了 batches[i] 前面，就是下面大箭头所示，具体细化一下：
+    01-22
+    从这个图上，PyTorch 的 autograd 引擎不知道 Bi+1,j必须在 Bi,j之前运行，因此会打乱后向传播的时间流。
+    因此，虚拟依赖（前面图的虚线箭头）必须在前向传播中被显式绘制出来。
+
+    图上的实线箭头依据后向传播图的方向来绘制，这些联系是在前向传播中被构建的。
+    就是说，对于 Batchi来说，其反向传播顺序是固定的。就是上面一行内顺序是固定的，下面一行内顺序也是固定的。
+
+    但是，上下两行之间的顺序是不可知的，需要用虚线来保证，就是用 Join & Fork 来保证。
+
+
+0x03 正向传播依赖
+我们回头再来看正向依赖。因为正向传播的部分目的就是完成反向传播依赖，而目前反向传播只完成了行之间的依赖，列之间的依赖没有完成，我们现在补全。
+
+列之间的依赖就是设备之间的依赖，即前一个设备的输出是后一个设备的输入。
+
+3.1 分割模型
+首先还是需要回顾下如何切分模型，从 split_module 可以看到，
+GPipe 的 partitions 成员变量是 nn.ModuleList 类型。
+nn.ModuleList是一个容器，其储存不同 module，并自动将每个 module 的 parameters 添加到网络中。
+但是nn.ModuleList 并没有定义一个网络，而只是将不同的模块储存在一起，这些模块之间并没有什么先后顺序，网络的执行顺序是根据 forward 函数来决定的。
+
+yknote源码有改动！！！对应于def _split_module(modules: nn.Sequential) -> Tuple[List[nn.Sequential], List[torch.device]]:
+
+    def split_module(module: nn.Sequential,
+                     balance: Iterable[int],
+                     devices: List[torch.device],
+                     ) -> Tuple[List[nn.Sequential], List[int], List[torch.device]]:
+
+        balance = list(balance)
+
+        j = 0
+        partitions = []
+        layers: NamedModules = OrderedDict()
+
+        for name, layer in module.named_children(): # 遍历模型包含的层
+            layers[name] = layer # 把新的层加入到数组中
+
+            if len(layers) == balance[j]: # 如果数组大小等于balance[j]，就是达到了device j应该包含的层数
+                # Group buffered layers as a partition.
+                partition = nn.Sequential(layers) # 把层数组组合成一个sequential module
+
+                device = devices[j]
+                partition.to(device) # 把层放置到相关设备之上
+
+                partitions.append(partition) # 这个新module加入到分区数组中
+
+                # Prepare for the next partition.
+                layers.clear()
+                j += 1 # 去下一个device看看
+
+        partitions = cast(List[nn.Sequential], nn.ModuleList(partitions))
+        del devices[j:]
+
+        return partitions, balance, devices
+随之而来问题就是：partition内部可以用Sequential来进行一系列的前向操作，但是如何配置partitions 之间的执行顺序？
+
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+| Layer 1 +--->  Layer 2 +-----> Layer 3 +----->  Layer 4 +-----> Layer 5  +---> Layer 6  |
+|                                                                                         |
++-----------------------------------------+-----------------------------------------------+
+                                          |
+                                          |
+                                          |
+                                          v
++-----------------------------------------------------------------------------------------+
+| +--------------------+           +---------------------+         +--------------------+ |
+| |Partition 1         |           |Partition 2          |         |Partition 3         | |
+| |                    |   ???     |                     |         |                    | |
+| |      Layer 1       |     +----------> Layer 4        |   ???   |                    | |
+| |         +          |     |     |         +           |     +------->   Layer 6      | |
+| |         |          |     |     |         |           |     |   |                    | |
+| |         v          |     |     |         |           |     |   |                    | |
+| |      Layer 2       |     |     |         |           |     |   |                    | |
+| |         +          |     |     |         v           |     |   |                    | |
+| |         |          |     |     |      Layer 5 +------------+   |                    | |
+| |         v          |     |     |                     |         |                    | |
+| |      Layer 3  +----------+     |                     |         |                    | |
+| |                    |           |                     |         |                    | |
+| +--------------------+           +---------------------+         +--------------------+ |
+|                                                                                         |
++-----------------------------------------------------------------------------------------+
+
+
+
+3.2 建立依赖
+我们还是从论文中入手。假定我们有一个神经网络，其由一系列子网络构成。
+我们假定这些子网络是 f1,...,fn，其参数分别是 θ1,...,θn，则整个网络是：
+    01-23.png
+参数是 θ=(θ1,...,θn)，为了清楚起见，我们称 fj表示 f 的第 j 个分区，并假设分区的参数是相互不相交的。
+
+在训练网络时，基于梯度的方法（如随机梯度下降法）需要在给定小批量训练数据 x 和相应损失之后，计算网络的输出结果f(x)。
+以及损失相对于网络参数 θ 的梯度g。这两个阶段分别称为向前传播和向后传播。
+
+既然 f 由其 L 层 子模块 （fL,fL−1,...f1） 顺序组成，那么前向传播f(x)可以通过如下方式计算：让 x0=x（就是输入x），
+然后顺序应用每一个 partition，即 xj=fj(xj−1)，这里 j=1,...,L。就是 f(x)
+可以表示为 :f(x)=fL(fL−1(fL−2(...f1(x))))于是我们知道了，
+前向传播的顺序是由 f(x)=fL(fL−1(fL−2(...f1(x))))来确定的。
+    01-24.png ==此图是额外加的，就是上面文字+公式区的截图
+
+我们可以针对代码，进一步解析，看看如何实施partitions之间的顺序依赖。
+
+    def run(self) -> None:
+        """Runs pipeline parallelism.
+
+        It modifies the given batches in place.
+
+        """
+        batches = self.batches
+        partitions = self.partitions
+        devices = self.devices
+        skip_layout = self.skip_layout
+
+        m = len(batches)
+        n = len(partitions)
+
+        skip_trackers = [SkipTrackerThroughPotals(skip_layout) for _ in batches]
+
+        with spawn_workers(devices) as (in_queues, out_queues):
+            for schedule in clock_cycles(m, n): # 这里使用，给出了执行序列计划，后续按照这个来执行
+                self.fence(schedule, skip_trackers)
+                self.compute(schedule, skip_trackers, in_queues, out_queues)
+解析的目标是 for schedule in clock_cycles(m, n) 这个 for 循环，其：
+
+    针对clock_cycles产生的每一个运行计划：
+        利用 fence(schedule, skip_trackers) 构建后向传播依赖关系。
+        利用 compute(schedule, skip_trackers, in_queues, out_queues) 进行计算。
+
+现在我们完成了两步：
+    确定性时钟周期算法给定了前向传播的执行顺序，我们只要按照 clock_cycles 方法提供的计划一一运行即可。
+
+    fence 方法通过调用 join 和 fork，我们做到了在后向传播之中，batches[i] 就必须在 batches[i-1] 之前完成了，
+    即 Bi+1,j必须在 Bi,j之前运行。
+
+对于我们的图来说，第二步就是完成了下图的列依赖。
+    01-25.png
+我们的问题是：怎么通过这个 for 循环，做到 Bi,j+1必须在 Bi,j之前运行？，即怎么安排反向传播逐次运行？就是怎么完成行内的依赖？
+    01-26.png
+
+这就要通过 compute 的源码进行分析。重点说明的是：
+    batches[i] 这里是会变化的，比如 batches[0] 在经过 partitions[j] 的计算之后，会变成 batches[0][j]。
+
+    对于 compute 方法，关键就是在最底部的代码 batches[i] = batch。
+    就是把 第 j 个device 对 第 i 个 batch 的计算结果 赋值到 batches[i]，赋值之后，batches[i]就是 batches[i][j]，
+    这样，在下次计算时候，构建的就是 F[i, j+1], 下一次 fence 之中的 depend 操作，就是针对 batches[i, j+1]。
+
+    因此，在前向计算图上，通过这个赋值操作， batches[i, j+1] 就依赖 batches[i, j]，
+    所以反向计算时候，batches[i, j + 1] 就必须在 batches[i, j] 之前完成。
+
+    def compute(self,
+                schedule: List[Tuple[int, int]],
+                skip_trackers: List[SkipTrackerThroughPotals],
+                in_queues: List[InQueue],
+                out_queues: List[OutQueue],
+                ) -> None:
+        """Runs tasks with synchronization to copy streams."""
+        batches = self.batches
+        partitions = self.partitions
+        devices = self.devices
+        n = len(partitions)
+        streams = [current_stream(d) for d in devices]
+
+        for i, j in schedule: # 针对 schedule 之中的每一对 i,j
+            batch = batches[i]
+            partition = partitions[j]
+
+            # Synchronize with the copied input. ([1] in the diagram)
+
+            # Determine whether checkpointing or not.
+
+            if checkpoint:
+							# 忽略
+            else:
+                def compute(batch: Batch = batch,
+                            partition: nn.Sequential = partition,
+                            skip_tracker: SkipTrackerThroughPotals = skip_trackers[i],
+                            ) -> Batch:
+                    with use_skip_tracker(skip_tracker):
+                        return batch.call(partition) # 前向计算，计算以 partition为单位计算，partition内部的层是顺序计算，由 Sequential保证。
+
+                task = Task(streams[j], compute=compute, finalize=None)
+                del compute
+
+            # Compute tasks in parallel. ([2] in the diagram)
+            in_queues[j].put(task) # 让 worker计算
+
+        for i, j in schedule:
+            ok, payload = out_queues[j].get() # 获取 worker 的前向计算结果，就是 第 j 个device 对 第 i 个 batch 的计算结果
+
+            task, batch = cast(Tuple[Task, Batch], payload)
+
+            # The copy stream synchronizes to copy the output. ([3] in the
+            # diagram)
+
+            # Finalize tasks. If checkpointing is enabled, here the
+            # recomputation is scheduled at backpropagation. ([4] in the
+            # diagram)
+
+            # 第 j 个device 对 第 i 个 batch 的计算 就是 F[i,j]
+
+            batches[i] = batch # 这里是关键，就是把 第 j 个device 对 第 i 个 batch 的计算结果 赋值到 batches[i]，batches[i]就是 batches[i][j]，在下次计算时候，构建的就是 F[i,j+1], 下一次 fence 之中的 depend 操作，就是针对 batches[i,j+1]
+
+关于这个赋值操作，其对应的grad_fn 是 PermuteBackward，比如：
+
+    a = torch.tensor([2., 3.], requires_grad=True)
+    c = a
+    c.backward(gradient=external_grad)
+    print(c)
+具体是：
+
+    c = {Tensor: 2} tensor([2., 3.], requires_grad=True)
+      T = {Tensor: 2} tensor([2., 3.], grad_fn=<PermuteBackward>)
+现在，我们把下图进行升级。
+
+                 +-------------------------------------------------------------------+
+                 | depend                                                            |
+                 |                                                                   |
+                 | +---------------+                                                 |
+                 | |fork           |                                                 |
++-------------   | |               |     +-----------+                               |
+|            |   | |               |     |           |                               |
+|batches[i]  +-------------------------> | batches[i]|                               |
+|            |   | |               |     |           |                               |
++-------------   | |               |     +-----------+                               |
+                 | |               |                                                 |
+                 | |               |                                                 |
+                 | |               |     +--------+    +-------+                     |
+                 | |  get_phony +------> |        +--->+ Join  |                     |
+                 | |               |     | phony  |    |       |                     |
+                 | +---------------+     |        |    |       |                     |
+                 |                       +--------+    |       |                     |
+                 |                                     |       |                     |
++-------------   |                                     |       |    +--------------+ |
+|            |   |                                     |       |    |              | |
+|batches[i+1]+----------------------------------------------------->+ batches[i+1] | |
+|            |   |                                     |       |    |              | |
++-------------   |                                     |       |    +--------------+ |
+                 |                                     +-------+                     |
+                 |                                                                   |
+                 +-------------------------------------------------------------------+
+我们进行横向拓展，得到如下，即一个batch 被分成两个小批次: batches[i]，batches[i+1] ，它们在两个设备 partitions[j]，partitions[j + 1] 之上流水线，这样行和列都有反向传播的依赖。
+
+                                 F[i,j]                                                                            F[i,j+1]
+
+                    +------------------------------------------------+                            +-----------------------------------------------+
+                    | partitions[j]                                  |                            |  partitions[j+1]                              |
+                    |                                                |                            |                                               |
+                    | +--------------------+   +------------------+  |                            | +-------------------+   +------------------+  |
+                    | |fence               |   | compute          |  |                            | | fence             |   | compute          |  |
+                    | |                    |   |                  |  |                            | |                   |   |                  |  |
++--------------+    | |  +--------------+  |   |  +------------+  |  |     +-----------------+    | |   +-------------+ |   |  +------------+  |  |       +-----------------+
+|              |    | |  | depend       |  |   |  |forward     |  |  |     |                 |    | |   | depend      | |   |  |forward     |  |  |       |                 |
+|  batches[i]  +---------------------------------------------------------> | batches[i][j]   +----------------------------------------------------------> | batches[i][j+1] |
+|              |    | |  |              |  |   |  |            |  |  |     |                 |    | |   |             | |   |  |            |  |  |       |                 |
++--------------+    | |  |              |  |   |  |            |  |  |     +-----------------+    | |   |             | |   |  |            |  |  |       +-----------------+
+                    | |  |              |  |   |  +------------+  |  |                            | |   |             | |   |  +------------+  |  |
+                    | |  |              |  |   |                  |  |                            | |   |             | |   |                  |  |
++--------------+    | |  |              |  |   +------------------+  |     +-----------------+    | |   |             | |   +------------------+  |       +-------------------+
+|              |    | |  |              |  |                         |     |                 |    | |   |             | |                         |       |                   |
+|  batches[i+1]+---------------------------------------------------------> | batches[i+1][j] +----------------------------------------------------------> | batches[i+1][j+1] |
+|              |    | |  |              |  |                         |     |                 |    | |   |             | |                         |       |                   |
++--------------+    | |  +--------------+  |                         |     +-----------------+    | |   +-------------+ |                         |       +-------------------+
+                    | |                    |                         |                            | |                   |                         |
+                    | +--------------------+                         |                            | +-------------------+                         |
+                    +------------------------------------------------+                            +-----------------------------------------------+
+
+手机如下： 01-27
+
+
+0x04 总结
+下图 m=4,n=3。即，模型被分成3个子网络，小批次被分割成 4个微批次。F 和 B 的下标是 (m, n)。
+    01-28.png
+
+如上图，这里需要完成两种依赖：
+
+    行间依赖，就是 batch 之间的依赖，就是设备内的依赖。
+    从图上看是虚线，就是 F1,1必须在 F2,1之前完成，B2,1必须在B1,1之前完成。
+
+    列间依赖，就是 partitions（设备） 之间的依赖。
+    从图上看是实线，就是 F1,1必须在 F1,2之前完成，即第一个设备必须在第二个设备之前完成，而且第一个设备的输出是第二个设备的输入。
+
+如上图，我们需要完成行，列两方面的依赖。
+
+    行间依赖是用 Join & Fork 来保证，利用空张量完成了依赖关系的设定，确保 batches[i-1] 在 batches[i] 之后完成。
+
+    列间依赖是通过 batches[i] = batch 完成，利用 PermuteBackward 来完成了设备之间的依赖。
+
+至此，我们完成了执行顺序和依赖关系的设定，下一篇我们介绍如何并行处理。
+
+0x06 更正和补充
+6.1 缘起
+一位朋友 @剑柳吟风 对下面提出了疑问：
+列间依赖是通过 batches[i] = batch 完成，利用 PermuteBackward 来完成了设备之间的依赖。
+他认为：通过阅读源码，个人感觉应该是自定义的copy 和wait这两个autograd.Function确定了设备之间的依赖。
+我又仔细阅读了论文和源码，发现他是正确的，我之前的理解有误，特此更正如下。
+
+6.2 论文内容
+我们首先看看论文内容。
+
+6.2.1 设备级执行顺序
+论文内容如下：
+
+2.2. Device-wise Execution Order
+
+To summarize, in pipeline parallelism (with checkpointing) each device is assigned with a set of tasks with the prescribed order.
+Each device will execute the given tasks one-by-one as soon as cross-device dependencies are met.
+However, there is a missing component in this picture data tranfer between the devices.
+For illustration, the full execution order that device j must follow is shown in Figure 3.
+Here data transfer operations are explicitly denoted as ‘receive’ and ‘send’ for emphasis.
+
+翻译如下：
+
+总之，在流水线并行性（带有检查点）中，每个设备都被分配了一组具有指定顺序的任务。一旦满足跨设备依赖关系，每个设备将逐个执行给定的任务。
+但是，在之前图之中，设备之间的数据传输中缺少一个组件。为了便于说明，设备 j 必须遵循的完整执行顺序如图3 所示。
+为了更好的说明，在这里，数据传输操作被明确表示为“接收”和“发送”。
+
+具体图例如下：  01-29.png
+
+
+
+6.2.2 并行计算与拷贝
+论文之中另一部分则论述了Stream 的使用。
+
+Concurrent Copy and Computation: Streams
+
+PyTorch issues every device-bound kernels to the default stream, unless it is specified otherwise.
+Stream is a device- bound sequence of kernels that is executed in order.
+Kernels in the same stream are guaranteed to be executed in the pre- scribed order,
+but kernels in different streams can be inter- leaved, and even can overlap when possible.
+In particular, nearly all CUDA devices with compute capability 1.1 and higher support concurrent copy and execution:
+data transfer between devices can always overlap with kernel execution.
+
+因为公式拷贝问题，将这段与原文下一段翻译如下：
+
+PyTorch将每个绑定到设备的核发布到默认流，除非另有规定。流是按顺序执行这些绑定到设备的核序列。
+同一个流中的内核保证按预先指定的顺序执行，但不同流中的核可以相互交错，甚至可能重叠。
+特别是，几乎所有具有计算能力1.1及更高版本的CUDA设备都支持并发复制和执行：设备之间的数据传输总是与内核执行重叠。
+
+torchgpipe将每个拷贝核注册到非默认流中，同时将计算内核保留在默认流中。这允许设备 j 可以并行处理，即 Fi,j可以同 "发送到设备 j+1
+的 xji−1" 以及/或者 "从设备 j−1接受 xj−1i" 这两个操作并行。此外，每个设备对每个微批次使用不同的流。
+由于不同的微批次之间没有真正的依赖关系，因此流的这种使用是安全的，这允许尽可能快地进行拷贝。
+01-30.png ==yknote上面的上下标的截图！
+
+6.2.3 推论
+可见，数据传输是通过 Stream 来完成，即构成了实际上的设备间依赖关系，又可以达到数据和拷贝并行的目的。
+
+6.3 实现
+我们接下来看看具体实现，依次验证我们的推论。
+....
+
+
+6.4 对比图
+论文之中还有一组对比，特此翻译摘录：
+    01-31
+我们还可视化了每个GPU的时间线，以帮助理解每个组件的角色，如图所示。每幅图片的规划概述如下。
+
+(a) 通过确定性时钟周期，所有核在前向传播期间以正确的顺序发出。时间线的左侧部分对其进行了说明。
+然而，因为没有明确对计算图中依赖关系的明确编码，autograd引擎将以无法控制的顺序处理微批次，因此时间线将混乱不堪。
+
+(b) 对于后向依赖，内核目前在向后传播中以正确的、确定的顺序发布。
+
+(c) 通过使用非默认拷贝流，拷贝和计算现在是并发的，如重叠的蓝色和红色条所示。
+
+(d) Portal移除了因将跳跃张量（skipping tensor）传输到其间的所有设备而导致的不必要副本。
+与(c) 相比，红色条的长度减少。
+
+6.5 总结
+    01-32
+
+GPipe需要完成两种依赖：
+
+    行间依赖，就是 batch 之间的依赖，就是设备内的依赖。
+    从图上看是虚线，就是 F1,1必须在 F2,1之前完成，B2,1必须在B1,1之前完成。
+
+    列间依赖，就是 partitions（设备） 之间的依赖。
+    从图上看是实线，就是 F1,1必须在 F1,2之前完成，即第一个设备必须在第二个设备之前完成，而且第一个设备的输出是第二个设备的输入。
+
+行间依赖对应了论文中的：
+
+Pipeline parallelism’s strategy is to assign tasks with re- spect to the partition index j so that jth partition entirely lies in the jth device.
+In addition to this, it is enforced that Fi,j must be completed before executing Fi+1,j and Bi,j must be completed before executing Bi−1,j .
+
+如上图，我们需要完成行，列两方面的依赖。
+
+    行间依赖是用 Join & Fork 来保证，利用空张量完成了依赖关系的设定，确保 batches[i-1] 在 batches[i] 之后完成。
+    PermuteBackward 协助完成了这个依赖操作。
+
+    列间依赖是通过 Copy & Wait 两个派生的算子来完成了设备之间的依赖。
+
+0xFF 参考
+Markdown公式用法大全
+
+markdown中公式编辑教程
+
+https://docs.nvidia.com/cuda/cuda-runtime-api/stream-sync-behavior.html#stream-sync-behavior
+
+CUDA学习：基础知识小结
+
+CUDA随笔之Stream的使用
+
+NVIDIA解决方案架构师深度解析大规模参数语言模型Megatron-BERT
+
+Accelerating Wide & Deep Recommender Inference on GPUs
+
+HugeCTR: High-Performance Click-Through Rate Estimation Training
+
+https://discuss.pytorch.org/t/how-to-prefetch-data-when-processing-with-gpu/548
+
+https://github.com/NVIDIA/apex/
+
+https://github.com/justheuristic/prefetch_generator
+
+https://pytorch.org/tutorials/intermediate/model_parallel_turotial.html
+
+https://pytorch.org/docs/stable/autograd.html
+
+https://pytorch.org/docs/notes/cuda.html
+
+https://zhuanlan.zhihu.com/p/61765561
+
+https://pytorch.apachen.org/docs/1.7/64.html
+
+https://zhidx.com/p/217999.html

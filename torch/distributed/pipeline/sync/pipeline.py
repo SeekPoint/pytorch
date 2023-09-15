@@ -45,7 +45,8 @@ def _depend(fork_from: Batch, join_to: Batch) -> None:
     fork_from[0], phony = fork(fork_from[0])
     join_to[0] = join(join_to[0], phony)
 
-
+# 6.3.4 封装
+# 以下函数对算子进行了封装。
 def _copy(batch: Batch, prev_stream: AbstractStream, next_stream: AbstractStream) -> None:
     batch[:] = Copy.apply(prev_stream, next_stream, *batch)
     # Gradients are only supported for float Tensors.
@@ -117,11 +118,15 @@ class Pipeline:
         skip_trackers = [SkipTrackerThroughPotals(skip_layout) for _ in batches]
 
         # 这里是按照算法有次序的运行多个fence, compute  , yknote代码有不同
-        for schedule in _clock_cycles(m, n):
+        for schedule in _clock_cycles(m, n):  # 这里使用，给出了执行序列计划，后续按照这个来执行
             self.fence(batches, schedule, skip_trackers)
             # 把队列传递进去
             self.compute(batches, schedule, skip_trackers)
 
+# 6.3.5 建立依赖关系
+# fence 简化代码如下，其建立了图例之中的行，列 两种依赖关系。
+# 2.3 使用
+# 在 Pipeline 之中我们可以看到具体的使用方法，fence 方法（省略部分代码）利用 depend 来构建后向传播的依赖关系，确保 batches[i-1] 在 batches[i] 之后完成。
     def fence(
         self, batches: List[Batch], schedule: List[Tuple[int, int]], skip_trackers: List[SkipTrackerThroughPotals],
     ) -> None:
@@ -135,17 +140,20 @@ class Pipeline:
             # Ensure that batches[i-1] is executed after batches[i] in
             # backpropagation by an explicit dependency.
             if i != 0 and j != 0:
-                _depend(batches[i - 1], batches[i])
+                _depend(batches[i - 1], batches[i]) # 在这里建立了后向传播依赖关系
 
+            # 拿到dst设备的拷贝流
             next_stream = copy_streams[j][i]
 
+            # 残差连接相关设置
             for prev_j, ns, name in skip_layout.copy_policy(j):
                 prev_stream = copy_streams[prev_j][i]
                 skip_trackers[i].copy(batches[i], prev_stream, next_stream, ns, name)
 
+            # 建立跨设备依赖关系，指定了 device[j-1] 的输出是 device[i] 的输入
             if j != 0:
-                prev_stream = copy_streams[j - 1][i]
-                _copy(batches[i], prev_stream, next_stream)
+                prev_stream = copy_streams[j - 1][i]  # 拿到src设备的拷贝流
+                _copy(batches[i], prev_stream, next_stream)   #建立跨设备依赖关系
 '''
 2.5.2 剖析
 Torchgpipe 使用了 Python 的 Queue 数据结构。
@@ -210,7 +218,7 @@ Linux 管道是一种最基本的IPC机制，作用于有血缘关系的进程�
         # ┌─────┸──────┐   (fence)
         # │    Copy    │
         # └─────┰──────┘
-        for i, j in schedule:   # 并行执行
+        for i, j in schedule:   # 并行执行  # 针对 schedule 之中的每一对 i,j
             batch = batches[i]
             partition = partitions[j]
 
@@ -246,17 +254,19 @@ Linux 管道是一种最基本的IPC机制，作用于有血缘关系的进程�
                     part_id: int = j,
                 ) -> Batch:
                     with use_skip_tracker(skip_tracker), record_function("chunk%d-part%d" % (chunk_id, part_id)):
-                        return batch.call(partition)
+                        return batch.call(partition)  # 前向计算，计算以 partition为单位计算，partition内部的层是顺序计算，由 Sequential保证
                 # 生成一个Task
                 task = Task(streams[j], compute=compute, finalize=None)
                 del compute
 
             # Compute tasks in parallel. ([2] in the diagram)
             # 给第j个partition放入一个新的task。因为 i, j 已经在clock算法中设定了，所以前向传播就是按照这个来走的。
-            self.in_queues[j].put(task)
+            self.in_queues[j].put(task)  # 让 worker计算
 
         for i, j in schedule:
-            ok, payload = self.out_queues[j].get()  # 取出第j个partition的运行结果
+            # 取出第j个partition的运行结果
+            # 获取 worker 的前向计算结果，就是 第 j 个device 对 第 i 个 batch 的计算结果
+            ok, payload = self.out_queues[j].get()
 
             # Hold the first exception.
             if exc_info is not None:
@@ -270,7 +280,7 @@ Linux 管道是一种最基本的IPC机制，作用于有血缘关系的进程�
             # The copy stream synchronizes to copy the output. ([3] in the
             # diagram)
             if j != n - 1:
-                _wait(batch, streams[j], copy_streams[j][i])
+                _wait(batch, streams[j], copy_streams[j][i])  # 这里保证了同步完成
 
             # Finalize tasks. If checkpointing is enabled, here the
             # recomputation is scheduled at backpropagation. ([4] in the
@@ -278,6 +288,9 @@ Linux 管道是一种最基本的IPC机制，作用于有血缘关系的进程�
             with use_device(devices[j]):
                 task.finalize(batch)
 
+            # 第 j 个device 对 第 i 个 batch 的计算 就是 F[i,j]
+            ## 这里是关键，就是把 第 j 个device 对 第 i 个 batch 的计算结果 赋值到 batches[i]，batches[i]就是 batches[i][j]，
+            # 在下次计算时候，构建的就是 F[i,j+1], 下一次 fence 之中的 depend 操作，就是针对 batches[i,j+1]
             batches[i] = batch
 
         # Fail at the first exception.

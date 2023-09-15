@@ -108,7 +108,9 @@ def compute(batch: Batch = batch,
 
 ....
 
-所以我们看看 split_module 函数，其主要逻辑如下： yknote源码有改动！！！
+所以我们看看 split_module 函数，
+其主要逻辑如下：
+yknote源码有改动！！！对应于def _split_module(modules: nn.Sequential) -> Tuple[List[nn.Sequential], List[torch.device]]:
 
 遍历模型包含的层
     把新的层加入到数组layers中
