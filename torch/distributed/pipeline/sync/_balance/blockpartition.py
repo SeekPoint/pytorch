@@ -14,7 +14,34 @@ from typing import Iterator, List, Tuple
 
 __all__ = ["solve"]
 
+'''
+1.5 分割算法
+得到每层的计算时间或者内存大小之后，会通过如下代码来进行具体分割。
+    times = profile_times(module, sample, timeout, torch.device(device))
+    return balance_cost(times, partitions)
+    
+具体 balance_cost 只是一个封装而已，算法还是 blockpartition.solve。
+    def balance_cost(cost: List[int], partitions: int) -> List[int]:
+        partitioned = blockpartition.solve(cost, partitions)
+        return [len(p) for p in partitioned]
+        
+从其注释可知，blockpartition.solve 实现了这篇论文的算法。
+Implements "Block Partitions of Sequences" by Imre Bárány et al.Paper: https://arxiv.org/pdf/1308.2452.pdf
+这是一篇数学论文，其算法伪代码如下（与后续实现中注释基本一一对应）。
+    01-04.png
+该论文是纯粹的数学论证，我们不去研究其内部机制，只是看看其运行结果。
 
+我们回忆一下，这里支持的模型是顺序模型，所以无论时间还是内存大小，都是一个list。solve的作用就是把这个list尽量平均分配成若干组。
+假设模型有6层，每层的运行时间如下，需要分配到两个device之上，那么应该如何分割呢？
+    blockpartition.solve([1, 2, 3, 4, 5, 6], partitions=2) # 就是第一层运行时间是1个单位，第二层运行时间是2个单位，依次类推。
+    结果是 [[1, 2, 3, 4], [5, 6]]，可以看到，这个6个层被比较均匀的按照运行时间分成了两个partition
+如果分成三个device，则：
+    solve([1, 2, 3, 4, 5, 6], partitions=3)
+    结果是 [[1, 2, 3], [4, 5], [6]]，可以看到，这个6个层被比较均匀的按照运行时间分成了三个partition
+然后 balance_cost 会获得每一个 partition 的具体层数，得到balance的最终是：
+    [3,2,1]
+分区算法具体代码如下，有兴趣的朋友可以结合论文仔细研究。
+'''
 def solve(sequence: List[int], partitions: int = 1) -> List[List[int]]:
     """Splits a sequence into several partitions to minimize variance for each
     partition.

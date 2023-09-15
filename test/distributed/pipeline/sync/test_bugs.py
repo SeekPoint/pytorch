@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from torch.distributed.pipeline.sync import Pipe
 
-
+# 在torchgpipe代码中，经常可以见到 detach 的使用，这个从注释可以看出来，是因为 PyTorch 的一个bug 而采取的workround。
 def test_python_autograd_function(setup_rpc):
     # A Python autograd function might fail with this error:
     #

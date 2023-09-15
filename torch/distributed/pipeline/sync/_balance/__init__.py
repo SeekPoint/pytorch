@@ -40,7 +40,16 @@ def balance_cost(cost: List[int], partitions: int) -> List[int]:
     partitioned = blockpartition.solve(cost, partitions)
     return [len(p) for p in partitioned]
 
-
+# 1.3 据计算时间来平衡
+# balance_by_time 方法的作用就是依据运行时间来平衡，其中参数如下：
+#
+#     partitions ：分区数目
+#
+#     module : 需要分区的顺序模型
+#
+#     sample ：给定 batch size 的样本
+#
+# 其实就是调用 profile_times 依据sample来得到运行时间，然后进行分区。
 def balance_by_time(
     partitions: int,
     module: nn.Sequential,
@@ -83,7 +92,16 @@ def balance_by_time(
     times = profile_times(module, sample, timeout, torch.device(device))
     return balance_cost(times, partitions)
 
-
+# 1.4 据内存大小来平衡
+# balance_by_size 方法的作用就是依据运行时内存大小来平衡，其中参数如下：
+#     partitions ：分区数目，从示例看，可以认为是设备数。
+#     module : 需要分区的顺序模型
+#     sample ：给定 batch size 的样本
+# 其实就是调用 profile_sizes 依据sample来得到运行时内存大小，然后进行分区。
+# 在训练期间，参数所需的内存取决于使用哪个优化器。优化器可以为每个参数使用缓冲区来在其内部跟踪优化统计信息，例如SGD中的动量缓冲区。
+# 为了获得更可靠的基于大小的平衡，用户应该为优化器指定相应的“param_scale”。
+# 默认的“param_scale”是2，而不是1，这是因为梯度累积（gradient accumulation）是每个优化器所必需的。
+# 下面注释之中也给出了一些参考取值。
 def balance_by_size(
     partitions: int,
     module: nn.Sequential,

@@ -38,7 +38,9 @@ else:
     Module = nn.Module
     NamedModules = OrderedDict
 
-
+# 0x02 模型划分
+# 2.1 调用
+# 既然得到了 profile 的结果，下面就是对模型的各个层进行分割。如何分割可以参见下面注释中的使用示例，把balance 作为参数传递给 GPipe构造函数。
 def _recommend_auto_balance(message: str) -> str:
     """Expands a message with recommendation to :mod:`torchpipe.balance`."""
     return f"""{message}
@@ -230,7 +232,8 @@ class Pipe(Module):
     .. warning::
         :class:`Pipe` is experimental and subject to change.
     """
-
+    #2.2 GPipe构建
+    # Gpipe 的 __init__中可以看到，使用了 split_module 函数进行分割：
     def __init__(
         self,
         module: nn.Sequential,
@@ -266,6 +269,7 @@ class Pipe(Module):
         if deferred_batch_norm:
             module = DeferredBatchNorm.convert_deferred_batch_norm(module, chunks)
 
+        # 对模型进行切分
         self.partitions, self.devices = _split_module(module)
         _verify_splitting(module, self.partitions, self.devices)
 

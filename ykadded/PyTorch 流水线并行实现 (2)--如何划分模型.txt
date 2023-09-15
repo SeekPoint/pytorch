@@ -1,0 +1,333 @@
+PyTorch 流水线并行实现 (2)--如何划分模型
+https://www.cnblogs.com/rossiXYZ/p/15330957.html
+
+
+0x00 摘要
+上一篇文章我们介绍了 PyTorch 流水线并行的基本知识，本文我们介绍其自动平衡机制和模型分割。
+
+流水线并行其他文章链接如下:
+
+[源码解析] 深度学习流水线并行Gpipe(1)---流水线基本实现
+
+[源码解析] 深度学习流水线并行GPipe (2) ----- 梯度累积
+
+[源码解析] 深度学习流水线并行 GPipe(3) ----重计算
+
+[源码解析] 深度学习流水线并行之PipeDream(1)--- Profile阶段
+
+[源码解析] 深度学习流水线并行 PipeDream(2)--- 计算分区
+
+[源码解析] 深度学习流水线并行 PipeDream(3)--- 转换模型
+
+[源码解析] 深度学习流水线并行 PipeDream(4)--- 运行时引擎
+
+[源码解析] 深度学习流水线并行 PipeDream(5)--- 通信模块
+
+[源码解析] 深度学习流水线并行 PipeDream(6)--- 1F1B策略
+
+[源码解析] PyTorch 流水线并行实现 (1)--基础知识
+
+本文图来自论文和github源码。
+
+0x01 问题
+流水线并行首先面对的问题就是：
+
+如何把一个大模型切分成若干小模型？切分的算法是什么？
+如何把这些小模型分配到多个设备之上？分配的算法是什么？
+如何做到整体性能最优或者近似最优？衡量标准是什么？
+比如一个拥有 6 个层的大模型，如何切分成三个小模型？
+
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+| Layer 1 +--->  Layer 2 +-----> Layer 3 +----->  Layer 4 +-----> Layer 5  +---> Layer 6  |
+|                                                                                         |
++------------------------------------------+----------------------------------------------+
+                                           |
+                                           |
+                                           | ? ? ? ? ?
+                                           |
+                                           |
+                                           v
+
+  +--------------------+         +---------------------+      +--------------------+
+  |Device 1            |         |Device 2             |      |Device 3            |
+  |                    |         |                     |      |                    |
+  |      Layer 1       |    +---------> Layer 4        |      |                    |
+  |         +          |    |    |         +           |  +------->   Layer 6      |
+  |         |          |    |    |         |           |  |   |                    |
+  |         v          |    |    |         |           |  |   |                    |
+  |      Layer 2       |    |    |         |           |  |   |                    |
+  |         +          |    |    |         v           |  |   |                    |
+  |         |          |    |    |      Layer 5 +---------+   |                    |
+  |         v          |    |    |                     |      |                    |
+  |      Layer 3  +---------+    |                     |      |                    |
+  |                    |         |                     |      |                    |
+  +--------------------+         +---------------------+      +--------------------+
+接下来，我们就看看 torchgpipe 是如何解决这些问题的。
+
+0x01 自动平衡
+torchgpipe提供了子模块 torchgpipe.balance 来计算得到分区，目的是让两两分区（pairwise）之间的资源差别尽量小。
+资源占用情况是通过分析（profile）来计算。
+
+1.1 Automatic Balancing
+切分模型会影响GPU的利用率，比如其中计算量较大的层会减慢下游的速度，所以需要找到一个模型的最佳平衡点。
+但是，确定模型的最佳平衡点是很难的，特别是，如果用户仍在设计模型阶段，则模型体系结构可能会随着时间的推移而改变。
+在这种情况下，TorchPipe 强烈建议使用 torchgpipe.balance来自动平衡。
+这不会给用户提供最佳的平衡，但这是一个足够好的平衡。
+请注意，这个功能是由torchgpipe提供的，而不是来自Huang等人的GPipe 原始论文。
+torchgpipe提供了两个平衡工具，两者都基于每层的profile结果来使用，用户可以根据需要选择平衡工具。
+
+    ~torchgpipe.balance.balance by_time：跟踪每层的运行时间。
+    ~torchgpipe.balance.balance by_size：检测每层的CUDA内存使用情况。
+具体使用方式如下，用户需要向模型中输入一个样本输入。
+
+   from torchgpipe import GPipe
+   from torchgpipe.balance import balance_by_time
+
+   partitions = torch.cuda.device_count()
+   sample = torch.rand(128, 3, 224, 224) # 用户需要向模型中输入一个样本输入
+   balance = balance_by_time(partitions, model, sample)
+
+   model = GPipe(model, balance, chunks=8)
+1.2 基础函数/函数
+1.2.1 Batch
+Batch 是一个基础类，位于 torchgpipe/microbatch.py，其作用是把 tensor 或者 tensors 封装起来做统一处理。
+Batch 把张量保存在自己的 value 成员变量之中。在调用 call 方法时候，就把传入的方法应用到 value 张量之上。
+
+比如后面我们会讲到的 Pipeline.compute 方法之中会有如下，就是把 partition 应用到 batch 内的张量之上：
+
+def compute(batch: Batch = batch,
+                            partition: nn.Sequential = partition,
+                            skip_tracker: SkipTrackerThroughPotals = skip_trackers[i],
+                            ) -> Batch:
+  with use_skip_tracker(skip_tracker):
+  	return batch.call(partition)
+
+	task = Task(streams[j], compute=compute, finalize=None)
+
+
+....
+
+所以我们看看 split_module 函数，其主要逻辑如下： yknote源码有改动！！！
+
+遍历模型包含的层
+    把新的层加入到数组layers中
+    如果数组大小等于balance[j]，就是达到了device j应该包含的层数，则：
+        把分区数组构建成一个sequential module，得到变量 partition。
+
+        利用 partition.to(device) 把partition放置到相关设备之上，这就是前文提到的，~torchgpipe.GPipe使用CUDA进行训练。
+        用户不需要自己将模块移动到GPU，因为~torchgpipe.GPipe自动把每个分区移动到不同的设备上。
+
+        把这个partition加入到分区数组中
+
+        然后去下一个device看看
+最后返回 partitions, balance, devices。
+def split_module(module: nn.Sequential,
+                 balance: Iterable[int],
+                 devices: List[torch.device],
+                 ) -> Tuple[List[nn.Sequential], List[int], List[torch.device]]:
+    """Splits a module into multiple partitions.
+
+    Returns:
+        A tuple of (partitions, balance, devices).
+
+        Partitions are represented as a :class:`~torch.nn.ModuleList` whose
+        item is a partition. All layers in a partition are placed in the
+        same device.
+
+    Raises:
+        BalanceError:
+            wrong balance
+        IndexError:
+            the number of devices is fewer than the number of partitions.
+
+    """
+    balance = list(balance)
+
+    j = 0
+    partitions = []
+    layers: NamedModules = OrderedDict()
+
+    for name, layer in module.named_children(): # 遍历模型包含的层
+        layers[name] = layer # 把新的层加入到数组中
+
+        if len(layers) == balance[j]: # 如果数组大小等于balance[j]，就是达到了device j应该包含的层数
+            # Group buffered layers as a partition.
+            partition = nn.Sequential(layers) # 把层数组组合成一个sequential module
+
+            device = devices[j]
+            partition.to(device) # 把层放置到相关设备之上
+
+            partitions.append(partition) # 这个新module加入到分区数组中
+
+            # Prepare for the next partition.
+            layers.clear()
+            j += 1 # 去下一个device看看
+
+    partitions = cast(List[nn.Sequential], nn.ModuleList(partitions))
+    del devices[j:]
+
+    return partitions, balance, devices
+结合上面例子，balance 如下：
+    [3,2,1]
+所以前三个层 [1, 2, 3] 组合成一个module，中间两个层 [4, 5] 组合成一个 module，最后层 [6] 是一个module。
+
+最后分区数组为：
+    [ module([1, 2, 3]),  module([4, 5]),  module([6])]
+2.3 示例
+我们再具体打印输出看看，模型包含了6个层，分为 3 个partitions，分区内的层数分别是：3个，2个，1个。
+
+    a = nn.Linear(1, 1)
+    b = nn.Linear(1, 1)
+    c = nn.Linear(1, 1)
+    d = nn.Linear(1, 1)
+    e = nn.Linear(1, 1)
+    f = nn.Linear(1, 1)
+
+    balance = [3,2,1] # 分成了3个partition，第一个partition包括3个层，第2个包括2个层，第3个包括1个层。
+    model = nn.Sequential(a, b, c, d, e, f)
+    print(model)
+    model = GPipe(model, balance, devices=['gpu', 'gpu','gpu'])
+    print(model)
+结果如下，可以看到原模型被分成3个partition，每个 partition 都是一个Sequential。
+
+    Sequential(
+      (0): Linear(in_features=1, out_features=1, bias=True)
+      (1): Linear(in_features=1, out_features=1, bias=True)
+      (2): Linear(in_features=1, out_features=1, bias=True)
+      (3): Linear(in_features=1, out_features=1, bias=True)
+      (4): Linear(in_features=1, out_features=1, bias=True)
+      (5): Linear(in_features=1, out_features=1, bias=True)
+    )
+
+    GPipe(
+      (partitions): ModuleList(
+        (0): Sequential(
+          (0): Linear(in_features=1, out_features=1, bias=True)
+          (1): Linear(in_features=1, out_features=1, bias=True)
+          (2): Linear(in_features=1, out_features=1, bias=True)
+        )
+        (1): Sequential(
+          (3): Linear(in_features=1, out_features=1, bias=True)
+          (4): Linear(in_features=1, out_features=1, bias=True)
+        )
+        (2): Sequential(
+          (5): Linear(in_features=1, out_features=1, bias=True)
+        )
+      )
+    )
+运行时变量如下：
+
+    model = {GPipe: 6}
+     balance = {list: 3} [3, 2, 1]
+     checkpoint = {str} 'except_last'
+     chunks = {int} 1
+     devices = {list: 3}
+      0 = {device} gpu
+      1 = {device} gpu
+      2 = {device} gpu
+     partitions = {ModuleList: 3}
+       _modules =
+       '0' = {Sequential: 3}
+            Sequential(
+            (0): Linear(in_features=1, out_features=1, bias=True)
+            (1): Linear(in_features=1, out_features=1, bias=True)
+            (2): Linear(in_features=1, out_features=1, bias=True))
+       '1' = {Sequential: 2}
+            Sequential(
+            (3): Linear(in_features=1, out_features=1, bias=True)
+            (4): Linear(in_features=1, out_features=1, bias=True))
+       '2' = {Sequential: 1}
+            Sequential(
+            (5): Linear(in_features=1, out_features=1, bias=True))
+需要注意一点：GPipe 的 partitions 成员变量是 nn.ModuleList 类型。
+nn.ModuleList是一个容器，其储存不同 module，并自动将每个 module 的 parameters 添加到网络中。
+但是nn.ModuleList 并没有定义一个网络，而只是将不同的模块储存在一起，这些模块之间并没有什么先后顺序，网络的执行顺序是根据 forward 函数来决定的。
+
+随之而来问题就是：partition内部可以用Sequential来进行一系列的前向操作，但是如何配置partitions 之间的执行顺序？这个我们会在后续文章中分析。
+
+2.4 总结
+最后总结一下，流程是从上至下。
+    使用 balance_by_size 或者 balance_by_time 来先运行系统，得到 profile 结果。
+    然后使用 split_module 来对模型进行分割。
+    最后就得到了一个相对平衡的分区结果。
+    把这些分区分配到不同的设备之上。
+具体如下图：
+
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+| Layer 1 +--->  Layer 2 +-----> Layer 3 +----->  Layer 4 +-----> Layer 5  +---> Layer 6  |
+|                                                                                         |
++--------------------------+---------------------------+----------------------------------+
+                           |                           |
+           balance_by_size | 1                       1 |  balance_by_time
+                           |                           |
+                           v                           v
+                [[1, 2, 3], [4, 5], [6]]         [[1, 2, 3, 4], [5, 6]]
+                           +                           +
+                           |                           |
+                           +-----------+      +--------+
+                                       |      |
+                                       v      v
+                                 2  split_module
+                                          +
+                                          |
+                                          |
+   3                                      v
+ +------------------------------------------------------------------------------------+
+ | +--------------------+         +---------------------+      +--------------------+ |
+ | |Partition 1         |         |Partition 2          |      |Partition 3         | |
+ | |                    |         |                     |      |                    | |
+ | |      Layer 1       |    +---------> Layer 4        |      |                    | |
+ | |         +          |    |    |         +           |  +------->   Layer 6      | |
+ | |         |          |    |    |         |           |  |   |                    | |
+ | |         v          |    |    |         |           |  |   |                    | |
+ | |      Layer 2       |    |    |         |           |  |   |                    | |
+ | |         +          |    |    |         v           |  |   |                    | |
+ | |         |          |    |    |      Layer 5 +---------+   |                    | |
+ | |         v          |    |    |                     |      |                    | |
+ | |      Layer 3  +---------+    |                     |      |                    | |
+ | |                    |         |                     |      |                    | |
+ | +---------+----------+         +---------+-----------+      +-----------+--------+ |
+ |           |                              |                              |          |
+ +------------------------------------------------------------------------------------+
+             |                              |                              |
+           4 |                            4 |                            4 |
+             v                              v                              v
+   +---------+----------+         +---------+-----------+       +----------+---------+
+   |                    |         |                     |       |                    |
+   |    Device 1        |         |     Device 2        |       |     Device 3       |
+   |                    |         |                     |       |                    |
+   +--------------------+         +---------------------+       +--------------------+
+至此，我们分析了自动平衡机制，下一篇我们看看如何切分数据和一些运行时机制。
+
+0xFF 参考
+https://docs.nvidia.com/cuda/cuda-runtime-api/stream-sync-behavior.html#stream-sync-behavior
+
+CUDA学习：基础知识小结
+
+CUDA随笔之Stream的使用
+
+NVIDIA解决方案架构师深度解析大规模参数语言模型Megatron-BERT
+
+Accelerating Wide & Deep Recommender Inference on GPUs
+
+HugeCTR: High-Performance Click-Through Rate Estimation Training
+
+https://discuss.pytorch.org/t/how-to-prefetch-data-when-processing-with-gpu/548
+
+https://github.com/NVIDIA/apex/
+
+https://github.com/justheuristic/prefetch_generator
+
+https://pytorch.org/tutorials/intermediate/model_parallel_turotial.html
+
+https://pytorch.org/docs/stable/autograd.html
+
+https://pytorch.org/docs/notes/cuda.html
+
+https://zhuanlan.zhihu.com/p/61765561
+
+https://pytorch.apachen.org/docs/1.7/64.html
+
+https://zhidx.com/p/217999.html

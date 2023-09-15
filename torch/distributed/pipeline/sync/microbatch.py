@@ -19,7 +19,9 @@ Tensors = Sequence[Tensor]
 TensorOrTensors = Union[Tensor, Tensors]
 Function = Callable[[TensorOrTensors], TensorOrTensors]
 
+#具体 Batch 定义如下：
 
+#这里的 Batch 类就是对张量或者张量数组进行封装，可以统一使用其方法。
 class Batch:
     """An abstraction of an atomic tensor or a tuple of tensors. This
     eliminates every boilerplate code to classify an atomic tensor or a tuple
@@ -63,11 +65,11 @@ class Batch:
         """Retrieves the underlying tensor or tensors regardless of type."""
         return self.value
 
-    def call(self, function: Function) -> "Batch":
+    def call(self, function: Function) -> "Batch":  # 这里是关键方法
         """Calls a function by the underlying tensor or tensors. It also wraps
         the output with :class:`Batch`.
         """
-        return Batch(function(self.value))
+        return Batch(function(self.value))   # 调用模型的forward
 
     def __repr__(self) -> str:
         return f"Batch[atomic={self.atomic!r}]({self.value!r})"
