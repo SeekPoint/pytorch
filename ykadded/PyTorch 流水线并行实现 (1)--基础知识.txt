@@ -4,6 +4,30 @@ TBD：
 https://www.cnblogs.com/rossixyz/p/15318574.html
 [源码解析] PyTorch 流水线并行实现 (1)--基础知识
 
+目录
+[源码解析] PyTorch 流水线并行实现 (1)--基础知识
+0x00 摘要
+0x01 历史
+1.1 GPipe
+1.2 torchgpipe
+1.3 fairscale
+1.4 PyTorch
+1.5 基础版本
+0x02 基础知识
+2.1 流水线并行
+2.2 Checkpointing
+2.2.1 基本概念
+2.2.2 使用
+2.2.3 实现概述
+2.3 微批次的数目
+2.4 检查重计算
+0x03 使用
+3.1 示例
+3.2 输入输出
+3.3 嵌套序列（Nested Sequentials）
+3.4 典型模型并行
+0xFF 参考
+
 0x00 摘要
 本系列开始介绍PyTorch的流水线并行实现。实质上，PyTorch就是 GPipe 的PyTorch版本。
 这些开源软件在互相借鉴思路，互相学习，从 PyTorch 的源码注释中，可以见到我们之前介绍的部分框架/库的引用或者论文链接。

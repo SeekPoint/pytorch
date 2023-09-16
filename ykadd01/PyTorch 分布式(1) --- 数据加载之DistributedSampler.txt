@@ -1,6 +1,31 @@
 PyTorch 分布式(1) --- 数据加载之DistributedSampler
 https://www.cnblogs.com/rossiXYZ/p/15142807.html
 
+目录
+[源码解析] PyTorch 分布式(1) --- 数据加载之DistributedSampler
+0x00 摘要
+0x01 数据加载
+1.1 加速途径
+1.2 并行处理
+1.3 流水线
+1.4 GPU
+0x02 PyTorch分布式加载
+2.1 DDP
+2.2 分布式加载
+0x03 DistributedSampler
+3.1 初始化
+3.2 迭代方法
+3.3 shuffle数据集
+3.3.1 使用
+3.3.2 python
+3.3.3 C++
+3.3.4 小结
+3.4 Sampler in C++
+3.4.1 定义
+3.4.2 实现
+3.4.2.1 DistributedRandomSampler
+3.4.2.2 DistributedSequentialSampler
+0xFF 参考
 
 0x00 摘要
 为了更好的介绍参数服务器Paracel的数据加载，我们临时插入两篇PyTorch的数据加载（因为字数太长，所以拆成两篇），主要是从分布式的角度进行切入。本文只算是开胃甜点，后续会有专门系列分析PyTorch分布式。

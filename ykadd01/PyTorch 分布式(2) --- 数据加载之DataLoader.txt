@@ -1,6 +1,30 @@
 https://www.cnblogs.com/rossiXYZ/p/15150504.html
 PyTorch 分布式(2) --- 数据加载之DataLoader
 
+目录
+[源码解析] PyTorch 分布式(2) --- 数据加载之DataLoader
+0x00 摘要
+0x01 前情回顾
+0x02 DataLoader
+2.1 初始化
+2.2 关键函数
+2.3 单进程加载
+2.3.1 区分生成
+2.3.2 迭代器基类
+2.3.3 单进程迭代器
+2.3.4 获取样本
+2.4 多进程加载
+2.4.1 总体逻辑
+2.4.2 初始化
+2.4.3 业务重置
+2.4.4 获取 index
+2.4.5 worker主函数
+2.4.6 Pin memory thread
+2.4.7 用户获取data
+2.4.8 小结
+2.5 Pipleline
+0xFF 参考
+
 0x00 摘要
 为了更好的介绍参数服务器Paracel的数据加载，我们临时插入两篇PyTorch的数据加载，主要是从分布式的角度进行切入。
 本文只算是开胃甜点，后续会有专门系列分析PyTorch分布式。

@@ -1,0 +1,683 @@
+PyTorch 分布式(1)------历史和概述
+https://www.cnblogs.com/rossiXYZ/p/15496268.html
+
+目录
+[源码解析] PyTorch 分布式(1)------历史和概述
+0x00 摘要
+0x01 PyTorch分布式的历史
+1.1 Multiprocessing
+1.2 THD 底层库
+1.3 torch.distributed 库
+1.4 c10d库
+1.5 RPC框架
+1.6 弹性训练
+1.7 流水线训练
+0x02 分布式概述
+2.1 引论
+2.1.1 torch.distributed 包
+2.1.2 知识链接
+2.2 数据并行训练
+2.3 torch.nn.DataParallel
+2.4 torch.nn.parallel.DistributedDataParallel
+2.5 TorchElastic
+2.6 通用分布式训练
+0x03 总结
+0xFF 参考
+
+0x00 摘要
+本文主要在对PyTorch官方文档的翻译之上加入了自己的理解，希望给大家一个PyTorch分布式的历史脉络和基本概念，
+有兴趣的朋友可以仔细研究一下历史，看看一个机器学习系统如何一步一步进入分布式世界 / 完善其功能。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+0x01 PyTorch分布式的历史
+受到 PyTorch的分布式 这篇大作的启发，我们整理一下到 1.9 为止，PyTorch 分布式的相关历史。
+
+注：如果大家想研究 PyTorch 源码，推荐 Gemfield 和 PyTorch 源码解读 这两个专栏，源码解析颇为深入！
+
+PyTorch 分布式的历史以 https://github.com/pytorch/pytorch/releases 的内容为主，笔者把目前的历史大致分成 7 个阶段。
+
+分别是：
+
+    使用 torch.multiprocessing 封装了 Python 原生 multiprocessing模块，这样就可以利用多个CPU核。
+
+    导入了 THD (distributed pytorch)，这就有了用于分布式计算的底层库。
+
+    引入了torch.distributed包，它允许在多台机器之间交换张量。使用这个包可以在多台机器之上使用更大的batch进行训练。
+
+    发布了 c10d 库，这成为 torch.distributed package和torch.nn.parallel.DistributedDataParallel 包的基础后端，同时 THD 被废弃。
+
+    提供了一个分布式RPC框架来支持分布式模型并行训练。
+    它允许远程运行函数和引用远程对象，而无需复制周围的真实数据，并提供autograd和optimizer API以透明地进行后向传播和跨RPC边界更新参数。
+
+    引入了弹性训练，Torchelastic提供了“torch.distributed.launch”CLI的一个严格超集，并添加了容错和弹性功能。
+
+    引入了流水线并行，就是 torchgpipe。
+
+其历史演进图如下：
+
+                                           v1.0
+
+                                           v1.1
+
+                                           v1.2
+
+               v0.1.8                      v1.3                  v1.7
+
+                THD                        C10D               TorchElastic
+                 +                          +                      +
+                 |                          |                      |
+                 |                          |                      |
+                 |                          |                      |
+                 |                          |                      |
+                 |                          |                      |
+                 |                          |                      |
++-------+--------+------------+-------------+-----------+----------+------------+----------> Time
+        |                     |                         |                       |
+        |                     |                         |                       |
+        |                     |                         |                       |
+        |                     |                         |                       |
+        |                     |                         |                       |
+        +                     +                         +                       +
+
+  Multiprocessing       torch.distributed              RPC                   Pipeline
+
+     v0.1.2                  v0.2                      v1.4                   v1.8
+
+     v0.1.6                  v0.4                      v1.5                   v1.9
+
+                                                       v1.6
+
+具体历史如下，有兴趣的朋友可以研究一下，看看一个机器学习系统如何一步一步进入分布式世界，没有兴趣的朋友可以直接跳过到后续概述部分。
+
+1.1 Multiprocessing
+PyTorch 0.1.2
+使用 torch.multiprocessing 封装了 Python 原生 multiprocessing模块，这样就可以利用多个CPU核。
+具体原因是，在Python 之中，使用线程是有技术问题的，主要就是 Global Interpreter Lock，因此应该使用多进程。
+
+    With Python, one cannot use threads because of a few technical issues.
+    Python has what is called Global Interpreter Lock,
+    which does not allow threads to concurrently execute python code.
+
+    Hence, the most pythonic way to use multiple CPU cores is multiprocessing
+
+    We made PyTorch to seamlessly integrate with python multiprocessing.
+    This involved solving some complex technical problems to make this an air-tight solution,
+    and more can be read in this in-depth technical discussion.
+
+PyTorch 0.1.6
+
+Multiprocessing 支持 CUDA。
+
+    Uptil now, Tensor sharing using multiprocessing only worked for CPU Tensors.
+    We've now enabled Tensor sharing for CUDA tensors when using python-3.
+    You can read more notes here: http://pytorch.org/docs/notes/multiprocessing.html
+
+1.2 THD 底层库
+PyTorch 0.1.8
+导入了 THD (distributed pytorch)，这就有了用于分布式计算的底层库。
+Merged an initial version of THD (distributed pytorch)
+
+1.3 torch.distributed 库
+PyTorch 0.2
+
+We introduce the torch.distributed package that allows you to exchange Tensors among multiple machines.
+Using this package, you can scale your network training over multiple machines and larger mini-batches.
+For example, you are given the primitives to implement Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour.
+
+The distributed package follows an MPI-style programming model.
+This means that there are functions provided to you such as send, recv,
+all_reduce that will exchange Tensors among nodes (machines).
+
+For each of the machines to first identify each other and assign unique numbers to each other (ranks),
+we provide simple initialization methods:
+
+    shared file system (requires that all processes can access a single file system)
+
+    IP multicast (requires that all processes are in the same network)
+
+    environment variable (requires you to manually assign ranks and know an address of a node reachable from all processes)
+
+这个版本引入了torch.distributed包，它允许在多台机器之间交换张量。
+使用这个包可以在多台机器之上使用更大的batch进行训练。
+
+该distributed包遵循 MPI 风格的编程模型，
+即distributed包提供了比如send, recv, all_reduce 这样的方法来在不同的节点（机器）之间交换张量。
+
+因为需要多台机器之间彼此识别，所以需要有一个机制来唯一标示每台机器，这就是rank。
+distributed包提供了几种简单的初始化方法：
+
+    共享文件系统（所有机器上的所有进程都可以访问这个文件系统）
+
+    IP组播（要求所有进程在同一个网络中）
+
+    环境变量（需要用户手动指定rank，并且提供一个所有进程可访问的节点地址）
+
+World size是将参与训练的进程数。
+每个进程都将被分配一个rank，该rank是一个介于 0 和 world_size - 1 之间的数字，在此作业中是唯一的。
+它将用作进程标识符，并将用于代替地址，例如，指定应将张量发送到哪个 rank（进程）。
+
+分布式计算中的原语包括同步模式的send, recv 和 异步模式的 isend，irecv。
+因为某些通信模式出现的太频繁了，所以 PyTorch 开发了高阶函数，比如all_reduce，这些集合通信原语会用于整个进程组，并且更加高效。
+
+但是分布式包还是太底层，所以基本还是基于它来实现更高阶的算法或者定制特殊算法，因为数据并行训练是如此常见，
+PyTorch 为此创建了高级帮助程序DistributedDataParallel，它几乎是 nn.DataParallel 的替代品。
+
+PyTorch 0.4
+这个版本有了几处相关。
+
+    增加了DistributedDataParallelCPU，这个类和DistributedDataParallel很相似，
+    但是主要支持在CPU之上训练（DistributedDataParallel 目标是 GPU）。
+
+这个类支持 mpi, gloo and tcp 这些后端（tcp后端后来被废除）。
+Add DistributedDataParallelCPU. This is similar to DistributedDataParallel,
+but with specific support for models running on the CPU (contrary to DistributedDataParallel, which targets GPU),
+and supports mpi, gloo and tcp backends #5919.
+
+    增加了新工具脚本。此脚本可以在单个机器或者多个机器之上使用 DistributedDataParallel。
+
+Helper utility for launching Distributed Training jobs
+
+We have added an utility function to help launch jobs on a distributed setup.
+In order to launch a script that leverages DistributedDataParallel on either single-node multiple-nodes,
+we can make use of torch.distributed launch as follows
+
+python -m torch.distributed.launch my_script.py --arg1 --arg2 --arg3
+
+    增加了基于 NCCL 2.0 的新分布式后端，这样速度得到很大提升，也可以基于多个GPU提供集合通信的新API。
+
+A new distributed backend based on NCCL 2.0
+
+PyTorch now has a new distributed backend, which leverages NCCL 2.0 for maximum speed.
+It also provides new APIs for collective operations on multiple GPUs.
+You can enable the new backend via
+
+    torch.distributed.init_process_group("nccl")
+其他改进如下，比如聚合多个小广播操作，混合精度，Infiniband 支持等。
+    Coalesce many small broadcasts to improve performance #4978
+    Add mixed-precision support for distributed training #4891
+    Release NCCL distributed backend. Previously it was marked as experimental. #4921
+    Enable Infiniband support for Gloo data channel with automatic IB device detection #4795
+
+
+1.4 c10d库
+PyTorch 1.0
+
+torch.distributed new "C10D" library
+
+The torch.distributed package and torch.nn.parallel.DistributedDataParallel module are backed by the new "C10D" library.
+The main highlights of the new library are:
+
+    C10D is performance driven and operates entirely asynchronously for all backends:
+    Gloo, NCCL, and MPI.
+
+    Significant Distributed Data Parallel performance improvements especially
+    for slower network like ethernet-based hosts
+
+    Adds async support for all distributed collective operations in the torch.distributed package.
+
+    Adds send and recv support in the Gloo backend
+
+这个版本发布了 c10d 库，这成为 torch.distributed package和torch.nn.parallel.DistributedDataParallel 包的基础后端，
+这个库的主要亮点是：
+
+    因为C10D完全是异步操作，所以对于所有后端（Gloo, NCCL, 和 MPI）的性能都提升很大。
+
+    对于类似基于以太网的慢速网络，分布式数据并行得到了巨大提升。
+
+    对torch.distributed 包中的所有分布式集合操作都添加了异步支持。
+
+    对Gloo后端添加了send、recv支持。
+
+另外还有几点修改。
+    TCP后端被移除，Gloo和 MPI 后端被推荐用于CPU集合通信，NCCL被推荐用于GPU集合通信。
+    旧的（基于THD）torch.distributed 包被废弃。
+    旧的（基于THD）torch.nn.parallel.DistributedDataParallel包被废弃。
+
+        torch.distributed:
+        the TCP backend is removed,
+        we recommend to use Gloo and MPI backends for CPU collectives and NCCL backend for GPU collectives.
+
+        the old (THD-backed) torch.distributed package is deprecated
+        but still available at torch.distributed.deprecated.
+
+        The old (THD-backed) torch.nn.parallel.DistributedDataParallel is deprecated but still available
+        at torch.nn.parallel.deprecated.DistributedDataParallel.
+
+PyTorch 1.1
+nn.parallel.DistributedDataParallel 可以支持多GPU模型，这样模型并行和数据并行可以跨server进行协作。
+
+    DistributedDataParallel new functionality and tutorials
+
+    nn.parallel.DistributedDataParallel: can now wrap multi-GPU modules,
+    which enables use cases such as model parallel (tutorial) on one server and data parallel (tutorial) across servers.
+
+c10d ProcessGroup::getGroupRank 被移除。
+
+PyTorch 1.2
+此版本做了如下改进：
+Distributed Package 可以支持CPU modules，稀疏张量，本地梯度累积。
+Distributed Package
+    DistributedDataParallel: support CPU modules. (20236)
+    DistributedDataParallel: support sparse tensors. (19146)
+    DistributedDataParallel: support local gradient accumulation. (21736)
+另外也有一些其他小改进，比如对于MPI操作加入了device guard 。
+
+PyTorch 1.3
+添加了torch.distributed对macOS的支持，但是只能使用Gloo后端，用户只需要修改一行代码就可以复用其他平台的代码。
+也做了一些其他改进。
+
+This release adds macOS support for torch.distributed with the Gloo backend.
+You can more easily switch from development (e.g. on macOS) to
+deployment (e.g. on Linux) without having to change a single line of code.
+The prebuilt binaries for macOS (stable and nightly) include support out of the box.
+
+    torch.distributed.all_reduce_coalesced Support allreduce of a list of same-device tensors (24949, 25470, 24876)
+    torch.distributed.all_reduce Add bitwise reduction ops (BAND, BOR, BXOR) (26824)
+
+1.5 RPC框架
+PyTorch 1.4.0
+此版本开始试验分布式模型训练。
+随着RoBERTa等模型的规模不断扩大直到数十亿个参数，模型并行训练变得越来越重要，因为其可以帮助研究人员突破极限。
+1.4.0 版本提供了一个分布式RPC框架来支持分布式模型并行训练。
+它允许远程运行函数和引用远程对象，而无需复制相关真实数据，并提供autograd和optimizer API以透明地进行后向传播和跨RPC边界更新参数。
+
+Distributed Model Parallel Training [Experimental]
+
+With the scale of models, such as RoBERTa, continuing to increase into the billions of parameters,
+model parallel training has become ever more important to help researchers push the limits.
+This release provides a distributed RPC framework to support distributed model parallel training.
+It allows for running functions remotely and referencing remote objects without copying the real data around,
+and provides autograd and optimizer APIs to transparently run backwards and update parameters across RPC boundaries.
+
+torch.distributed.rpc是一个新引入的包。
+它的基本构建块可以在模型训练和推理中远程运行函数，这对于分布式模型并行或实现参数服务器框架等场景非常有用。
+更具体地说，它包含四个支柱：RPC、远程引用、分布式autograd和分布式优化器。请参阅文件和教程更多细节。
+
+    RPC [Experimental]
+
+    torch.distributed.rpc is a newly introduced package.
+    It contains basic building blocks to run functions remotely in model training and inference,
+    which will be useful for scenarios like distributed model parallel or implementing parameter server frameworks.
+    More specifically, it contains four pillars: RPC, Remote Reference, Distributed Autograd, and Distributed Optimizer.
+    Please refer to the documentation and the tutorial for more details.
+
+PyTorch 1.5
+正式发布了 torch.distributed.rpc 。
+“torch.distributed.rpc”包旨在支持 不适合 “DistributedDataParallel”的各种分布式训练范式。
+示例包括参数服务器训练、分布式模型并行和分布式管道并行。
+torch.distributed.rpc包中的功能可以分为四组主要的API。
+
+    **RPC **API允许在指定目标工作进程上使用给定的参数来运行函数，并且可以获取返回值或创建对返回值的分布式引用。
+
+    RRef（远程引用）是另一个worker上对象的引用。
+    持有RRef的工作者可以显式地请求对象的副本，并且还可以与其他worker共享轻量级RRef，而不必担心引用计数。
+    当多个worker需要重复访问同一远程对象的不同版本时，这尤其有用。
+
+    使用分布式自动加载，应用程序可以自动计算梯度，即使模型已经使用RPC在多个worker上拆分过。
+    PyTorch 在向前传播过程中将RPC边界处的局部autograd图缝合在一起，并向在后向传播之中穿越边界让参与者启动本地autograd。
+
+    分布式优化器使用分布式autograd计算的梯度来更新模型参数。
+    它的构造函数接受一个本地优化器（例如SGD，Adagrad等）和一个参数RRef列表，它的step函数在所有不同的 RRef 所有者（worker）之上自动使用本地优化器来更新参数。
+
+    Distributed RPC framework APIs [Now Stable]
+
+    The torch.distributed.rpc package aims at supporting a wide range of
+    distributed training paradigms that do not fit into DistributedDataParallel.
+    Examples include parameter server training, distributed model parallelism,
+    and distributed pipeline parallelism.
+    Features in the torch.distributed.rpc package can be categorized into four main sets of APIs.
+
+        The RPC API allows running a function on a specified destination worker with given arguments and fetches
+        the return value or creates a distributed reference to the return value.
+
+        The RRef (Remote REFerence) serves as a reference to an object on another worker.
+        A worker holding an RRef can explicitly request copies of the object,
+        and it can also share the light-weight RRef with other workers without worrying about reference counting.
+        This is especially useful when multiple workers need to repeatedly access
+        different versions of the same remote object.
+
+        With Distributed Autograd, applications can automatically compute gradients even if
+        a model is split on multiple workers using RPC.
+        This is achieved by stitching together local autograd graphs at RPC boundaries in the forward
+        pass and reaching out to participants to transparently launch local autograd in the backward pass.
+
+        The Distributed Optimizer uses gradients computed by Distributed Autograd to update model parameters.
+        Its constructor takes a local optimizer (e.g., SGD, Adagrad, etc.) and a list of parameter RRefs,
+        and its step() function automatically uses the local optimizer to update parameters
+        on all distinct RRef owner workers.
+
+PyTorch 1.6
+此版本对 DDP 和 RPC 进行了大量的改进，也增加了新特性，几个大特性包括：
+    Numerous improvements and new features for both distributed data parallel (DDP) training and the remote procedural call (RPC) packages.
+    RPC的TensorPipe后端
+PyTorch 1.6为RPC模块引入了一个新的后端，它利用了TensorPipe库。
+TensorPipe库是一个面向机器学习的张量感知的点对点通信原语，
+旨在对PyTorch中分布式培训的当前原语（Gloo、MPI等）进行补足，这些原语是集合通信和分块的。
+TensorPipe的成对性和异步性使其有助于构建超越数据并行的新的网络模式：
+客户机-服务器方式（例如，嵌入的参数服务器、actor-learner separation in Impala-style RL等）和模型与管道并行训练（比如GPipe），
+gossip SGD等。
+
+    TensorPipe backend for RPC
+
+    PyTorch 1.6 introduces a new backend for the RPC module which leverages the TensorPipe library,
+    a tensor-aware point-to-point communication primitive targeted at machine learning,
+    intended to complement the current primitives for distributed training in PyTorch (Gloo, MPI, ...)
+    which are collective and blocking.
+    The pairwise and asynchronous nature of TensorPipe lends itself to
+    new networking paradigms that go beyond data parallel:
+    client-server approaches (e.g., parameter server for embeddings, actor-learner separation in Impala-style RL, ...)
+    and model and pipeline parallel training (think GPipe), gossip SGD, etc.
+
+    [Beta] DDP+RPC
+
+PyTorch分布式支持两种强大的范式：DDP用于完全同步的数据并行训练，RPC框架允许分布式模型并行。
+
+目前，这两个特性是独立工作的，用户不能混合和匹配这两个特性来尝试混合并行模式。
+从PyTorch 1.6开始，我们已经使DDP和RPC能够无缝地协同工作，这样用户就可以将这两种技术结合起来，实现数据并行和模型并行。
+例如，用户希望在参数服务器上放置大型嵌入表，并使用RPC框架进行嵌入查找，但在培训器上存储较小的dense参数，并使用DDP同步dense参数。
+
+    [Beta] DDP+RPC
+
+    PyTorch Distributed supports two powerful paradigms:
+    DDP for full sync data parallel training of models and
+    the RPC framework which allows for distributed model parallelism.
+    Currently, these two features work independently and users can’t mix and match these to
+    try out hybrid parallelism paradigms.
+
+    Starting PyTorch 1.6, we’ve enabled DDP and RPC to work together seamlessly so that users can combine these
+    two techniques to achieve both data parallelism and model parallelism.
+    An example is where users would like to place large embedding tables on parameter servers
+    and use the RPC framework for embedding lookups,
+    but store smaller dense parameters on trainers and use DDP to synchronize the dense parameters.
+    Below is a simple code snippet.
+
+    [Beta] RPC - Asynchronous User Functions
+
+RPC异步用户函数支持在执行用户定义的函数时在服务器端进行yield 和resume。
+在此功能之前，当被调用方处理请求时，一个RPC线程将等待用户函数返回。
+如果用户函数包含IO（例如，嵌套RPC）或信令（例如，等待另一个请求解除阻止），则相应的RPC线程将处于空闲状态，等待这些事件。
+因此，一些应用程序必须使用大量线程并且发送额外的RPC请求，这可能会导致性能下降。
+要使用户函数在此类事件中yield，应用程序需要：
+1）使用@rpc.functions.async_executiondecorator封装函数；
+2）让函数返回'torch.futures.Future'，并将恢复逻辑作为回调安装到'Future'对象上。
+
+    [Beta] RPC - Asynchronous User Functions
+
+    RPC Asynchronous User Functions supports the ability to yield and resume on the server side
+    when executing a user-defined function.
+    Prior to this feature, when an callee processes a request, one RPC thread waits until the user function returns.
+    If the user function contains IO (e.g., nested RPC) or signaling (e.g., waiting for another request to unblock),
+    the corresponding RPC thread would sit idle waiting for these events.
+    As a result, some applications have to use a very large number of threads and send additional RPC requests,
+    which can potentially lead to performance degradation.
+    To make a user function yield on such events, applications need to:
+    1) Decorate the function with the @rpc.functions.async_execution decorator;
+    and 2) Let the function return a torch.futures.
+    Future and install the resume logic as callbacks on the Future object.
+
+    [Beta] Fork/Join Parallelism
+
+此版本增加了对语言级构造的支持，以及对TorchScript代码中粗粒度并行性的运行时支持。
+这种支持对于并行运行集成中的模型或并行运行递归网络中的双向组件等情况非常有用，
+并为任务级并行解锁了并行体系结构（例如许多核心CPU）的计算能力。
+
+TorchScript程序的并行执行通过两个原语：“torch.jit.fork”和“torch.jit.wait” 完成支持。
+
+    [Beta] Fork/Join Parallelism
+
+    This release adds support for a language-level construct as well as
+    runtime support for coarse-grained parallelism in TorchScript code.
+    This support is useful for situations such as running models in an ensemble in parallel,
+    or running bidirectional components of recurrent nets in parallel, and allows the ability to unlock the computational power of parallel architectures (e.g. many-core CPUs) for task level parallelism.
+
+    Parallel execution of TorchScript programs is enabled through two primitives:
+    torch.jit.fork and torch.jit.wait.
+
+1.6 弹性训练
+PyTorch 1.7
+此版本对 DDP 和 RPC 进行了一些的改进，也增加了新特性，几个大特性包括：
+    [Stable] TorchElastic now bundled into PyTorch docker image
+Torchelastic提供了“torch.distributed.launch”CLI的一个严格超集，并添加了容错和弹性功能。
+如果用户对容错不感兴趣，他们可以通过设置“max_restarts=0”来获得准确的功能/行为，
+并增加自动分配“RANK”和“MASTER_ADDR”端口的便利性（而不是在“torch.distributed.launch”中手动指定）。
+
+通过将“torchelastic”与PyTorch捆绑在同一docker映像中，用户可以立即开始试用torchelastic，而无需单独安装“torchelastic”。
+除了方便之外，在现有Kubeflow的分布式PyTorch操作符中添加对弹性参数的支持也是一个很好的选择。
+
+    [Stable] TorchElastic now bundled into PyTorch docker image
+
+    Torchelastic offers a strict superset of the current torch.distributed.launch CLI with the added features for fault-tolerance and elasticity.
+    If the user is not be interested in fault-tolerance,
+    they can get the exact functionality/behavior parity by setting max_restarts=0 with the added convenience of
+    auto-assigned RANK and MASTER_ADDR|PORT (versus manually specified in torch.distributed.launch).
+
+    By bundling torchelastic in the same docker image as PyTorch,
+    users can start experimenting with torchelastic right-away without having to separately install torchelastic.
+    In addition to convenience,
+    this work is a nice-to-have when adding support for elastic parameters in the existing
+    Kubeflow’s distributed PyTorch operators.
+
+    [Beta] Support for uneven dataset inputs in DDP
+
+PyTorch 1.7引入了一个新的上下文管理器，与使用“torch.nn.parallel.DistributedDataParallel”进行训练的模型结合使用，以支持使用跨不同进程的大小不均匀的数据集进行训练。此功能在使用DDP时提供了更大的灵活性，并防止用户必须手动确保不同进程中的数据集大小相同。使用此上下文管理器，DDP将自动处理不均匀的数据集大小，这可以防止在训练结束时出现错误或挂起。
+
+    [Beta] Support for uneven dataset inputs in DDP
+
+    PyTorch 1.7 introduces a new context manager to be used in conjunction with models trained using
+    torch.nn.parallel.DistributedDataParallel to enable training with uneven dataset size across different processes.
+    This feature enables greater flexibility when using DDP and prevents the user from having to
+    manually ensure dataset sizes are the same across different process.
+    With this context manager, DDP will handle uneven dataset sizes automatically,
+    which can prevent errors or hangs at the end of training.
+
+其他特性包括：
+
+    [Beta] NCCL Reliability - Async Error/Timeout Handling
+    [Beta] TorchScript remote and rpc_sync
+    [Beta] Distributed optimizer with TorchScript support
+    [Beta] Enhancements to RPC-based Profiling
+    [Prototype] Windows support for Distributed Training
+
+1.7 流水线训练
+PyTorch 1.8
+此版本加入了一些重大改进，比如：提高NCCL可靠性；流水线并行支撑；RPC profiling；并支持添加梯度压缩的通信hook。
+其中流水线并行是把 fairscale.nn.Pipe引入进来，其实就是 torchgpipe。
+
+    Significant updates and improvements to distributed training including:
+    Improved NCCL reliability; Pipeline parallelism support; RPC profiling;
+    and support for communication hooks adding gradient compression.
+
+    Upstream fairscale.nn.Pipe into PyTorch as torch.distributed.pipeline (#44090)
+
+PyTorch 1.9
+主要是
+    1 Distributed / TorchElastic 的一些bug fix。
+    2 RPC 的重大改进以支持大规模GPU分布式训练。
+    3 在PyTorch Profiler中支持分布式培训、GPU利用率和SM效率。
+研究完历史之后，我们再看看分布式概述。
+
+0x02 分布式概述
+以下主要是基于https://pytorch.org/tutorials/beginner/dist_overview.html 官方文档为基础，加上自己的理解。
+
+2.1 引论
+2.1.1 torch.distributed 包
+PyTorch 中的 torch.distributed包对于多进程并行提供了通信原语，使得这些进程可以在一个或多个计算机上运行的几个计算节点之间进行通讯。
+torch.distributed包的并行方式与multiprocessing ( torch.multiprocessing) 包不同，
+torch.distributed包支持多个通过网络连接的机器，
+并且用户必须为每个进程显式启动主训练脚本的单独副本。
+
+在单机且同步模型的情况下，
+torch.distributed或着 torch.nn.parallel.DistributedDataParallel()包装器
+可能仍然比其他数据并行方法（比如torch.nn.DataParallel）具有优势：
+
+    每个进程维护自己的优化器，并在每次迭代中执行一个完整的优化步骤。虽然这可能看起来是多余的，
+    但由于梯度已经聚集在一起并且是跨进程平均，因此对于每个进程都是相同的，
+    这意味着不需要参数广播步骤，减少了在节点之间传输张量所花费的时间。
+
+    每个进程都包含一个独立的 Python 解释器，消除了额外的解释器开销和“GIL 颠簸”，
+    这些开销来自单个 Python 进程驱动多个执行线程，多个模型副本或 多个GPU 的开销。
+    这对于严重依赖 Python 运行时的模型尤其重要，这样的模型通常具有递归层或许多小组件。
+
+从 PyTorch v1.6.0 开始，功能torch.distributed可以分为三个主要组件：
+
+    分布式数据并行训练 (DDP) 是一种广泛采用的单程序多数据训练范式。
+    使用 DDP，模型会在每个进程上复制，并且每个模型副本都将被提供一组不同的输入数据样本。
+    DDP 负责梯度通信以保持模型副本同步并将其与梯度计算重叠以加速训练。
+
+    基于 RPC 的分布式训练 (RPC) 旨在支持无法适应数据并行训练的通用训练结构，
+    例如分布式管道并行、参数服务器范式以及 DDP 与其他训练范式的组合。
+    它有助于管理远程对象生命周期并将 autograd 引擎扩展到机器边界之外。
+
+    集体通信 (c10d) 库支持跨组内的进程发送张量。
+    它提供集体通信 API（例如all_reduce 和 all_gather）和 P2P 通信 API（例如send 和 isend）。
+    DDP 和 RPC（进程组后端）) 在 v1.6.0 的 c10d 上构建，其中前者使用集体通信，后者使用 P2P 通信。
+    通常，开发者不需要直接使用这个原始通信 API，因为上面的 DDP 和 RPC 特性可以服务于许多分布式训练场景。
+    但是，在某些用例中，此 API 仍然有用。
+    一个例子是分布式参数平均，应用程序希望在反向传递后计算所有模型参数的平均值，而不是使用 DDP 来传达梯度。
+    这可以将通信与计算分离，并允许对通信内容进行更细粒度的控制，但另一方面，它也放弃了 DDP 提供的性能优化。
+    在 用PyTorch编写分布式应用程序 显示了使用 c10d 通信 API 的示例。
+
+        通信方式：torch.distributed 的底层通信主要使用 Collective Communication (c10d) library 来支持跨组内的进程发送张量，并主要支持两种类型的通信 API：
+
+            collective communication APIs: Distributed Data-Parallel Training (DDP)
+
+            P2P communication APIs: RPC-Based Distributed Training (RPC)
+
+    这两种通信 API 在 PyTorch 中分别对应了两种分布式训练方式：
+    Distributed Data-Parallel Training (DDP) 和 RPC-Based Distributed Training (RPC)。
+
+大多数现有文档是为 DDP 或 RPC 编写的，本文的其余部分将详细说明这两个组件的材料。
+
+2.1.2 知识链接
+PyTorch的multiprocessing模块封装了python原生的multiprocessing模块，在API上百分之百的兼容，
+它也注册了定制的reducers, 可以使用IPC机制（共享内存）来让不同的进程对同一份数据进行读写。
+但是其工作方式在CUDA上有很多弱点，比如必须规定各种进程的生命周期如何如何，
+导致CUDA上的multiprocessing经常行为超出预期。
+
+2.2 数据并行训练
+在官方文档中，可以了解到，在掌握 torch.distributed 的基础的前提下，我们可以根据自身机器和任务的具体情况使用不同的分布式或并行训练方式。
+PyTorch 为数据并行训练提供了多种选项。一般来说，应用会从简单到复杂，从原型到量产。这些应用共同的发展轨迹是：
+
+    1 如果数据和模型可以放在一个 GPU 中，并且不关心训练速度，就使用单设备（single-device）训练。
+    2 如果服务器上有多个 GPU，并且您希望以最少的代码更改来加速训练，那么可以使用单机多 GPU DataParallel。
+    3 如果您想进一步加快训练速度并愿意编写更多代码来设置它，可以使用单机多 GPU DistributedDataParallel。
+    4 如果应用程序需要跨机器边界进行扩展，请使用多机 DistributedDataParallel 和 启动脚本。
+    5 如果预期会出现错误（例如，OOM）或者资源可以在训练期间动态加入和离开，则使用torchelastic启动分布式训练。
+
+2.3 torch.nn.DataParallel
+DataParallel 包使用最低代码量就可以利用单机多GPU达到并行性。它只需要对应用程序代码进行一行更改。
+教程 Optional: Data Parallelism 展示了一个示例。需要注意的是，虽然DataParallel非常易于使用，但通常不能提供最佳性能。
+这是因为DataParallel的实现在每个前向传递中都会复制模型，并且其单进程多线程并行性会受到 GIL 竞争的影响。
+为了获得更好的性能，请考虑使用 DistributedDataParallel。
+
+2.4 torch.nn.parallel.DistributedDataParallel
+
+与DataParallel相比， DistributedDataParallel 需要多一步设置，
+即调用 init_process_group。DDP 使用多进程并行，因此模型副本之间不存在 GIL 竞争。
+此外，模型在 DDP 构建时广播，而不是在每次前向传播时广播，这也有助于加快训练速度。
+DDP 附带了多种性能优化技术。如需更深入的解释，请参阅这篇 DDP 论文(VLDB'20)。
+
+DDP材料如下：
+
+    1 DDP 笔记 提供了一个入门示例及其设计和实现的一些简要说明。如果这是您第一次使用 DDP，请从本文档开始。
+    2 Getting Started with Distributed Data Parallel 解释了 DDP 训练的一些常见问题，包括不平衡的工作负载、检查点和多设备模型。
+      请注意，DDP 可以轻松地与单机模型并行最佳实践 教程中描述的单机多设备模型并行 性相结合。
+    3 在启动并配置分布式数据并行应用程序 文件显示如何使用DDP启动脚本。
+    4 该 Shard Optimizer States With ZeroRedundancyOptimizer 配方演示了ZeroRedundancyOptimizer 如何有助于减少优化内存占用分布式数据并行训练。
+
+2.5 TorchElastic
+随着应用程序复杂性和规模的增长，故障恢复成为一项迫切的要求。
+
+有时，在使用 DDP 时不可避免地会遇到 OOM 之类的错误，但 DDP 本身无法从这些错误中恢复，基本try-except块也无法工作。
+这是因为 DDP 要求所有进程以紧密同步的方式运行，并且在不同进程中启动的所有AllReduce通信必须匹配。
+
+如果组中的某个进程抛出 OOM 异常，则很可能会导致不同步（不匹配的 AllReduce操作），从而导致崩溃或挂起。
+如果您预计训练期间会发生故障，或者资源可能会动态离开和加入，请使用torchelastic启动分布式数据并行训练 。
+
+2.6 通用分布式训练
+许多训练范式不适合数据并行，例如参数服务器范式，分布式管道并行，具有多个观察者或代理的强化学习应用等。
+torch.distributed.rpc目标是支持通用分布式训练场景。
+
+torch.distributed.rpc包有四大支柱：
+
+    RPC支持在远程工作者上运行给定的函数。
+
+    RRef有助于管理远程对象的生命周期。RRef 注释中介绍了引用计数协议 。
+
+    分布式 Autograd 将 autograd 引擎扩展到机器边界之外。 有关更多详细信息，请参阅 分布式 Autograd 设计。
+
+    分布式优化器 可以自动联系所有参与的workers，以使用分布式 autograd 引擎计算的梯度来更新参数。
+
+RPC 教程如下（后续会选择部分文章进行分析）：
+
+    1 在开始使用分布式RPC框架 教程首先使用一个简单的强化学习（RL）为例来说明RPC和器RRef。
+      然后，它将基本的分布式模型并行应用于 RNN 示例，以展示如何使用分布式 autograd 和分布式优化器。
+    2 在使用分布式RPC框架实现一个参数服务器 教程借用 HogWild！训练 的精华，将其应用于异步参数服务器 (PS) 训练应用程序。
+    3 使用 RPC的分布式管道并行 教程将单机管道并行示例（在 单机模型并行最佳实践中介绍）扩展到分布式环境，并展示了如何使用 RPC 实现它。
+    4 使用异步执行来实施批量RPC处理 教程演示如何使用 @ rpc.functions.async_execution 装饰器来实现RPC批处理，它可以帮助加快推理和培训。
+      它使用了上述教程 1 和 2 中使用的类似 RL 和 PS 示例。
+    5 将分布式RPC框架相与分布式数据并行结合 教程演示了如何将DDP与RPC结合起来，这样可以将分布式数据并行与分布式模型并行相结合训练模型。
+0x03 总结
+我们使用官方图示来进行总结，从中可以看到 PyTorch 分布式包的内部架构和逻辑关系。
+
+    03-01.png
+
+0xFF 参考
+PyTorch的分布式
+
+https://pytorch.org/docs/stable/distributed.html
+
+NVIDIA NCCL 的官方文档
+
+https://pytorch.org/tutorials/intermediate/rpc_param_server_tutorial.html
+
+https://m.w3cschool.cn/pytorch/pytorch-me1q3bxf.html
+
+https://pytorch.org/tutorials/beginner/dist_overview.html
+
+https://pytorch.org/tutorials/intermediate/model_parallel_tutorial.html
+
+https://pytorch.org/tutorials/intermediate/ddp_tutorial.html
+
+https://pytorch.org/tutorials/intermediate/dist_tuto.html
+
+https://pytorch.org/tutorials/intermediate/rpc_tutorial.html
+
+https://pytorch.org/tutorials/intermediate/dist_pipeline_parallel_tutorial.html
+
+https://pytorch.org/tutorials/intermediate/rpc_async_execution.html
+
+https://pytorch.org/tutorials/advanced/rpc_ddp_tutorial.html
+
+https://pytorch.org/tutorials/intermediate/pipeline_tutorial.html
+
+https://pytorch.org/tutorials/advanced/ddp_pipeline.html
+
+https://pytorch.org/docs/master/rpc/distributed_autograd.html#distributed-autograd-design
+
+https://pytorch.org/docs/master/notes/ddp.html
+
+https://pytorch.org/tutorials/intermediate/dist_tuto.html
+
+分类: 001_机器学习 , 006_深度学习 , 011_分布式机器学习
