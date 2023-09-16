@@ -331,6 +331,11 @@ This can be used in a number of cases to produce device agnostic code. Below
 is an example when using a dataloader:
 
 ::
+2.3 单进程加载
+单进程模式下，Data Loader会在计算进程内加载数据，所以加载过程中可能会阻塞计算。
+
+for 语句会调用enumerate 会返回一个迭代器，以此来遍历数据集。
+在eumerate之中，dataloader 的 __next__(self) 方法会被调用，逐一获取下一个对象，从而遍历数据集。
 
     cuda0 = torch.device('cuda:0')  # CUDA GPU 0
     for i, x in enumerate(train_loader):

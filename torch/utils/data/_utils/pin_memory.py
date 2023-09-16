@@ -13,7 +13,13 @@ from torch._six import string_classes
 from . import MP_STATUS_CHECK_INTERVAL
 from torch._utils import ExceptionWrapper
 
+'''
+yknote 搜索   # [ pin_memory_thread ]   。。。
 
+2.4.6 Pin memory thread
+在主进程之中，如果设置了需要pin memory，主进程的 pin_memory_thread 会从 worker_result_queue 读取数据，进行处理（加速CPU和GPU的数据拷贝），把结果放入 data_queue。
+
+'''
 def _pin_memory_loop(in_queue, out_queue, device_id, done_event):
     # This setting is thread local, and prevents the copy in pin_memory from
     # consuming all CPU cores.

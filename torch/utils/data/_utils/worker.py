@@ -199,6 +199,18 @@ def _generate_state(base_seed, worker_id):
         state.append(data_val)
     return state
 
+'''
+2.4.5 worker主函数
+_worker_loop 是 worker进程的主函数，主要逻辑如其注释所示： ....
+就是通过index_queue, data_queue与主进程交互。
+
+    从 index_queue 获取新的数据index；
+    
+    如果没有设置本worker结束，就使用 fetcher获取数据。
+    
+    然后把数据放入data_queue，并且通知主进程，这里需要注意，data_queue是传入的参数，
+    如果设置了pin memory，则传入的是 worker_result_queue, 否则传入 data_queue。
+'''
 def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                  auto_collation, collate_fn, drop_last, base_seed, init_fn, worker_id,
                  num_workers, persistent_workers):
@@ -255,8 +267,9 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
 
         watchdog = ManagerWatchdog()
 
-        while watchdog.is_alive():
+        while watchdog.is_alive(): # 等待在这里
             try:
+                # _try_put_index 如果放入了数据index，这里就被激活，开始工作
                 r = index_queue.get(timeout=MP_STATUS_CHECK_INTERVAL)
             except queue.Empty:
                 continue
@@ -298,6 +311,8 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                         # See NOTE [ Python Traceback Reference Cycle Problem ]
                         data = ExceptionWrapper(
                             where="in DataLoader worker process {}".format(worker_id))
+
+            # 放入数据，通知主进程
             data_queue.put((idx, data))
             del data, idx, index, r  # save memory
     except KeyboardInterrupt:

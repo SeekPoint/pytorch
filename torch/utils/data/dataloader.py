@@ -40,6 +40,9 @@ default_collate: _collate_fn_t = _utils.collate.default_collate
 
 get_worker_info = _utils.worker.get_worker_info
 
+# 2.3.4 获取样本
+# 我们接下来看看如何获取样本。就是通过索引传入 fetcher，从而获取想要的样本。
+# fetcher生成如下，这是在_SingleProcessDataLoaderIter初始化时候生成的：
 class _DatasetKind(object):
     Map = 0
     Iterable = 1
@@ -67,7 +70,52 @@ class _InfiniteConstantSampler(Sampler):
         while True:
             yield None
 
+'''
+0x02 DataLoader
+DataLoader的作用是：结合Dataset和Sampler之后，在数据集上提供了一个迭代器。
 
+可以这么理解：
+
+DataSet 是原始数据，Sampler 提供了如何切分数据的策略（或者说是提供了切分数据的维度），DataLoader就是依据策略来具体打工干活的，其中单进程加载就是一个人干活，多进程加载就是多拉几个人一起干活。
+
+2.1 初始化
+初始化的主要参数如下：
+
+    dataset (Dataset) ：所加载的数据集。
+    
+    batch_size (int, optional) ：每个批次加载多少个样本。
+    
+    shuffle (bool, optional) ：如果为 True，则每个epoch 都会再打乱数据。
+    
+    sampler (Sampler or Iterable, optional) ：定义了如何从样本采样的策略。可以是任何实现了 __len__的迭代器。
+    
+    batch_sampler (Sampler or Iterable, optional) ：与sampler类似，但是每次返回一个批次的数据索引。
+    
+    num_workers (int, optional) ：数据加载的子进程数目。如果是 0，表示从主进程加载数据。
+    
+    collate_fn (callable, optional)：从一个小批次（ mini-batch）张量中合并出一个样本列表。
+                    当从 map-style 数据集做批量加载时候使用。
+    
+    pin_memory (bool, optional) : 如果为true，则在返回张量之前把张量拷贝到CUDA固定内存之中。
+    
+    drop_last (bool, optional) ：当数据集不能被均匀分割时，如果为true，丢掉最后一个不完整的批次。
+                    如果为False，那么最后一个批次的数据较小。
+    
+    timeout (numeric, optional): 如果是整数，则是worker收集批次数据的超时值。
+    
+    worker_init_fn (callable, optional)：如果非空，则会在seeding和数据加载之前被每个子进程调用，
+                    以Iworker id ([0, num_workers - 1])作为输入参数。
+    
+    generator (torch.Generator, optional)：如果非空，则被RandomSampler 用来产生随机索引，
+                    也被多进程用来产生 base_seed 。
+    
+    prefetch_factor (int, optional, keyword-only arg)：每个 worker 提前加载 的 sample 数量。
+    
+    persistent_workers (bool, optional)：如果为 True, 则在消费一次之后，data loader也 不会关掉worker进程。
+    这允许workerDataset实例维持活动状态。
+    
+具体初始化代码如下，主要就是各种设置，为了更好的说明，去除了异常处理代码：
+'''
 class DataLoader(Generic[T_co]):
     r"""
     Data loader. Combines a dataset and a sampler, and provides an iterable over
@@ -297,10 +345,18 @@ class DataLoader(Generic[T_co]):
 
         self.check_worker_number_rationality()
 
+    # 具体会依据是否是多进程来区别生成。
     def _get_iterator(self) -> '_BaseDataLoaderIter':
         if self.num_workers == 0:
             return _SingleProcessDataLoaderIter(self)
         else:
+            '''
+            2.4 多进程加载
+            为了加速，PyTorch提供了多进程下载，只要把将参数 num_workers 设置为正整数，系统就会相应生成多进程处理，在这种模式下，每个worker都是一个独立进程。
+            
+            由上节我们可以知道，_SingleProcessDataLoaderIter 是单进程加载数据的核心，loader通过它来与sampler，dataset交互。
+            在多进程中，这个核心对应的就是 _MultiProcessingDataLoaderIter。
+            '''
             self.check_worker_number_rationality()
             return _MultiProcessingDataLoaderIter(self)
 
@@ -341,6 +397,11 @@ class DataLoader(Generic[T_co]):
 
         super(DataLoader, self).__setattr__(attr, val)
 
+    '''
+    2.3.1 区分生成
+    当多进程加载时候，在DataLoader声明周期之中，迭代器只被建立一次，这样worker可以重用迭代器。
+    在单进程加载时候，应该每次生成，以避免重置状态。
+    '''
     # We quote '_BaseDataLoaderIter' since it isn't defined yet and the definition can't be moved up
     # since '_BaseDataLoaderIter' references 'DataLoader'.
     def __iter__(self) -> '_BaseDataLoaderIter':
@@ -349,19 +410,21 @@ class DataLoader(Generic[T_co]):
         # However, in the case of a multiple workers iterator
         # the iterator is only created once in the lifetime of the
         # DataLoader object so that workers can be reused
-        if self.persistent_workers and self.num_workers > 0:
-            if self._iterator is None:
+        if self.persistent_workers and self.num_workers > 0:  # 如果是多进程或者设置了持久化
+            if self._iterator is None:  # 如果没有，才会新生成
                 self._iterator = self._get_iterator()
             else:
                 self._iterator._reset(self)
             return self._iterator
-        else:
-            return self._get_iterator()
+        else:  # 单进程
+            return self._get_iterator()  # 每次都直接生成新的
 
     @property
     def _auto_collation(self):
         return self.batch_sampler is not None
 
+    # 2.2 关键函数
+    # 这里关键函数之一就是_index_sampler，用来让迭代器调用sampler，我们接下来就会讲到
     @property
     def _index_sampler(self):
         # The actual sampler used for generating indices for `_DatasetFetcher`
@@ -480,21 +543,27 @@ class DataLoader(Generic[T_co]):
                 self.num_workers,
                 cpuset_checked))
 
+# 2.3.2 迭代器基类
+# _BaseDataLoaderIter 是迭代器基类，我们挑选关键函数看看。
+# 这里关键成员变量就是：
+#     _index_sampler：这里设置了loader 的 sampler，所以迭代器可以据此获取采样策略。
+#     _sampler_iter：得到 sampler 的迭代器。
 
 class _BaseDataLoaderIter(object):
     def __init__(self, loader: DataLoader) -> None:
+        # 初始化参数
         self._dataset = loader.dataset
         self._dataset_kind = loader._dataset_kind
         self._IterableDataset_len_called = loader._IterableDataset_len_called
         self._auto_collation = loader._auto_collation
         self._drop_last = loader.drop_last
-        self._index_sampler = loader._index_sampler
+        self._index_sampler = loader._index_sampler  # 得到采样策略
         self._num_workers = loader.num_workers
         self._prefetch_factor = loader.prefetch_factor
         self._pin_memory = loader.pin_memory and torch.cuda.is_available()
         self._timeout = loader.timeout
         self._collate_fn = loader.collate_fn
-        self._sampler_iter = iter(self._index_sampler)
+        self._sampler_iter = iter(self._index_sampler)  # 得到sampler的迭代器
         self._base_seed = torch.empty((), dtype=torch.int64).random_(generator=loader.generator).item()
         self._persistent_workers = loader.persistent_workers
         self._num_yielded = 0
@@ -508,17 +577,42 @@ class _BaseDataLoaderIter(object):
         self._num_yielded = 0
         self._IterableDataset_len_called = loader._IterableDataset_len_called
 
+    # 得到indices
+    # 定义在基类 _BaseDataLoaderIter 之中，就是获取下一批index
     def _next_index(self):
         return next(self._sampler_iter)  # may raise StopIteration
 
     def _next_data(self):
         raise NotImplementedError
 
+    '''
+    2.4.7 用户获取data
+    现在数据已经加载完毕，我们接下来看用户如何从DataLoader之中获取数据。
+
+    这里有一个很关键的地方：如何保持在不同实验之中数据读取顺序的一致性。
+    为了让多次实验之间可以比对，就需要尽量保证在这些实验中，每次读取数据的顺序都是一致的，这样才不会因为数据原因造成结果的误差。
+
+    打破顺序一致性的最大可能就是乱序数据。而造成乱序问题的原因就是：多进程读取，可能某个进程快，某个进程慢。
+    比如，用户这次需要读取6-19，16-26，37-46。
+    但是某一个worker慢，6-19不能即时返回，另一个worker 的 16-26 先返回了，于是就会造成乱序。
+
+    如何处理乱序数据？PyTorch的具体做法就是：DataLoader严格按照Sampler的顺序返回数据。
+    如果某一个数据是乱序的，则会把它暂存起来，转而去获取下一个数据，见下面代码中 "store out-of-order samples" 注释处。
+    等到应该返回时候（这个数据顺序到了）才返回。
+
+    但是其风险就是数据返回会比当前请求慢，比如应该获取 6，但是Data queue里面没有这个数据，只有 16，27，于是用户只能等待 6 加载完成。
+
+    解决慢的方法是：预取（prefetch）。
+    就是在reset方法最后，提前提取若干index，让DataLoader提前去取，这虽然不能保证任意两次训练的数据返回顺序完全一致，但是可以最大限度保证。
+
+    具体代码如下，首先，回忆基类的 __next__ 函数 ，可以看到其调用了 _next_data 获取数据。
+    '''
     def __next__(self) -> Any:
         with torch.autograd.profiler.record_function(self._profile_name):
             if self._sampler_iter is None:
                 self._reset()
-            data = self._next_data()
+            data = self._next_data()   # 获取数据
+
             self._num_yielded += 1
             if self._dataset_kind == _DatasetKind.Iterable and \
                     self._IterableDataset_len_called is not None and \
@@ -546,24 +640,146 @@ class _BaseDataLoaderIter(object):
         # but signalling the end is tricky without a non-blocking API
         raise NotImplementedError("{} cannot be pickled", self.__class__.__name__)
 
+'''
+2.3.3 单进程迭代器
+_SingleProcessDataLoaderIter 继承了 _BaseDataLoaderIter，可以看到，其增加了 _dataset_fetcher，在构造时候传入了 _collate_fn 等各种参数。
 
+回忆下，__next__会调用 self._next_data() 获取数据，而在这里，_next_data 就会：
+
+    使用 self._next_index()，其又会使用 _sampler_iter（采样器的迭代器）来获取indices 。
+    使用 self._dataset_fetcher.fetch(index)来依据indices获取数据。
+'''
 class _SingleProcessDataLoaderIter(_BaseDataLoaderIter):
     def __init__(self, loader):
         super(_SingleProcessDataLoaderIter, self).__init__(loader)
         assert self._timeout == 0
         assert self._num_workers == 0
-
+        # 获取样本方法
         self._dataset_fetcher = _DatasetKind.create_fetcher(
             self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last)
 
     def _next_data(self):
         index = self._next_index()  # may raise StopIteration
+        # 获取样本
         data = self._dataset_fetcher.fetch(index)  # may raise StopIteration
         if self._pin_memory:
             data = _utils.pin_memory.pin_memory(data)
         return data
 
+'''
+2.4.1 总体逻辑
+_MultiProcessingDataLoaderIter 中的注释十分详尽，值得大家深读，而且给出了逻辑流程图如下，其基本流程是围绕着三个queue进行的:
 
+    主进程把需要获取的数据 index 放入index_queue，这是指定子进程需要获取哪些数据的队列。
+    同时也给子进程传入结果队列，关于结果队列，有两个分支：
+    
+        如果设置了pin memory，则传入的是 worker_result_queue。
+        
+        否则传入 data_queue。
+        
+    子进程从 index_queue 之中读取 index，进行数据读取，然后把读取数据的index放入worker_result_queue，这是向主进程返回结果的队列。
+    
+    主进程进行处理，这里有两个分支：
+    
+        如果设置了pin memory，则主进程的 pin_memory_thread 会从 worker_result_queue 读取数据index，
+        依据这个index进行读取数据，进行处理，把结果放入 data_queue，这是处理结果的队列。
+        
+        如果不需要pin memory，则结果已经存在 data_queue 之中，不做新操作。
+        
+可以看到，每个进程的输入是一个队列index_queue ，输出也是一个队列worker_result_queue。
+主进程和子进程通过这2~3个 queue 联系了起来，从而达到解耦合和加速的作用。
+
+    # NOTE [ Data Loader Multiprocessing Shutdown Logic ]
+    #
+    # Preliminary:
+    #
+    # Our data model looks like this (queues are indicated with curly brackets):
+    #
+    #                main process                              ||
+    #                     |                                    ||
+    #               {index_queue}                              ||
+    #                     |                                    ||
+    #              worker processes                            ||     DATA
+    #                     |                                    ||
+    #            {worker_result_queue}                         ||     FLOW
+    #                     |                                    ||
+    #      pin_memory_thread of main process                   ||   DIRECTION
+    #                     |                                    ||
+    #               {data_queue}                               ||
+    #                     |                                    ||
+    #                data output                               \/
+    #
+    # P.S. `worker_result_queue` and `pin_memory_thread` part may be omitted if
+    #      `pin_memory=False`.
+
+具体如下图所示，如果不需要 pin memory，则为：
+
+                                               +-----------+
+               indices  -------------+ indices | Worker    | Data
+             +--------->+index queue +-------->+ Process   +------+
+             |          |            |         |           |      |
+             |          -------------+         +-----------+      |
+             |                                                    |   +------------+
+             |                                                    |   |            |
++---------+  |                                                    +--->            |
+| Main    |  | indices  -------------+ indices +-----------+          |            |
+| Process +------------>+index queue +-------->+ Worker    | Data     | Data Queue |
+|         |  |          |            |         | Process   +---------->            |
++---------+  |          -------------+         |           |          |            |
+             |                                 +-----------+      +--->            |
+             |                                                    |   +------------+
+             |                                                    |
+             | indices  -------------+ indices +-----------+      |
+             +--------->+index queue +-------->+ Worker    | Data |
+                        |            |         | Process   +------+
+                        -------------+         |           |
+                                               +-----------+
+
+当有pin memory时候，则是先进入 result queue，然后 pin_memory_thread 处理之后会转入到 data queue：
+
+                                               +-----------+
+               indices  -------------+ indices | Worker    | Data
+             +--------->+index queue +-------->+ Process   +------+
+             |          |            |         |           |      |
+             |          -------------+         +-----------+      |
+             |                                                    |   --------------+
+             |                                                    |   |             |
++---------+  |                                                    +--->             |
+| Main    |  | indices  -------------+ indices +-----------+          |             |
+| Process +------------>+index queue +-------->+ Worker    | Data     | result_queue|
+|         |  |          |            |         | Process   +---------->             |
++---------+  |          -------------+         |           |          |             |
+             |                                 +-----------+      +--->             |
+             |                                                    |   ---------+----+
+             |                                                    |            |
+             | indices  -------------+ indices +-----------+      |            |
+             +--------->+index queue +-------->+ Worker    | Data |  +---------+--------+
+                        |            |         | Process   +------+  | pin_memory_thread|
+                        -------------+         |           |         |         |        |
+                                               +-----------+         |         |        |
+                                                                     |         |        |
+                                                                     +------------------+
+                                                                               |
+                                                                               |
+                                                                               |
+                                                                               v
+                                                                         +-----+------+
+                                                                         | Data Queue |
+                                                                         |            |
+                                                                         +------------+
+
+2.4.2 初始化
+初始化函数如下，主要是：
+    配置，生成各种成员变量，配置各种queue。
+    启动各个子进程。
+    启动主进程中的pin_memory的线程。
+主要成员变量为：
+    _index_queues: 这是一个queue 列表，列表的每一个元素是一个 queue，就是每个子进程的队列需要处理的数据index，每个子进程对应一个 queue。
+    _worker_result_queue: 子进程处理完的 (idx, data)。
+    data_queue: 经过主进程 pin_memory 线程处理之后的数据队列，如果不需要pin，则直接会使用 _worker_result_queue。
+    _worker_queue_idx_cycle 用以找出下一个工作的worker。
+具体代码如下：
+'''
 class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
     r"""Iterates once over the DataLoader's dataset, as specified by the sampler"""
 
@@ -888,11 +1104,13 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         self._worker_init_fn = loader.worker_init_fn
         self._worker_queue_idx_cycle = itertools.cycle(range(self._num_workers))
         # No certainty which module multiprocessing_context is
+
+        # 子进程输出，读取完数据的index
         self._worker_result_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated]
         self._worker_pids_set = False
         self._shutdown = False
         self._workers_done_event = multiprocessing_context.Event()
-
+        # 子进程输入，需读取数据的index
         self._index_queues = []
         self._workers = []
         for i in range(self._num_workers):
@@ -902,7 +1120,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # See sections (2) and (3b) above.
             index_queue.cancel_join_thread()
             w = multiprocessing_context.Process(
-                target=_utils.worker._worker_loop,
+                target=_utils.worker._worker_loop,   # worker进程主函数，把各种queue和函数传进去
                 args=(self._dataset_kind, self._dataset, index_queue,
                       self._worker_result_queue, self._workers_done_event,
                       self._auto_collation, self._collate_fn, self._drop_last,
@@ -916,14 +1134,14 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             #     before it starts, and __del__ tries to join but will get:
             #     AssertionError: can only join a started process.
             w.start()
-            self._index_queues.append(index_queue)
+            self._index_queues.append(index_queue)  # 把这个worker对应的index_queue放到主进程这里存起来，以后就可以交互了
             self._workers.append(w)
 
         if self._pin_memory:
             self._pin_memory_thread_done_event = threading.Event()
 
             # Queue is not type-annotated
-            self._data_queue = queue.Queue()  # type: ignore[var-annotated]
+            self._data_queue = queue.Queue()  # type: ignore[var-annotated]  # pin 处理之后的数据结果
             pin_memory_thread = threading.Thread(
                 target=_utils.pin_memory._pin_memory_loop,
                 args=(self._worker_result_queue, self._data_queue,
@@ -935,14 +1153,46 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # pin_memory_thread once it is started.
             self._pin_memory_thread = pin_memory_thread
         else:
-            self._data_queue = self._worker_result_queue
+            self._data_queue = self._worker_result_queue  # 如果不需要pin，则直接使用_worker_result_queue
 
         # .pid can be None only before process is spawned (not the case, so ignore)
         _utils.signal_handling._set_worker_pids(id(self), tuple(w.pid for w in self._workers))  # type: ignore[misc]
         _utils.signal_handling._set_SIGCHLD_handler()
         self._worker_pids_set = True
-        self._reset(loader, first_iter=True)
+        self._reset(loader, first_iter=True)   # 继续完善业务
 
+'''
+2.4.3 业务重置
+__init__ 函数最后会调用 _reset 函数，这是进一步完善业务初始化，也用来重置环境。
+上小节函数中，已经启动了worker子进程，但是没有分配任务，所以_reset函数会进行任务分配，预取。
+_MultiProcessingDataLoaderIter有如下 flag 参数来协调各个 worker （包括各种queue）之间的工作：
+
+    _send_idx: 发送索引，用来记录这次要放 index_queue 中 batch 的 idx
+    
+    _rcvd_idx: 接受索引，记录要从 data_queue 中取出的 batch 的 idx
+    
+    _task_info: 存储将要产生的 data 信息的 dict，key为 task idx（由 0 开始的整型索引），
+    value 为 (worker_id,) 或 (worker_id, data)，分别对应数据 未取 和 已取 的情况
+    
+    _tasks_outstanding: 整型，代表已经准备好的 task/batch 的数量（可能有些正在准备中）
+    
+    _send_idx: 发送索引，记录下一次要放 index_queue 中 task batch 的 idx。
+    
+    _rcvd_idx: 接受索引，记录下一次要从 data_queue 中取出的 task batch 的 idx。
+    
+    _send_idx 和 _rcvd_idx 主要用来进行流量控制和确保接受索引有意义。
+    
+    _task_info: 存储将要产生的 data 信息的 dict，key为 task batch idx（由 0 开始的整型索引），
+    value 为 (worker_id,) 或 (worker_id, data)，分别对应数据 未取 和 已取 的情况。
+    _task_info的作用是依据 task batch idx 获取对应的 worker id 和暂存乱序数据。
+    
+    _tasks_outstanding: 整型，正在准备的 task/batch 的数量，实际上就是进行一些确认工作，没有太实际的意义。
+
+对于加载数据，每个 worker 一次产生一个 batch 的数据，返回 batch 数据前，会放入下一个批次要处理的数据下标，
+所以 reset 函数会把 _send_idx，_rcvd_idx 都恢复成0，这样下次迭代就可以重新处理。
+
+在 reset 方法最后，有一个预取数据操作。我们会在后面结合乱序处理进行讲解。
+'''
     def _reset(self, loader, first_iter=False):
         super()._reset(loader, first_iter)
         self._send_idx = 0  # idx of the next task to be sent to workers
@@ -959,6 +1209,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         # Not that this indicates that a worker still has work to do *for this epoch*.
         # It does not mean that a worker is dead. In case of `_persistent_workers`,
         # the worker will be reset to available in the next epoch.
+        # 每个worker的状态
         self._workers_status = [True for i in range(self._num_workers)]
         # We resume the prefetching in case it was enabled
         if not first_iter:
@@ -971,9 +1222,11 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                     assert return_data is None
                     resume_iteration_cnt -= 1
         # prime the prefetch loop
+        # 预取若干index，目的是为了配合后续的乱序处理。
         for _ in range(self._prefetch_factor * self._num_workers):
             self._try_put_index()
 
+    # _try_get_data 就是从 _data_queue 读取。主进程和worker进程通过queue上的put, get进行通讯交互。
     def _try_get_data(self, timeout=_utils.MP_STATUS_CHECK_INTERVAL):
         # Tries to fetch data from `self._data_queue` once for a given timeout.
         # This can also be used as inner loop of fetching without timeout, with
@@ -1119,7 +1372,13 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
 #
 # 3. Run the script with the `send` option in the second shell:
 # (shell2) ./test_socket.py sock_tmp 1017 send
+'''
+其次，我们看看 _get_data 如何从 self._data_queue 中取数据。具体是使用 _try_get_data 来提取。
 
+    如果有超时配置，就按照超时读取。
+    如果设置了pin memory，则从pin 线程处理之后的数据读取。
+    否则循环读取worker处理的数据，直至获取到数据为止。
+'''
     def _get_data(self):
         # Fetches data from `self._data_queue`.
         #
@@ -1131,13 +1390,13 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         #
         # If `pin_memory=True`, we also need check if `pin_memory_thread` had
         # died at timeouts.
-        if self._timeout > 0:
+        if self._timeout > 0:  # 如果有超时配置，就按照超时读取
             success, data = self._try_get_data(self._timeout)
             if success:
                 return data
             else:
                 raise RuntimeError('DataLoader timed out after {} seconds'.format(self._timeout))
-        elif self._pin_memory:
+        elif self._pin_memory:   # 从pin 线程处理之后的数据读取
             while self._pin_memory_thread.is_alive():
                 success, data = self._try_get_data()
                 if success:
@@ -1149,10 +1408,17 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # need to call `.task_done()` because we don't use `.join()`.
         else:
             while True:
-                success, data = self._try_get_data()
+                success, data = self._try_get_data() # 读取worker处理的数据
                 if success:
                     return data
 
+    '''
+    所以，我们要看 _MultiProcessingDataLoaderIter 的_next_data。
+    
+        因为之前有预取了index，worker进程已经开始获取数据，所以主进程此时可以得到数据，如果没有数据，就继续while True等待。
+        如果获取成功，则使用 _process_data 设定下一次的indx，准备下一次迭代。
+        通过 _task_info 来记录乱序数据，如果暂时无法处理，就在这里保存。
+    '''
     def _next_data(self):
         while True:
             # If the worker responsible for `self._rcvd_idx` has already ended
@@ -1162,11 +1428,13 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # This part needs to run in the loop because both the `self._get_data()`
             # call and `_IterableDatasetStopIteration` check below can mark
             # extra worker(s) as dead.
-            while self._rcvd_idx < self._send_idx:
+
+            # 找到待取idx
+            while self._rcvd_idx < self._send_idx:   # 如果 待取batch idx < 已取batch idx
                 info = self._task_info[self._rcvd_idx]
                 worker_id = info[0]
                 if len(info) == 2 or self._workers_status[worker_id]:  # has data or is still active
-                    break
+                    break  # 有数据或者正在工作，就跳出内部这个while
                 del self._task_info[self._rcvd_idx]
                 self._rcvd_idx += 1
             else:
@@ -1180,11 +1448,11 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # Check if the next sample has already been generated
             if len(self._task_info[self._rcvd_idx]) == 2:
                 data = self._task_info.pop(self._rcvd_idx)[1]
-                return self._process_data(data)
+                return self._process_data(data)  # 设定下一次的indx，进行下一次迭代
 
             assert not self._shutdown and self._tasks_outstanding > 0
-            idx, data = self._get_data()
-            self._tasks_outstanding -= 1
+            idx, data = self._get_data()  # 从 self._data_queue 中取数据
+            self._tasks_outstanding -= 1  # 正在准备的batch个数需要减1
             if self._dataset_kind == _DatasetKind.Iterable:
                 # Check for _IterableDatasetStopIteration
                 if isinstance(data, _utils.worker._IterableDatasetStopIteration):
@@ -1196,38 +1464,56 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                     continue
 
             if idx != self._rcvd_idx:
+                # 乱序数据
                 # store out-of-order samples
                 self._task_info[idx] += (data,)
             else:
+                # 正常数据
                 del self._task_info[idx]
-                return self._process_data(data)
+                return self._process_data(data)  # 设定下一次的indx，进行下一次迭代
 
+    '''
+    2.4.4 获取 index
+    _try_put_index 函数就是使用sampler获取下一批次的数据index。
+    这里 _prefetch_factor 缺省值是 2，主要逻辑如下。
+        从sampler获取下一批次的index。
+        通过 _worker_queue_idx_cycle 找出下一个可用的工作worker，然后把index分给它。
+        并且调整主进程的信息。
+    '''
     def _try_put_index(self):
         assert self._tasks_outstanding < self._prefetch_factor * self._num_workers
 
         try:
-            index = self._next_index()
+            index = self._next_index()  # 获取下一批index
         except StopIteration:
             return
         for _ in range(self._num_workers):  # find the next active worker, if any
             worker_queue_idx = next(self._worker_queue_idx_cycle)
-            if self._workers_status[worker_queue_idx]:
+            if self._workers_status[worker_queue_idx]:   # 如果已经工作，就继续找
                 break
         else:
             # not found (i.e., didn't break)
             return
-
+        # 以下是主进程进行相关记录
+        # 给下一个工作worker放入 (任务index, 数据index), 就是给queue放入数据，所以worker loop之中就立刻会从queue中得到index，从而开始获取数据。
         self._index_queues[worker_queue_idx].put((self._send_idx, index))
-        self._task_info[self._send_idx] = (worker_queue_idx,)
-        self._tasks_outstanding += 1
-        self._send_idx += 1
 
+        # 记录 将要产生的 data 信息
+        self._task_info[self._send_idx] = (worker_queue_idx,)
+
+        # 正在处理的batch个数+1
+        self._tasks_outstanding += 1
+
+        # send_idx 记录从sample_iter中发送索引到index_queue的次数
+        self._send_idx += 1   # 递增下一批发送的task index
+
+    #设置下一次迭代是使用_process_data
     def _process_data(self, data):
         self._rcvd_idx += 1
-        self._try_put_index()
+        self._try_put_index()   # 设定下一次的indx，进行下一次迭代
         if isinstance(data, ExceptionWrapper):
             data.reraise()
-        return data
+        return data  # 返回数据
 
     def _mark_worker_as_unavailable(self, worker_id, shutdown=False):
         # Mark a worker as having finished its work e.g., due to
