@@ -36,7 +36,7 @@ namespace {
 // zero_(SparseTensor)
 // --------------------------------------------------------------------
 
-// hummu hummu
+// hummu hummu  //又比如下面是SparseCPU, SparseCUDA 的对应实现：
 SparseTensor& zero_sparse_(SparseTensor& self) {
   AT_ASSERT(self.is_sparse());
   at::zeros_out(self, get_sparse_impl(self)->sizes());

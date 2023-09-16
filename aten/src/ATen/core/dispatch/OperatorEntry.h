@@ -61,7 +61,9 @@ struct AnnotatedSchema final {
 // Concurrent writes to OperatorEntry are protected by the GLOBAL Dispatcher
 // lock (this is important because some methods in OperatorEntry access
 // dispatcher state)
-class TORCH_API OperatorEntry final {
+//4.2.3.1 注册表
+//OperatorEntry代表了一个算子，以及该算子的dispatch table，这里只给出成员变量
+class TORCH_API OperatorEntry final {  //代表了一个算子，以及该算子的dispatch table
 public:
   explicit OperatorEntry(OperatorName&& operator_name);
 
@@ -180,7 +182,7 @@ private:
 
   OperatorName name_;
   c10::optional<AnnotatedSchema> schema_;
-
+//存储了不同key对应的算子实现版本，比如cpu，cuda，autograd 等等，所有的算子版本都会在这个table里面
   std::array<KernelFunction, static_cast<uint8_t>(DispatchKey::NumDispatchKeys)> dispatchTable_;
   DispatchKeyExtractor dispatchKeyExtractor_;
 
@@ -215,8 +217,27 @@ private:
   // re-executed and then only allow one kernel here, i.e. error if a kernel
   // is already registered, but that's a lot of effort to implement and
   // currently not high-pri.
+  //不同 DispatchKey对应了不同的版本的kernel算子实现版本
   ska::flat_hash_map<DispatchKey, std::list<AnnotatedKernel>> kernels_;
+/*
+逻辑如下：
 
++---------------------------+     +------------------------------------------+
+| OperatorEntry             |     |                                          |
+|                           |     | std::array<KernelFunction, uint8_t>      |
+|                           |     |                                          |
+|                           |     |                                          |
+|                           |     |           int('CPU') : CPU_kernel        |
+|        dispatchTable_ +-------> |                                          |
+|                           |     |           int('GPU') : GPU_kernel        |
+|                           |     |                                          |
+|                           |     |           ......                         |
+|                           |     |                                          |
+|                           |     |           int('Metal') : Metal_kernel    |
+|                           |     |                                          |
++---------------------------+     +------------------------------------------+
+
+*/
   AnnotatedKernel missingKernel_;
   static const AnnotatedKernel ambiguousAutogradOtherKernel_;
 

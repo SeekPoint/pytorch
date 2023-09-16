@@ -50,6 +50,8 @@ class SchemaRegistrationHandleRAII;
  * Most end users shouldn't use this directly; if you're trying to register
  * ops look in op_registration
  */
+// 4.2.2 Dispatcher 定义
+//我们接下来看看Dispatcher的定义，这里只给出部分成员变量。
 class TORCH_API Dispatcher final {
 private:
   // For direct access to backend fallback information
@@ -274,9 +276,25 @@ private:
   void deregisterLibrary_(const std::string& ns);
   void cleanup(const OperatorHandle& op, const OperatorName& op_name);
   void checkSchemaCompatibility(const OperatorHandle& op, const FunctionSchema& schema, const std::string& debug);
-
+//存储所有的算子，并在其成员变量中存储了每个算子的不同版本，比如cpu，cuda，autograd....
   std::list<OperatorDef> operators_;
+//注册算子时会将算子名称和方法也存储在这个里面, 这样就可以快速的通过名字查找到算子方法(其中包含了成员OperatorDef)
   LeftRight<ska::flat_hash_map<OperatorName, OperatorHandle>> operatorLookupTable_;
+/*
+逻辑大致如下，operators_ 存储了所有的算子：
+
++--------------------------------------------+
+| Dispatcher                                 |
+|                                            |
+|                                            |
+|                                            |
+|     std::list<OperatorDef> operators_      |
+|                                            |
+|     operatorLookupTable_                   |
+|                                            |
++--------------------------------------------+
+*/
+
   // Map from namespace to debug string (saying, e.g., where the library was defined)
   ska::flat_hash_map<std::string, std::string> libraries_;
 
@@ -503,18 +521,21 @@ inline Return Dispatcher::callWithDispatchKeySlowPath(const TypedOperatorHandle<
   // keeping the guard alive while executing the kernel
   return kernel.template call<Return, Args...>(op, dispatchKeySet, std::forward<Args>(args)...);
 }
-
+其次，Dispatcher::call 定义如下：
 // See [Note: Argument forwarding in the dispatcher] for why Args doesn't use &&
 template<class Return, class... Args>
 C10_DISPATCHER_INLINE_UNLESS_MOBILE Return Dispatcher::call(const TypedOperatorHandle<Return(Args...)>& op, Args... args) const {
   detail::unused_arg_(args...);  // workaround for a false-positive warning about unused parameters in gcc 5
+  // 得到key set
   auto dispatchKeySet = op.operatorDef_->op.dispatchKeyExtractor()
     .template getDispatchKeySetUnboxed<Args...>(
       DispatchKeySet::FULL,
       args...
     );
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(!c10::isAliasDispatchKey(dispatchKeySet.highestPriorityTypeId()));
+  // 得到算子
   const KernelFunction& kernel = op.operatorDef_->op.lookup(dispatchKeySet.highestPriorityTypeId());
+  // 进行调度
 #ifndef PYTORCH_DISABLE_PER_OP_PROFILING
   // By default, when there're no high-frequency or non-sampled callbacks,
   // RecordFunction is pre-sampled as a perf optimization;

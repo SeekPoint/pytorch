@@ -281,6 +281,9 @@ inline CppFunction dispatch(c10::DispatchKey k, Func&& raw_f) {
 /// Convenience overload of dispatch() which accepts c10::DeviceType
 ///
 /// \ingroup torch-dispatch-overloads
+//4.2.4.4 key的使用
+//因为篇幅所限，我们无法深入分析每一种情况，这里只给出从 DeviceType 出发的情景。
+//我们从下面函数可以看到，如何从 DeviceType 映射到 DispatchKey 类型。
 template <typename Func>
 inline CppFunction dispatch(c10::DeviceType type, Func&& raw_f) {
   auto deviceTypeToDispatchKey = [](c10::DeviceType t){

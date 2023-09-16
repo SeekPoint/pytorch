@@ -24,6 +24,8 @@ Tensor& mkldnn_zero_(Tensor& self) {
 namespace at {
 namespace native {
 
+//4.2.1.2 Operator的实现
+//我们可以看看 zero 的两个实现，下面是MkldnnCPU的实现。
 Tensor& mkldnn_zero_(Tensor& self) {
   using Vec = vec256::Vec256<float>;
 

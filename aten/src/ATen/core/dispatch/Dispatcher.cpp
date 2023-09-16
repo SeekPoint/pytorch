@@ -186,7 +186,8 @@ void Dispatcher::deregisterDef_(const OperatorHandle& op, const OperatorName& op
 
   cleanup(op, op_name);
 }
-
+//4.2.3 注册
+//我们接下来给出注册虚函数表的方法。
 RegistrationHandleRAII Dispatcher::registerImpl(
   OperatorName op_name,
   c10::optional<DispatchKey> dispatch_key,
@@ -199,7 +200,7 @@ RegistrationHandleRAII Dispatcher::registerImpl(
 
   auto op = findOrRegisterName_(op_name);
 
-  auto handle = op.operatorDef_->op.registerKernel(
+  auto handle = op.operatorDef_->op.registerKernel(  // 进行注册
     *this,
     dispatch_key,
     std::move(kernel),

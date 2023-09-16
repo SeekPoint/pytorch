@@ -4575,6 +4575,17 @@
     SparseCPU, SparseCUDA: resize_as_sparse_
     SparseCsrCPU: resize_as_sparse_csr_
 
+#4.2 Dispatcher 代码
+#我们接下来通过源码来看看。
+#
+#4.2.1 虚函数表
+#4.2.1.1 Schema 例子
+#每个kernel 算子（虚函数）都有一个对应的schema，
+#  我们可以从 aten/src/ATen/native/native_functions.yaml 之中找到一些虚函数 schema 的例子，这些都是以字符串的形式呈现。
+#  我们可以看到，schema 包括算子名称（比如zero_sparse_），输入参数个数和类型，返回值类型，是否需要check，如何分发等等。
+
+
+## zero 操作对应的虚函数表
 - func: zero_(Tensor(a!) self) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
   variants: method, function
@@ -4584,6 +4595,7 @@
     SparseCPU, SparseCUDA: zero_sparse_
     MkldnnCPU: mkldnn_zero_
 
+# sub.out 对应的虚函数表
 - func: sub.out(Tensor self, Tensor other, *, Scalar alpha=1, Tensor(a!) out) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
   structured: True
@@ -4592,6 +4604,7 @@
     CPU, CUDA: sub_out
     SparseCPU, SparseCUDA: sub_out_sparse
 
+# sub.Tensor 对应的虚函数表
 - func: sub.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
   device_check: NoCheck   # TensorIterator
   variants: function, method

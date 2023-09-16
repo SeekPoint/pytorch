@@ -20,6 +20,8 @@ namespace c10 {
 // key.)
 //
 // NOTE: Keep the list in sync with `DispatchKey` in tools/codegen/model.py
+//4.2.4.3 key
+//我们接下来看看key的定义，因为太多，所以我们只给出部分数值。
 enum class DispatchKey : uint8_t {
 
   // ~~~~~~~~~~~~~~~~~~~~~~~~~~ UNDEFINED ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ //

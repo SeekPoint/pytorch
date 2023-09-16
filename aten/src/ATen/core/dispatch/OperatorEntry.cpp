@@ -266,6 +266,58 @@ std::pair<const AnnotatedKernel&, const char*> OperatorEntry::computeDispatchTab
 // dispatch keys (e.g. runtime keys and their associated autograd keys,
 // or alias keys and their associated keysets).
 // This function should be considered a private helper for updateDispatchTable_()
+/*
+4.2.3.2 注册行为
+最终注册行为就是往 dispatchTable_ 之中设置。
+所以 Dispatcher 数据结构拓展近似如下，这里包含了两个OperatorEntry，分别对应了op1和op2，就是说，目前系统中一共有两个operator，每个 operator 有4个kernel函数，分别对应了CPU，GPU等四个后端。
+
++-----------------------------------------+
+| Dispatcher                              |
+|                                         |
+|                                         |
+|   std::list<OperatorDef> operators_ +--------+
+|                                         |    |
+|                                         |    |
+|   operatorLookupTable_                  |    |
+|                                         |    |
++-----------------------------------------+    |
+                                               |
+                                               |
+                                               v
+           +-----------------------------------+------------------------------------------+
+           |  +---------------------------+     +--------------------------------------+  |
+           |  | OperatorEntry             |     |                                      |  |
+           |  |                           |     | std::array<KernelFunction, uint8_t>  |  |
+           |  |                           |     |                                      |  |
+           |  |        name_ = op1        |     |                                      |  |
+           |  |                           |     |           int('CPU') : op1_cpu       |  |
+           |  |        dispatchTable_ +-------> |                                      |  |
+           |  |                           |     |           int('GPU') : op1_gpu       |  |
+           |  |                           |     |                                      |  |
+           |  |                           |     |           int('XLA') : op1_xla       |  |
+           |  |                           |     |                                      |  |
+           |  |                           |     |           int('Metal') : op1_metal   |  |
+           |  |                           |     |                                      |  |
+           |  +---------------------------+     +--------------------------------------+  |
+           |                                                                              |
+           |                                                                              |
+           |  +---------------------------+     +--------------------------------------+  |
+           |  | OperatorEntry             |     |                                      |  |
+           |  |                           |     | std::array<KernelFunction, uint8_t>  |  |
+           |  |                           |     |                                      |  |
+           |  |        name_ = op2        |     |                                      |  |
+           |  |                           |     |           int('CPU') : op2_cpu       |  |
+           |  |        dispatchTable_ +-------> |                                      |  |
+           |  |                           |     |           int('GPU') : op2_gpu       |  |
+           |  |                           |     |                                      |  |
+           |  |                           |     |           int('XLA') : op2_xla       |  |
+           |  |                           |     |                                      |  |
+           |  |                           |     |           int('Metal') : op2_metal   |  |
+           |  |                           |     |                                      |  |
+           |  +---------------------------+     +--------------------------------------+  |
+           +------------------------------------------------------------------------------+
+
+*/
 void OperatorEntry::updateDispatchTableEntry_(const c10::Dispatcher& dispatcher, DispatchKey dispatch_key) {
   auto dispatch_ix = static_cast<uint8_t>(dispatch_key);
   dispatchTable_[dispatch_ix] = computeDispatchTableEntry(dispatcher, dispatch_key);

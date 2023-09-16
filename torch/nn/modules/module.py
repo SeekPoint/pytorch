@@ -200,7 +200,13 @@ def _forward_unimplemented(self, *input: Any) -> None:
     """
     raise NotImplementedError
 
-
+'''
+2.2 Module
+深度学习的模型可以看做是一种参数的容器，运行模型其实就是对输入参数做了一些基本的矩阵运算。
+一般来说，用户定义的模型都是派生自 nn.modules.module 类。
+而分布式训练涉及到同步更新参数和把模型拷贝到多个worker之上，所以我们首先需要看看Module的状况。
+从定义中可以看出来，Module的成员变量主要分为状态参数和hooks函数
+'''
 class Module:
     r"""Base class for all neural network modules.
 
@@ -254,8 +260,8 @@ class Module:
         torch._C._log_api_usage_once("python.nn_module")
 
         self.training = True
-        self._parameters = OrderedDict()
-        self._buffers = OrderedDict()
+        self._parameters = OrderedDict()  # 在训练过程中会随着 BP 而更新的参数
+        self._buffers = OrderedDict() # 在训练过程中不会随着 BP 而更新的参数
         self._non_persistent_buffers_set = set()
         self._backward_hooks = OrderedDict()
         self._is_full_backward_hook = None
@@ -264,6 +270,18 @@ class Module:
         self._state_dict_hooks = OrderedDict()
         self._load_state_dict_pre_hooks = OrderedDict()
         self._modules = OrderedDict()
+        '''
+        我们主要对状态参数进行说明。状态参数之中，主要有四种：
+            self.training 本网络是否正在训练。
+            self._modules 是本网络下属的子模块，采取迭代的方式进行定义。
+            self._parameters 网络的参数。是在训练过程中会随着 BP 而更新的参数，就是梯度更新的对象。
+            self._buffers 在训练过程中，不会随着BP更新的参数，但需要被保存，
+                        比如BatchNorm中的moving mean and variance，其优化不是通过梯度反向传播而是通过其他途径。
+        从本质上讲，当一个模型的网络结构被定义之后，self._parameters 和 self._buffers的组合是一个模型的具体状态。如果需要拷贝一个模型：
+            self._modules属于网络结构的一部分，当我们拷贝模型到其他workers时，会一起拷贝过来。
+            而self._parameters 和 self._buffers 都需要显式拷贝到其他worker，这样才能在不同的Python进程之中维持相同的状态。
+        那么，这是不是意味着我们只需要拷贝 self._modules，self._parameters 和 self._buffers 这些就可以了？让我们继续往下看。
+        '''
 
     forward: Callable[..., Any] = _forward_unimplemented
 
@@ -528,7 +546,22 @@ class Module:
     def _apply(self, fn):
         for module in self.children():
             module._apply(fn)
-
+        '''
+        2.3.3 _apply 方法
+        我们可以看到其主要逻辑是：
+        
+            遍历 _parameters：
+            
+                对参数调用fn进行处理，得到param_applied。
+                    用 param_applied 重新设置参数。
+                    
+                如果参数有梯度，则：
+                    对参数的grad调用fn进行处理，得到grad_applied。
+                    用 grad_applied 重新设置参数的梯度。
+                
+            遍历 _buffers：
+                对buf调用fn进行处理。
+        '''
         def compute_should_use_set_data(tensor, tensor_applied):
             if torch._has_compatible_shallow_copy_type(tensor, tensor_applied):
                 # If the new tensor has compatible tensor type as the existing tensor,
@@ -543,36 +576,86 @@ class Module:
             else:
                 return False
 
+        # 遍历 _parameters
         for key, param in self._parameters.items():
             if param is not None:
                 # Tensors stored in modules are graph leaves, and we don't want to
                 # track autograd history of `param_applied`, so we have to use
                 # `with torch.no_grad():`
                 with torch.no_grad():
-                    param_applied = fn(param)
+                    param_applied = fn(param)  # 对参数调用fn进行处理，得到param_applied
                 should_use_set_data = compute_should_use_set_data(param, param_applied)
                 if should_use_set_data:
-                    param.data = param_applied
+                    param.data = param_applied # 用 param_applied 重新设置
                 else:
                     assert isinstance(param, Parameter)
                     assert param.is_leaf
+                    # # 用 param_applied 重新设置
                     self._parameters[key] = Parameter(param_applied, param.requires_grad)
 
-                if param.grad is not None:
+                if param.grad is not None:  # 如果参数有梯度
                     with torch.no_grad():
-                        grad_applied = fn(param.grad)
+                        grad_applied = fn(param.grad)  # 对参数的grad调用fn进行处理
                     should_use_set_data = compute_should_use_set_data(param.grad, grad_applied)
                     if should_use_set_data:
-                        param.grad.data = grad_applied
+                        param.grad.data = grad_applied  # 用 grad_applied 重新设置
                     else:
                         assert param.grad.is_leaf
+                        # 用 grad_applied 重新设置
                         self._parameters[key].grad = grad_applied.requires_grad_(param.grad.requires_grad)
 
+        # 遍历 _buffers
         for key, buf in self._buffers.items():
             if buf is not None:
+                # 对buf调用fn进行处理
                 self._buffers[key] = fn(buf)
 
         return self
+        '''
+因此我们可以看到，移动模型到GPU，其实就是把模型的self._parameters 和 self._buffers 移动到 GPU，并没有对 self._modules 进行移动。
+我们对模型进行 .cuda() 处理，是将模型的参数放到显存上去（实际使用的时候也是通过这些参数做运算）。
+
+比如原来模型在下图左侧，进行 Module.cuda() 操作之后，模型如右边所示。
+
+                                        +
+                                        |
++---------------------------------+     |     +----------------------------------+
+| CPU                             |     |     | CPU                              |
+|  +--------------+               |     |     |       +--------------------+     |
+|  |Module        |               |     |     |       | Module             |     |
+|  |              |               |     |     |       |                    |     |
+|  | _parameters+----> Parameters |     |     |       |     _parameters ------+  |
+|  |              |               |     |     |       |                    |  |  |
+|  | _buffers +------> Buffers    |     |     |     +-----+ _buffers       |  |  |
+|  |              |               |     |     |     | |                    |  |  |
+|  | _modules     |               |     |     |     | |     _modules       |  |  |
+|  |              |               |     |     |     | |                    |  |  |
+|  +--------------+               |     |     |     | +--------------------+  |  |
+|                                 |     |     |     |                         |  |
++---------------------------------+     |     +----------------------------------+
+                                        |           |                         |
+                                        +           |                         |
++------------------------------->  Module.cuda() +---------------------------------> Time
+                                        +           |                         |
+                                        |           |                         |
++---------------------------------+     |     +----------------------------------+
+| GPU                             |     |     | GPU |                         |  |
+|                                 |     |     |     |                         |  |
+|                                 |     |     |     |       Parameters  <-----+  |
+|                                 |     |     |     |                            |
+|                                 |     |     |     |                            |
+|                                 |     |     |     +---->  Buffers              |
+|                                 |     |     |                                  |
+|                                 |     |     |                                  |
++---------------------------------+     |     +----------------------------------+
+                                        |
+                                        +
+为什么 self._modules 没有被移动？这是因为没有必要，因为_modules 可以认为是一个list，
+其主要起到了桥梁作用，对其递归遍历可以被用来获取网络所有的 parameters。
+而这个功能在后续操作之中不是必须的。
+
+DP 就是在每次网络传播开始前，会把master节点上的parameters和buffer广播给其他节点，以此来维持状态的统一。
+        '''
 
     def apply(self: T, fn: Callable[['Module'], None]) -> T:
         r"""Applies ``fn`` recursively to every submodule (as returned by ``.children()``)
@@ -617,6 +700,11 @@ class Module:
         fn(self)
         return self
 
+    '''
+    2.3.2 操作
+    示例之中使用了 cuda 方法把模型复制到 GPU 之上，注释中指出了是把模型的 parameters 和 buffers 移动到 GPU 之上。
+    代码中实际就是使用 self._apply 来调用 cuda(device)。
+    '''
     def cuda(self: T, device: Optional[Union[int, device]] = None) -> T:
         r"""Moves all model parameters and buffers to the GPU.
 
@@ -655,6 +743,7 @@ class Module:
         """
         return self._apply(lambda t: t.xpu(device))
 
+    #其次，cpu 方法也是使用 self._apply 来调用 cpu(device)。
     def cpu(self: T) -> T:
         r"""Moves all model parameters and buffers to the CPU.
 
@@ -749,6 +838,7 @@ class Module:
     def to(self: T, tensor: Tensor, non_blocking: bool = ...) -> T:
         ...
 
+    # 首先，to 方法其实本质也是使用 self._apply 来调用 to(device)，我们省略了一些检验代码。
     def to(self, *args, **kwargs):
         r"""Moves and/or casts the parameters and buffers.
 

@@ -20,6 +20,19 @@ very few code changes are necessary, if any.
 
 The example from :ref:`cuda-semantics` will work exactly the same for HIP::
 
+
+0x02 移动模型到GPU
+2.1 cuda 操作
+CUDA 是NVIDIA公司开发的GPU编程模型，其提供了GPU编程接口，用户可以基于CUDA编程来构建基于GPU计算的应用。
+torch.cuda用于设置 cuda 和运行cuda操作。它跟踪当前选定的GPU，默认情况下，用户分配的所有CUDA张量都将在该设备上创建。
+用户可以使用 torch.cuda.device 来修改所选设备。
+一旦分配了张量，您可以对其执行操作，而不考虑所选设备，PyTorch 会把运行结果与原始张量放在同一设备上。
+默认情况下，除了~torch.Tensor.copy_和其他具有类似复制功能的方法（如~torch.Tensor.to和~torch.Tensor.cuda）之外，
+不允许跨GPU操作，除非启用对等（peer-to-peer）内存访问。
+
+我们从源码之中找出一个具体示例如下，大家可以看到，张量可以在设备上被创建，操作。
+
+
     cuda = torch.device('cuda')     # Default HIP device
     cuda0 = torch.device('cuda:0')  # 'rocm' or 'hip' are not valid, use 'cuda'
     cuda2 = torch.device('cuda:2')  # GPU 2 (these are 0-indexed)

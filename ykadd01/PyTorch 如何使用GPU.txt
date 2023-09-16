@@ -1,0 +1,532 @@
+PyTorch 如何使用GPU
+https://www.cnblogs.com/rossiXYZ/p/15518457.html
+
+
+
+0x00 摘要
+在 PyTorch DataParallel 训练过程中，其会在多个GPU之上复制模型副本，然后才开始训练。笔者在分析过程中，发现如果不把一些GPU相关基础知识整理出来，很难理解DataParallel的这个复制模型的过程，遂有此文。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+0x01 问题
+在 DataParallel 进行前向传播之前，需要在GPU之上分散数据，复制模型，具体可见下图。
+    02-04.png
+由此我们有几个问题：
+    移动模型到GPU这个动作的背后究竟做了哪些操作？
+    如何在 CPU 之上调用 GPU 操作？
+    如何在 CPU，GPU 操作之间无缝切换？
+    是否需要把损失函数移动到 GPU 之上？
+我们接下来就一一分析。
+注，关于CUDA和Dispatcher我们只是大致介绍，目的是可以让读者走通整个流程，有兴趣的读者可以自行深入研究。
+
+
+...
+
+
+2.3 移动
+2.3.1 示例
+前面看到了如何在 GPU 上操作张量，我们接下来看看如何把模型放置到 GPU 之上。
+
+首先我们定义了一个模型。
+
+    class ToyModel(nn.Module):
+        def __init__(self):
+            super(ToyModel, self).__init__()
+            self.net1 = nn.Linear(10, 10)
+            self.relu = nn.ReLU()
+            self.net2 = nn.Linear(10, 5)
+
+        def forward(self, x):
+            return self.net2(self.relu(self.net1(x)))
+然后通过如下方式使用模型。
+
+    model = ToyModel().cuda(device_ids[0]) # 这里复制模型到 GPU 之上
+    ddp_model = DDP(model, device_ids)
+
+    loss_fn = nn.MSELoss() # 接着进行训练
+    optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
+
+    optimizer.zero_grad()
+    outputs = ddp_model(torch.randn(20, 10))
+    labels = torch.randn(20, 5).to(device_ids[0])
+    loss_fn(outputs, labels).backward()
+    optimizer.step()
+
+...
+
+
+2.4 小结
+现在我们可以回答了第一个问题：移动模型到GPU这个动作的背后究竟做了哪些操作？
+答案：
+调用 cuda 或者 to 方法来移动模型到GPU，
+其实就是把模型的self._parameters 和 self._buffers 移动到 GPU，并没有对 self._modules 进行移动。
+这个移动过程是递归调用的，是把模型每个叶子都移动到了 GPU 之上。
+
+
+
+0x03 在GPU之上调用函数
+3.1 CUDA编程模型基础
+我们首先介绍一下CUDA编程模型基础。
+
+3.1.1 异构模型
+CUDA编程模型是一个异构模型。程序运行在一个异构系统之上，这个异构系统由CPU和GPU构成，它们之间由总线分开，程序运行时候是由CPU和GPU协同工作。
+在CUDA之中，有两个重要概念：host和device。
+
+    Host ：CPU及其内存。
+
+    Device ：GPU及其内存。
+
+因此，CUDA 架构下的一个程序也对应分为两个部份：Host 代码和Device代码，它们分别在CPU和GPU上运行。
+host与device之间可以通信进行数据拷贝。
+
+    主机代码（Host Code）：在 CPU 上执行的部份，
+    使用Linux（GNU gcc）和Windows（Microsoft Visual C）编译器来编译。大致可以认为认为C语言工作对象是CPU和内存条。
+
+    设备代码（Device Code）：在GPU上执行的部份，使用 NVIDIA NVCC 编译器来编译。
+    大致可以认为 CUDA C工作对象是GPU及GPU上内存（也叫设备内存）。
++-------------------+        +--------------------+
+|                   |        |                    |
+|   +----------+    |        |    +----------+    |
+|   |          |    |        |    |          |    |
+|   |   RAM    |    |        |    |   RAM    |    |
+|   |          |    |        |    |          |    |
+|   +----+-----+    |        |    +----+-----+    |
+|        |          +--------+         |          |
+|        |          |        |         |          |
+|   +----+-----+    |        |    +----+-----+    |
+|   |          |    |        |    |          |    |
+|   |   CPU    |    |        |    |   GPU    |    |
+|   |          |    |        |    |          |    |
+|   +----------+    |        |    +----------+    |
+|                   |        |                    |
++-------------------+        +--------------------+
+
+      Host                           Device
+
+3.1.2 并行思想
+CUDA 编程的思路是并行思想，大致如下：
+
+    把一个很大的执行任务划分成若干个简单的可以重复的操作，然后使用若干个线程来分别执行这些操作，达到并行的目的。
+
+    执行任务处理的数据也要对应分组成多个小数据块。比如一个大数据分成若干个GPU组，
+    每个GPU组要再次分成多个线程组，线程组内的张量可能需要再细分为张量处理器能处理的小组。
+02-05.png
+
+因此，一个典型的CUDA程序包括串行代码和并行代码。
+    串行代码是标准C代码，由host执行。
+    并行代码是CUDA C代码，在device中执行。
+
+CUDA 主程序由CPU开始，即程序由host执行串行代码开始，当遇到需要数据并行处理的部分，则由device执行并行代码来作为补足。
+device可以独立于host进行大部分操作。
+当一个device代码启动之后，控制权会立刻返还给CPU来执行其他任务，所以这是一个异步过程。
+    02-06.png
+    图来自 https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html。
+
+3.1.3 处理流程
+典型的CUDA程序的执行流程如下：
+    分配host内存空间并且初始化数据。
+    分配device显存空间。
+    将要计算的数据从Host内存之上复制到device显存之上。
+    调用CUDA核函数在device上完成用户指定的运算。
+    将计算后GPU内存上的结果复制到Host内存上。
+    释放device和host上分配的内存。
+具体可以参见下图。
+    02-07.png
+
+3.2 函数
+3.2.1 核函数
+核函数是在device线程中并行执行的函数。
+在 CUDA 程序中，主程序在调用GPU内核之前需要对核进行执行配置，以确定线程块数，每个线程块中线程数和共享内存大小。
+比如在调用时需要用<<参数1,参数2>>来指定核函数需要的线程数量以及线程是如何组织，这样在GPU之中就会启动若干个线程来并行执行这个核函数，每个线程被分配一个唯一的线程号。
+
+CUDA通过函数类型限定词来区别host和device上的函数，主要的三个函数类型限定词为：
+
+    限定符	执行	调用	备注
+    __global__	设备端执行	可以从主机调用也可以从某些特定设备调用	异步操作，host 将并行计算任务发射到GPU的任务调用单之后，不会等待kernel执行完就执行下一步
+    __device__	设备端执行	设备端调用	不可以和__global__同时用
+    __host__	主机端执行	主机调用	可省略，不可和__global__同时用，可和__device__同时用，此时函数在device和host都编译。
+具体如下：
+
++------------------------+   +------------------------+
+|                        |   |                        |
+|                        |   |                        |
+| __host__   __global__  |   |          __device__    |
+|    +           +       |   |                        |
+|    |           |       |   |              +         |
+|    |           |       |   |              |         |
+|    |           v--------------->          |         |
+|    |                   |   |   |          |         |
+|    |                   |   |   |          |         |
+|    |                   |   |   |          |         |
+|    |                   |   |   |          |         |
+|    |                   |   |   |          |         |
+|    |                   |   |   |          |         |
+|    |                   |   |   |          |         |
+|    |                   |   |   |          |         |
+|    |                   |   |   |          |         |
+|    |           +<--------------v          |         |
+|    |           |       |   |              |         |
+|    |           |       |   |              |         |
+|    |           |       |   |              |         |
+|    v           v       |   |              v         |
+|                        |   |                        |
++------------------------+   +------------------------+
+
+      Host                           Device
+
+这三个限定词其实也是 CUDA 中常见的三种运行场景。其中，device 函数和global函数因为需要在GPU上运行，
+因此不能调用常见的一些 C/C++ 函数（因为这些函数没有对应的 GPU 实现）。
+
+如下代码是 NVIDIA 的例子，使用内置的 threadIdx 变量，把 A 和 B 两个张量进行相加，得到 C。因此，N 个线程之中每个都会执行 VecAdd() 。
+
+    // Kernel definition
+    __global__ void VecAdd(float* A, float* B, float* C)
+    {
+        int i = threadIdx.x;
+        C[i] = A[i] + B[i];
+    }
+
+    int main()
+    {
+        ...
+        // Kernel invocation with N threads
+        VecAdd<<<1, N>>>(A, B, C);
+        ...
+    }
+
+3.2.2 PyTorch 样例
+我们从 third_party/cub/cub/device/dispatch/dispatch_reduce.cuh 找一个核函数例子来看看。
+
+/**
+ * Reduce region kernel entry point (multi-block).  Computes privatized reductions, one per thread block.
+ */
+template <
+    typename                ChainedPolicyT,             ///< Chained tuning policy
+    typename                InputIteratorT,             ///< Random-access input iterator type for reading input items \iterator
+    typename                OutputIteratorT,            ///< Output iterator type for recording the reduced aggregate \iterator
+    typename                OffsetT,                    ///< Signed integer type for global offsets
+    typename                ReductionOpT>               ///< Binary reduction functor type having member <tt>T operator()(const T &a, const T &b)</tt>
+__launch_bounds__ (int(ChainedPolicyT::ActivePolicy::ReducePolicy::BLOCK_THREADS))
+__global__ void DeviceReduceKernel(
+    InputIteratorT          d_in,                       ///< [in] Pointer to the input sequence of data items
+    OutputIteratorT         d_out,                      ///< [out] Pointer to the output aggregate
+    OffsetT                 num_items,                  ///< [in] Total number of input data items
+    GridEvenShare<OffsetT>  even_share,                 ///< [in] Even-share descriptor for mapping an equal number of tiles onto each thread block
+    ReductionOpT            reduction_op)               ///< [in] Binary reduction functor
+{
+    // The output value type
+    typedef typename If<(Equals<typename std::iterator_traits<OutputIteratorT>::value_type, void>::VALUE),  // OutputT =  (if output iterator's value type is void) ?
+        typename std::iterator_traits<InputIteratorT>::value_type,                                          // ... then the input iterator's value type,
+        typename std::iterator_traits<OutputIteratorT>::value_type>::Type OutputT;                          // ... else the output iterator's value type
+
+    // Thread block type for reducing input tiles
+    typedef AgentReduce<
+            typename ChainedPolicyT::ActivePolicy::ReducePolicy,
+            InputIteratorT,
+            OutputIteratorT,
+            OffsetT,
+            ReductionOpT>
+        AgentReduceT;
+
+    // Shared memory storage
+    __shared__ typename AgentReduceT::TempStorage temp_storage;
+
+    // Consume input tiles
+    OutputT block_aggregate = AgentReduceT(temp_storage, d_in, reduction_op).ConsumeTiles(even_share);
+
+    // Output result
+    if (threadIdx.x == 0)
+        d_out[blockIdx.x] = block_aggregate;
+}
+3.3 小结
+目前我们知道了，PyTorch 其实可以通过调用 __global__ 方法来在GPU之上执行并行操作。这回答了我们的第二个问题：如何在 CPU 之上调用 GPU 操作？
+
+
+0x04 在GPU/CPU之间切换
+我们接下来分析如何在GPU/CPU之间切换。
+由示例代码可以知道，只要调用了 cuda 函数把模型移动到 GPU 之上，我们就可以使用 CUDA global 核函数在GPU上进行并行运算。
+
+    model = ToyModel().cuda(device_ids[0]) # 这里复制模型到 GPU 之上
+    ddp_model = DDP(model, device_ids)
+
+    loss_fn = nn.MSELoss()
+    optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
+
+    optimizer.zero_grad()
+    outputs = ddp_model(torch.randn(20, 10))
+但是我们忽略了一个问题，就是 PyTorch 怎么知道此时应该调用GPU对应的 global 核函数？
+为什么 PyTorch 就不调用 CPU 函数或者其他设备的函数了？
+这就是我们接下来需要分析的。
+
+4.1 Dispatcher 机制
+此处我们主要借鉴 http://blog.ezyang.com/2020/09/lets-talk-about-the-pytorch-dispatcher/。
+
+4.1.1 问题
+在PyTorch中，operator 所表现出预期行为是由很多机制共同作用导致的，比如：
+    做实际工作的kernel。
+    是否支持反向自动微分，例如，使 loss.backward() 正常工作的标记位。
+    是否启用了torch.jit.trace。
+    如果你正在vmap调用中，所运行operator将会表现出不同的批处理行为。
+
+因此，我们知道有太多不同的方式可以对PyTorch operator进行不同的解释，
+如果我们试图在一个名为add的单一函数里面处理所有的行为，我们的实现代码会很快演变成一个不可维护的混乱局面。
+
+所以我们需要有一个机制来解决这个问题，这个机制不仅仅是一个if语句这么简单，
+而是PyTorch内部一个非常重要的抽象，而且它必须在尽可能不降低PyTorch性能的情况下做到这一点。
+这个机制就是 Dispatcher。
+    02-08.jpg
+
+4.1.2 什么是 Dispatcher
+什么是dispatcher？dispatcher对于每个operator都会维护一个函数指针表，
+这些函数为每个dispatch key提供了对应的实现，这套机制大致对应于PyTorch中的一个横切关注点。
+在上图中，你可以看到在这个表中有针对不同后端（CPU、CUDA、XLA）以及更高级概念（例如 autograd 和跟踪）的dispatch条目。
+dispatcher的工作是根据输入的tensor和其他一些东西（比如参数个数，返回值类型等等）来计算出一个dispatch key，
+然后跳转到函数指针表所指向的函数。
+
+熟悉 C++ 的人可能会注意到，这个函数指针表与C++中的虚表非常相似。
+在C++中，对象的虚函数是通过将每个对象与一个虚表的指针相关联来实现的，该虚表包含了有关对象上每个虚函数的实现。
+在PyTorch中，我们基本上重新实现了虚拟表，但有一些区别。
+
+    dispatch表之中包括了 dispatch key 和其对应的函数指针，
+    我们可以发现，dispatch key不仅仅有后端（CPU、CUDA、XLA），也有一些更高级的概念（例如 autograd 和跟踪）。
+
+    dispatch表是按operator分配的，而虚表是按类分配的。这意味着我们可以通过分配一个新的dispatch表来扩展所支持的operator集。
+    与其不同的是，对于一个C++对象，你可以通过继承子类来扩展类型，但你不能轻易添加虚函数。
+    与普通的面向对象系统不同，PyTorch大部分的可扩展性在于定义新的operator（而不是新的子类），所以这种权衡是合理的。
+    此外，dispatch key的种类不是公开可扩展的，我们希望那些想添加新dispatch key的使用者通过向PyTorch核心团队提交一个补丁来添加他们的dispatch key。
+
+    我们的dispatch key的计算考虑了operator的所有参数（multiple dispatch）以及线程本地状态（TLS）。
+    这与虚表不同，在虚表中只有第一个对象（this指针）很重要。
+
+    最后，dispatcher支持boxing和unboxing作为op的调用约定的一部分。在文章的最后部分会有更多关于这个的内容。
+
+有趣的历史笔记：我们曾经使用虚函数来实现动态dispatch，当我们意识到需要比虚表更多的能力时，我们重新实现了动态dispatch。
+    02-09.png
+
+
+4.1.3 如何计算key
+那么，我们究竟是如何计算dispatch key的呢？
+我们是基于dispatch key set来完成的，dispatch key set是一个基本抽象，它是dispatch key的一个bitset。
+大致来讲，我们综合来自不同来源的dispatch key sets（在某些情况下屏蔽一些key）来得到一个最终的dispatch key set。
+然后我们在这个set中挑选优先级最高的key（dispatch keys按某些优先级隐式排序），这就是我们这次应该调用的结果。
+那么，这些dispatch key sets的来源是什么？
+
+    每个张量输入都有一个由该张量上的所有dispatch key组成的dispatch key set
+    （直观地说，这些dispatch key的值会是类似 “CPU”字符串这样的东西，这告诉我们该张量是一个CPU张量，
+    所以应该由dispatch表中的CPU handler来处理）。
+
+    我们还有一个local include set，用于 "模态（modal） "功能，例如tracing，
+    它不与任何张量关联，而是某种线程的本地模态，用户可以在某些范围内打开或关闭。
+
+    最后，我们有一个global set，它包含了始终应该被考虑的dispatch key
+    （自从写下这张PPT以来，Autograd已经从global set转移到了张量之上。然而系统的高级结构并没有改变）。
+
+除了这些，还有一个local exclude set，其用从dispatch排除某些dispatch key。
+一个常见的场景是一个handler负责处理一个key，然后通过local exclude set将自己屏蔽掉，这样我们以后就不会尝试重新处理这个key。
+    02-10.jpg
+
+4.1.4 注册
+我们接下来看看如何注册这个dispatch key 到 dispatch 表之中。这个过程通过operator registration API来实现。
+操作符注册 API 有三种主要方式：
+
+    为operator定义模式。
+    然后在对应的key上注册实现。
+    最后，有一个 fallback 方法，用户可以使用它为某个key对应的所有运算符定义同一个处理程序。
+02-11.jpg
+
+为了可视化 operator registration的工作，让我们想象一下，所有op的dispatch表共同形成一个二维网格，像这样：
+    纵轴上是PyTorch中支持的每个op。
+    横轴上是系统支持的每个dispatch key。
+operator registration 行为就是在这两个轴定义出的单元格中填写对应的实现。
+02-12.jpg
+
+在一个特定的dispatch key上为一个operator注册kernel函数时，我们会填写一个单元格（下面的蓝色）的内容。
+比如下图就是一个 cpu kernel mul 算子。
+02-13.jpg
+
+用户也可以使用 "catch-all" 来为所有的 dispatch keys 注册同一个kernel，比如下图的红色行。
+02-14.png
+
+用户也可以为下图的 "aten::add"，"aten::mul"，"aten::sub" 这样的kernel 指定同一个 dispatch key，如下图绿色列。
+02-15.png
+
+这些注册形式有一个优先级：特定的内核实现具有最高优先级，然后是 catch，最后是 fallback，
+如下图的 1，2，3 顺序，首先选择1，然后是 2，最后是 3。
+02-16.png
+
+
+
+...
+
+
+4.2.4 如何dispatch
+4.2.4.1 调度依据
+PyTorch 之中会依据dtype、device和layout的不同来调度不同的operator。
+
+    大多数类型（比如int32）可以使用模版方式直接进行映射，但是某些operator 不支持模版功能，就需要dispatcher这样的动态调度器。
+
+    PyTorch的tensor不仅可以运行在CPU上，还可以跑在GPU，mkldnn和xla等设备，这也需要动态调度。
+
+    layout是指tensor中元素的排布，这就有strided layout和sparse layout的区别，所以也需要动态调度。
+
+4.2.4.2 调度代码
+我们这里这是给出部分代码，有兴趣的读者继续继续深入。
+
+算子调度的逻辑是：
+
+    1 通过 dispatcher 类 + operator name + 操作类型等联合的形式来查找对应的算子 schema，算子的schema 定义了本算子的输入/输出/参数等等的相关信息。
+    2 调用 dispatcher::call 完成算子操作。
+        1 得到 dispatcher 中的 dispatchKetSet。
+        2 利用 op.lookup 找到最高优先级的 key，并且依据 key 找到对应的 KernelFunction。
+        3 调用 kernel。
+
+首先，具体以range的定义来看看如何查找schema，具体在 findSchemaOrThrow 内部是通过operatorLookupTable_来查找op：
+==yknote 源码中没有
+at::Tensor range::call(const at::Scalar & start, const at::Scalar & end, c10::optional<at::ScalarType> dtype, c10::optional<at::Layout> layout, c10::optional<at::Device> device, c10::optional<bool> pin_memory) {
+    static auto op = c10::Dispatcher::singleton()
+        .findSchemaOrThrow("aten::range", "")
+        .typed<at::Tensor (const at::Scalar &, const at::Scalar &, c10::optional<at::ScalarType>, c10::optional<at::Layout>, c10::optional<at::Device>, c10::optional<bool>)>();
+    return op.call(start, end, dtype, layout, device, pin_memory);
+}
+其次，Dispatcher::call 定义如下：  yknote见代码
+.....
+
+4.3 小结
+至此，我们知道，通过 Dispatcher 机制，PyTorch 可以依据dtype、device和layout的不同来调度不同的operator。
+这就解答了我们第三个问题：如何在 CPU，GPU 操作之间无缝切换？
+
+关于第四个问题：是否需要把损失函数移动到 GPU 之上？，我们也有了解答：
+损失函数的参数是前向传播的outputs和label，outputs已经在GPU之上（因为训练数据已经在GPU之上），label 也被用户手动设置到GPU之上。
+所以损失函数的参数都已经在GPU之上，这样 Dispather 就依据device会调用到GPU对应的operator，所以不需要把损失函数移动到GPU之上。
+
+我们整理一个总体逻辑如下，序列是：
+
+    1 把训练数据 inputs 移动到GPU。
+    2 进行前向操作，假设只有一个operator，就是 op1，使用 device='GPU' 这个 dispatch key 去 Dispatcher 查找。
+    3 找到了 op1-gpu 这个operator，进行计算，得出 outputs。
+    4 outputs 就自动存在于 GPU 之上。
+    5 把 Labels 也放到 GPU 之上。
+    6 进行损失函数运算，假设只有一个 operator，就是 op2，此时损失函数的参数都在GPU之上，
+      所以使用 device= 'GPU' 这个 dispatch key 去 Dispatcher 查找。
+    7 找到了 op2-gpu 这个operator，进行计算，得出 loss。
+                           +--------------------+
+         +-----------+     | Forward            |      +------------+     +------------------+
+         | GPU       |     |                    |      | GPU        |     | Loss Function    |
+         |           +---> |    op1   op1-gpu() +----> |            +---> |                  |   +--------+
+         |   Inputs  | 1   |                    |  4   |   Outputs  |     |                  |   | GPU    |
+         |           |     |     +        ^     |      |            |     |                  |   |        |
+         +-----------+     |     |        |     |      +------------+     |  op2   op2-gpu() +-->+  loss  |
+                           |     |        |     |                         |                  |   |        |
+                           +--------------------+      +------------+     |   +        ^     |   |        |
+                                 |        |            | GPU        | 5   |   |        |     |   +--------+
+                                 |        |            |            +---> |   | 6      | 7   |
+                               2 |        | 3          |   Labels   |     |   |        |     |
+                                 |        |            |            |     |   |        |     |
+                                 |        |            +------------+     +------------------+
+    +----------------------------+        +--------------------------------+  |        |
+    |                                                                      |  |        |
++-----------------------------------------------------------------------------+        |
+|   |                                                                      |           |
+|   |          +-------------------------------------------------------+   |           |
+|   |          | Dispather                                             |   |           |
+|   |          |       +          +          +            +            |   |           |
+|   |          |       |   XLA    |   CPU    |    Metal   |    GPU     |   |           |
+|   |          | +---------------------------------------------------+ |   |           |
+|   |          |       |          |          |            |            |   |           |
+|   +--------> |   OP1 | op1-xla  | op1-cpu  |  op1-metal |  op1-gpu   +---+           |
+| 'device=GPU' |       |          |          |            |  +------+  |               |
+|              | +---------------------------------------------------+ |               |
+|              |       |          |          |            |            |               |
++------------> |   OP2 | op2-xla  | op2-cpu  |  op2-metal |  op2-gpu   +---------------+
+  'device=GPU' |       |          |          |            |  +------+  |
+               | +---------------------------------------------------+ |
+               |       |          |          |            |            |
+               |   OP3 | op3-xla  | op3-cpu  |  op3-metal |  op3-gpu   |
+               |       |          |          |            |            |
+               | +---------------------------------------------------+ |
+               +-------------------------------------------------------+
+
+手机如下：  02-17.png
+
+至此，GPU相关分析结束，下一篇我们开始分析DataParallel，敬请期待。
+
+0xFF 参考
+http://blog.ezyang.com/2020/09/lets-talk-about-the-pytorch-dispatcher/
+
+https://pytorch.org/tutorials/advanced/dispatcher.html
+
+GPU多卡并行训练总结（以pytorch为例）
+
+当代研究生应当掌握的并行训练方法（单机多卡）
+
+分布式训练从入门到放弃
+
+再谈PyTorch的初始化（上）
+
+pytorch中的dispatcher
+
+【译】聊聊Pytorch Dispatcher
+
+扩展Pytorch：利用CUDA实现算子（二）
+
+PyTorch ATen代码的动态生成
+
+https://blog.csdn.net/qq_23858785/article/details/96476740
+
+CUDA 函数前缀
+
+CUDA C编程入门
+
+CPU—GPU并行处理—CUDA编程从想入门到放弃
+
+https://blog.csdn.net/weixin_42236014/article/details/116747358
+
+https://blog.csdn.net/crazy_sunshine/article/details/97920534
+
+CPU、GPU、CUDA，CuDNN 介绍
+
+CUDA编程(三): GPU架构了解一下!
+
+CUDA编程入门极简教程
+
+写CUDA到底难在哪？
+
+深入浅出PyTorch（算子篇）
+
+深入浅出全连接层（fully connected layer）
+
+Pytorch拓展进阶(二)：Pytorch结合C++以及Cuda拓展
+
+Pytorch拓展进阶(一)：Pytorch结合C以及Cuda语言
+
+PyTorch 源码解读之 cpp_extension：揭秘 C++/CUDA 算子实现和调用全流程
+
+pytorch中的dispatcher
+
+[Pytorch 源码阅读] —— 谈谈 dispatcher（一）
+
+[Pytorch 源码阅读] —— 谈谈 dispatcher（二）
+
+分类: 001_机器学习 , 006_深度学习 , 011_分布式机器学习
