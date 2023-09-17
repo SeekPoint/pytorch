@@ -47,6 +47,7 @@ struct unique_type_checker {
 // tensors on one or more devices.
 
 // no checks
+// 最终调用到 _broadcast_out_impl，把源张量 (CPU or CUDA) 广播到一个CUDA设备列表上，其调用了nccl::broadcast(nccl_list)。
 static inline std::vector<Tensor>& _broadcast_out_impl(
     const Tensor& tensor,
     std::vector<Tensor>& out_tensors) {
@@ -58,7 +59,7 @@ static inline std::vector<Tensor>& _broadcast_out_impl(
     nccl_list.push_back(out_tensor);
   }
   if (nccl::is_available(nccl_list)) {
-    nccl::broadcast(nccl_list);
+    nccl::broadcast(nccl_list);   // 这里调用了 NCCL 操作
   } else {
 #else
   {
@@ -69,6 +70,7 @@ static inline std::vector<Tensor>& _broadcast_out_impl(
   }
   return out_tensors;
 }
+
 
 std::vector<Tensor>& broadcast_out(
     const Tensor& tensor,
@@ -93,6 +95,7 @@ std::vector<Tensor>& broadcast_out(
   return _broadcast_out_impl(tensor, out_tensors);
 }
 
+//broadcast 方法如下：
 std::vector<Tensor> broadcast(const Tensor& tensor, IntArrayRef devices) {
   std::vector<Tensor> diff_device_dst_tensors;
   diff_device_dst_tensors.reserve(devices.size());
@@ -106,6 +109,8 @@ std::vector<Tensor> broadcast(const Tensor& tensor, IntArrayRef devices) {
               at::Device(DeviceType::CUDA, device)))); // preserve memory format
     }
   }
+
+  // 继续调用操作
   _broadcast_out_impl(tensor, diff_device_dst_tensors);
   std::vector<Tensor> dst_tensors;
   dst_tensors.reserve(devices.size());
@@ -126,6 +131,15 @@ std::vector<Tensor> broadcast(const Tensor& tensor, IntArrayRef devices) {
 // broadcast_coalesced
 // ~~~~~~~~~~~~~~~~~~~
 //
+//broadcast_coalesced 会把变量分发给所有GPU。
+//在broadcast_coalesced中，多个变量可以合并成一个大变量，然后广播到其他设备，然后会根据原始形状进行拆分（split）。
+//
+//拆分（split）时，视图操作将使所有变量一起广播以共享一个版本计数器，因为它们都是大变量的视图。
+//但是，该大变量会立即被丢弃，并且所有这些变量根本不共享存储。
+//
+//例如，当两个缓冲区在“DataParallel”中一起广播，其中一个在“forward”期间执行in-place操作，
+//而另一个在backward中被使用，autograd引擎将发出抱怨。
+//因此，我们在广播后重新包装这些变量，并为它们提供单独的版本计数器。
 // In broadcast_coalesced, multiple variables may be coalesced into a single
 // large one, broadcast to other devices, and the get split according to the
 // original shapes.
@@ -153,6 +167,11 @@ std::vector<Tensor> broadcast(const Tensor& tensor, IntArrayRef devices) {
 //
 // Similarly for reduce_add_coalesced, when the output are newly created
 // Variables.
+
+//broadcast_coalesced 方法的具体参数解释如下：
+//    tensors 必须在同一个设备，CPU 或者 GPU；
+//    devices 即是要拷贝到的设备；
+//    buffer_size 则是最大的buffer。这里用到 buffer 将小张量合并到缓冲区以减少同步次数；
 tensor_list2d broadcast_coalesced(
     TensorList tensors,
     IntArrayRef devices,
@@ -181,8 +200,8 @@ tensor_list2d broadcast_coalesced(
     std::vector<at::Tensor> results;
     if (chunk.options().is_sparse()) {
       auto flat_tuple = utils::flatten_sparse_tensors(chunk.tensors);
-      auto broadcast_indices = broadcast(flat_tuple.first, devices);
-      auto broadcast_values = broadcast(flat_tuple.second, devices);
+      auto broadcast_indices = broadcast(flat_tuple.first, devices); //这里进行广播
+      auto broadcast_values = broadcast(flat_tuple.second, devices); //这里进行广播
       results.reserve(devices.size());
       for (size_t i = 1, num_devices = devices.size(); i < num_devices; ++i) {
         device_guard.set_index(devices[i]);
@@ -198,7 +217,7 @@ tensor_list2d broadcast_coalesced(
         }
       }
     } else {
-      auto results =
+      auto results =   // 这里进行广播
           broadcast(utils::flatten_dense_tensors(chunk.tensors), devices);
       for (size_t i = 1, num_devices = devices.size(); i < num_devices; ++i) {
         device_guard.set_index(devices[i]);
@@ -309,6 +328,9 @@ std::vector<at::Tensor>& scatter_out(
   return out_tensors;
 }
 
+//在 scatter 之中可以看到，scatter就是把数据分布到各个GPU之上，逻辑如下：
+//    首先调用 split_with_sizes 或者chunk 把tensor分割成 chunks。
+//    其次把 chunks 分布到各个GPU之上，具体是通过 to 分发完成的。
 std::vector<at::Tensor> scatter(
     const at::Tensor& tensor,
     at::IntArrayRef devices,
@@ -327,10 +349,14 @@ std::vector<at::Tensor> scatter(
         chunk_sizes->size());
   }
   dim = at::maybe_wrap_dim(dim, tensor);
+
+  // 首先把tensor分割成 chunks
   std::vector<at::Tensor> chunks = chunk_sizes
       ? tensor.split_with_sizes(/*split_sizes=*/*chunk_sizes, /*dim=*/dim)
       : tensor.chunk(/*chunks=*/devices.size(), /*dim=*/dim);
   at::cuda::OptionalCUDAStreamGuard cuda_guard;
+
+  // 其次把 chunks 分布到各个GPU之上
   for (size_t i = 0; i < chunks.size(); ++i) {
     const auto device_index = static_cast<int16_t>(devices[i]);
     if (device_index != tensor.get_device()) {
@@ -352,6 +378,7 @@ std::vector<at::Tensor> scatter(
           device_index >= 0,
           "Expected non-negative device index, but got ",
           device_index);
+      // 拷贝
       chunks[i] = chunks[i].to(
           {DeviceType::CUDA, device_index},
           /*non_blocking=*/true,
@@ -359,6 +386,8 @@ std::vector<at::Tensor> scatter(
           /*memory_format=*/at::MemoryFormat::Preserve);
     }
   }
+
+  // 返回结果
   return chunks;
 }
 

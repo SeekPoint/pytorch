@@ -37,7 +37,8 @@ def broadcast(tensor, devices=None, *, out=None):
     else:
         return torch._C._broadcast_out(tensor, out)
 
-
+# 4.3.4.3 broadcast_coalesced
+# broadcast_coalesced 会跳转到 C++世界。
 def broadcast_coalesced(tensors, devices, buffer_size=10485760):
     """Broadcasts a sequence tensors to the specified GPUs.
     Small tensors are first coalesced into a buffer to reduce the number
@@ -148,7 +149,8 @@ def reduce_add_coalesced(inputs, destination=None, buffer_size=10485760):
             output.append(t.data)
     return tuple(_reorder_tensors_as(output, ref_order))
 
-
+# 4.2.4 comm.scatter
+# 该函数主要是调用 torch._C._scatter，这样就进入了C++世界。
 def scatter(tensor, devices=None, chunk_sizes=None, dim=0, streams=None, *, out=None):
     """Scatters tensor across multiple GPUs.
 

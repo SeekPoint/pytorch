@@ -1,0 +1,383 @@
+PyTorch 分布式(2) ----- DataParallel(上)
+https://www.cnblogs.com/rossiXYZ/p/15526431.html
+
+目录
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+0x00 摘要
+0x01 综述
+1.1 从流程上看
+1.2 从模式角度看
+1.3 从操作系统角度看
+1.4 低效率
+0x02 综述
+2.1 示例
+2.2 相关知识
+0x03 定义
+3.1 定义
+3.2 负载均衡
+0x04 前向传播
+4.1 总述
+4.2 分发（输入）
+4.2.1 scatter_kwargs
+4.2.2 scatter
+4.2.3 Scatter
+4.2.4 comm.scatter
+4.2.5 C++
+4.3 复制（模型）
+4.3.1 replicate
+4.3.2 检查拷贝
+4.3.3 共享拷贝
+4.3.4 拷贝操作
+4.3.4.1 _broadcast_coalesced_reshape
+4.3.4.2 Broadcast
+4.3.4.3 broadcast_coalesced
+4.3.4.4 C++
+0xFF 参考
+0x00 摘要
+从本文开始，我们介绍 PyTorch 的数据并行，本文是第一篇，介绍 DataPrallel，因为字数太多（1万两千多字，因此拆分成两篇文章发布）。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 如何使用GPU
+
+注 : 本文深度借鉴了以下两篇文章，特此深表感谢。
+
+Distributed data parallel training using Pytorch on AWS
+
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+
+0x01 综述
+我们首先从各个角度来看看DataParallel。
+
+1.1 从流程上看
+DataParallel 从流程上来看，是通过将整个小批次（minibatch）数据加载到主线程上，
+然后将子小批次（ub-minibatches）数据分散到整个GPU网络中来工作。
+
+    1 把 minibatch 数据从page-locked memory 传输到 GPU 0（master），
+      Master GPU 也持有模型，其他GPU拥有模型的 stale copy。
+    2 在 GPUs 之间 scatter minibatch 数据。具体是将输入一个 minibatch 的数据均分成多份，分别送到对应的 GPU 进行计算。
+    3 在 GPUs 之间复制模型。与 Module 相关的所有数据也都会复制多份。
+    4 在每个GPU之上运行前向传播，计算输出。PyTorch 使用多线程来并行前向传播，
+      每个 GPU 在单独的线程上将针对各自的输入数据独立并行地进行 forward 计算。
+    5 在 master GPU 之上收集（gather）输出，计算损失。
+      即通过将网络输出与批次中每个元素的真实数据标签进行比较来计算损失函数值。
+    6 把损失在 GPUs 之间 scatter，在各个GPU之上运行后向传播，计算参数梯度。
+    7 在 GPU 0 之上归并梯度。
+    8 更新梯度参数。
+        进行梯度下降，并更新主GPU上的模型参数。
+        由于模型参数仅在主GPU上更新，而其他从属GPU此时并不是同步更新的，所以需要将更新后的模型参数复制到剩余的从属 GPU 中，以此来实现并行。
+03-02.png
+
+1.2 从模式角度看
+首先我们先给出一个技术上的概括，从模式角度看：
+    DP 可以被认为是类似参数服务器的应用。
+    DDP 可以被认为是集合通讯的应用。
+参数服务器大致可以分为 master 和 worker，而DP 基于单机多卡，所以对应关系如下：
+    worker ：所有GPU（包括GPU 0）都是worker，都负责计算和训练网络。
+    master ：GPU 0（并非 GPU 真实标号，而是输入参数 device_ids 的首位）也负责整合梯度，更新参数。
+所以我们重点看看 GPU 0。
+
+DataParallel会将网络模型默认放在GPU 0上，然后把模型从GPU 0 拷贝到其他的GPU，各个GPU开始并行训练，
+接着 GPU 0 作为master来进行梯度的汇总和模型的更新，最后将计算任务下发给其他GPU。这非常类似参数服务器的机制。
+
+从官方图也可以看到同样的信息。
+03-03.png
+
+1.3 从操作系统角度看
+从操作系统角度看，DP 和 DDP 有如下不同（我们属于提前剧透）：
+
+    DataParallel 是单进程，多线程的并行训练方式，并且只能在单台机器上运行。
+
+    DistributedDataParallel 是多进程，并且适用于单机和多机训练。
+    DistributedDataParallel 还预先复制模型，而不是在每次迭代时复制模型，并避免了全局解释器锁定。
+
+1.4 低效率
+DP 有如下缺陷：
+    冗余数据副本
+        数据先从主机复制到主GPU，然后将微批次（ sub-minibatches）在其他GPU之间发布（scatter）。
+    在前向传播之前需要跨GPU进行模型复制。
+        由于模型参数是在主GPU上更新的，因此模型必须在每次正向传播开始时重新同步。
+    每个batch都会有线程创建/销毁开销。
+        并行前向传播是在多个线程中实现的（这可能只是PyTorch的一个issue）。
+    有一个把梯度规约流水线化的机会但是没有利用。
+        在Pytorch 1.0.1数据并行实现中，梯度下降发生在反向传播的末尾，这可以进行流水线化。
+    在主GPU上不必要地收集模型输出output。
+    GPU利用率不均，负载不均衡。主GPU的内存和使用率会比其他显卡的高，因为：
+        在主GPU上执行损失loss计算。
+        梯度规约和更新参数均发生在主GPU之上。
+
+
+0x02 综述
+2.1 示例
+我们使用一个例子来看看，具体逻辑是：
+
+    给本程序设置可见GPU。
+
+        对应代码就是使用 args.gpu_id="2,7" 和 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id 来配置 gpu 序号，
+        其实目的就是设置 os.environ['CUDA_VISIBLE_DEVICES'] = "2,7"，
+        这样 device_ids[0]对应的就是物理上第2号卡，device_ids[1]对应的就是物理上第7号卡。
+
+        也可以在运行时临时指定，比如：CUDA_VISIBLE_DEVICES='2,7' Python train.py。
+
+    把模型参数和缓冲区放在device_ids[0]上，在运行DataParallel模块前，并行化模块必须在device_ids [0]上具有其参数和缓冲区。
+        代码就是 model=model.cuda() 。
+
+    构建DP模型。DP 的好处是使用起来非常方便，只需要将原来单卡的 module 用 DP 改成多卡。
+        代码就是 model=torch.nn.DaraParallel(model)。
+
+        实际上 DP 是一个Pytorch的nn.Module，所以模型和优化器都需要使用.module来得到实际的模型和优化器。
+
+    把数据载入到主GPU。
+        data,label= data.cuda(),label.cuda()
+
+    进行前向传播。
+        DP 会把模型module 在每个device上复制一份。
+        DP 会把输入数据再切分为多个小块，把这些小块数据分发到不同的GPU之中进行计算，每个模型只需要处理自己分配到的数据。
+
+    进行后向传播。
+        DP 会把每个GPU 计算出来的梯度累加到GPU 0之中进行汇总。
+
+具体代码如下：
+
+    args.gpu_id="2,7" ; #指定gpu id
+    args.cuda = not args.no_cuda and torch.cuda.is_available() #是否使用cpu
+    # 配置环境  也可以在运行时临时指定，比如：CUDA_VISIBLE_DEVICES='2,7' Python train.py
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id # 赋值必须是字符串
+    device_ids=range(torch.cuda.device_count())  #torch.cuda.device_count()=2
+    # device_ids=[0,1] ---- 也可以这么使用。这里的0 就是上述指定 2，是主gpu, 1就是7,模型和数据由主gpu分发
+
+    if arg.cuda:
+        model=model.cuda()  #将模型复制到gpu ,默认是cuda('0')，即转到第一个GPU 2
+    if len(device_id)>1:
+        model=torch.nn.DataParallel(model);#构建DP，前提是model已经.cuda()了
+
+    optimizer = torch.optim.SGD(model.parameters(), args.lr,
+                                    momentum=args.momentum,
+                                    weight_decay=args.weight_decay)
+
+    #前向传播时，数据也要执行cuda(),即把数据复制到主gpu里
+    for batch_idx, (data, label) in pbar:
+        if args.cuda:
+            data,label= data.cuda(),label.cuda(); # 数据放到了默认GPU
+        data_v = Variable(data)
+        target_var = Variable(label)
+        prediction= model(data_v,target_var,args)
+        #这里的prediction 预测结果是由两个gpu合并过的，并行计算只存在于前向传播里
+        #前向传播每个gpu计算量为 batch_size/len(device_ids),等前向传播完了将结果归并到主gpu里
+        #prediction的长度等于batch_size
+        criterion = nn.CrossEntropyLoss()
+        loss = criterion(prediction,target_var) # 在默认GPU之上计算loss
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+2.2 相关知识
+DP 在每次网络传播开始前，会把master节点上的parameters和buffer广播给其他节点，以此来维持状态的统一。
+这部分相关知识主要是如何把模型拷贝到GPU之上以及如何调用GPU核函数，具体可以参见前文 [源码解析] PyTorch 如何使用GPU。
+
+
+,,,,
+
+4.3.3 共享拷贝
+在 PyTorch 之中，有浅拷贝和深拷贝之分。
+假定模型内部是一系列参数矩阵，model这个对象实际上是指向各个参数矩阵。
+
+    浅拷贝(shadow copy) 则只是拷贝最外层的数值和指针，不拷贝更深层次的对象，就是只拷贝了父对象。
+    model.state_dict()也是浅拷贝，如果令param=model.state_dict()，那么当你修改param，相应地也会修改model的参数。
+
+    与之对应，深拷贝(deepcopy)：拷贝数值、指针和指针指向的深层次内存空间，即拷贝了父对象及其子对象。
+
+比如：
+
+    import torch
+    import copy
+
+    # a引用指向某块内存空间
+    a = torch.nn.Linear(in_features=5, out_features=1, bias=True)
+    # 浅拷贝相当于拷贝一个引用，所以他们指向的内存空间是一样的
+    b = copy.copy(a)
+
+    # state_dict is shadow copy
+    p = a.state_dict()
+    print(id(a.state_dict()) == id(p)) # False，这两个不相等
+
+    # 通过引用p去修改内存空间
+    print(a.weight)
+    p['weight'][0][0] = 8.8888
+
+    # 可以看到a指向的内存空间也被修改了
+    print(a.weight)
+
+
+输出如下：
+
+    False
+    Parameter containing:
+    tensor([[-0.2253,  0.0802,  0.3984, -0.1208,  0.3796]], requires_grad=True)
+    Parameter containing:
+    tensor([[ 8.8888,  0.0802,  0.3984, -0.1208,  0.3796]], requires_grad=True)
+
+具体回到我们的分析，在 module类中，有 _replicate_for_data_parallel 方法，其用来返回一个副本，这些副本和原始模型共享存储，就是浅拷贝。
+
+    def _replicate_for_data_parallel(self):
+        replica = self.__new__(type(self))
+        replica.__dict__ = self.__dict__.copy()
+
+        # replicas do not have parameters themselves, the replicas reference the original
+        # module.
+        replica._parameters = OrderedDict()
+        replica._buffers = replica._buffers.copy() # 浅拷贝
+        replica._modules = replica._modules.copy() # 浅拷贝模型内部的子模块
+        replica._is_replica = True
+
+        return replica
+
+可以认为，在设置操作之前，拷贝如下：
+
++---------------------------------------------------------------+
+|                               +----------------------+        |
+| CPU                           | Module               |        |
+|                               |                      |        |
+|                               |     _parameters      |        |
+|                               |                      |        |
+|                    +--------------> _buffers  <-------------+ |
+|                    |          |                      |      | |
+|                    |     +------->  _modules  <----------+  | |
+|                    |     |    |                      |   |  | |
+|                    |     |    +----------------------+   |  | |
+| +---------------------+  |    +----------------------+   |  | |
+| | module_copies[0] |  |  |    | module_copies[1]     |   |  | |
+| |                  |  |  |    |                      |   |  | |
+| |    _parameters   |  |  |    |     _parameters      |   |  | |
+| |                  |  |  |    |                      |   |  | |
+| |    _buffers +----+  |  |    |     _buffers +--------------+ |
+| |                     |  |    |                      |   |    |
+| |    _modules  +-------->+    |     _modules  +--------->+    |
+| |                     |       |                      |        |
+| +---------------------+       +----------------------+        |
++---------------------------------------------------------------+
+
+  +---------------------+       +----------------------+
+  | GPU 0               |       | GPU 1                |
+  |                     |       |                      |
+  |     _parameters     |       |      _parameters     |
+  |                     |       |                      |
+  |     _buffers        |       |      _buffers        |
+  |                     |       |                      |
+  |                     |       |                      |
+  |                     |       |                      |
+  +---------------------+       +----------------------+
+
+在设置操作之后，则如下：
+
+   +-----------------------------------------------------------------+
+   | CPU                             +----------------------+        |
+   |                                 | Module               |        |
+   |                                 |                      |        |
+   |                                 |     _parameters      |        |
+   |                                 |                      |        |
+   |                                 |     _buffers         |        |
+   |                                 |                      |        |
+   |                                 |     _modules         |        |
+   |                                 |                      |        |
+   |                                 +----------------------+        |
+   |   +---------------------+       +----------------------+        |
+   |   | module_copies[0]    |       | module_copies[1]     |        |
+   |   |                     |       |                      |        |
++---------+ _parameters      |       |     _parameters +-----------+ |
+|  |   |                     |       |                      |      | |
+|  |   |    _buffers +------------+  |     _buffers +-----------+  | |
+|  |   |                     |    |  |                      |   |  | |
+|  |   |    _modules         |    |  |     _modules         |   |  | |
+|  |   |                     |    |  |                      |   |  | |
+|  |   +---------------------+    |  +----------------------+   |  | |
+|  +-----------------------------------------------------------------+
+|                                 |                             |  |
+|      +---------------------+    |  +----------------------+   |  |
+|      | GPU 0               |    |  | GPU 1                |   |  |
+|      |                     |    |  |                      |   |  |
++--------->  _parameters     |    |  |      _parameters <----------+
+       |                     |    |  |                      |   |
+       |     _buffers  <----------+  |      _buffers   <--------+
+       |                     |       |                      |
+       |                     |       |                      |
+       |                     |       |                      |
+       +---------------------+       +----------------------+
+
+.....
+
+至此，我们已经把数据和模型都分布到其他 GPU 之上。我们把目前的前向图先构建出来，大家可以有一个清晰的理解，replicate 调用了Broadcast.forward，同时往其context 存储了input_device和num_inputs。接下来可以进行前行传播。
+
++----------------------------------------------------------------------------------------+
+| DataParallel.forward                                                                   |
+|                                                                                        |
+|                                                                                        |
+|              replicate +--------------->   parallel_apply             gather           |
+|                                                                                        |
++----------------------------------------------------------------------------------------+
+
+     +---------------------------+
+     | Broadcast                 |
+     |                           |
+     |                           |
+     |                           |
+     |          forward()  +----------->
+     |                           |
+     |                           |
+     |  +---------------------+  |
+     |  | ctx                 |  |
+     |  |       input_device  |  |
+     |  |                     |  |
+     |  |       num_inputs    |  |
+     |  |                     |  |
+     |  +---------------------+  |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     +---------------------------+
+
+因为篇幅所限，下一篇我们从并行操作（前向传播）开始继续分析。
+
+0xFF 参考
+PyTorch 源码解读之 torch.optim：优化算法接口详解
+
+pytorch(分布式)数据并行个人实践总结——DataParallel/DistributedDataParallel
+
+Pytorch的nn.DataParallel
+
+PyTorch 源码解读之分布式训练了解一下？
+
+https://discuss.pytorch.org/t/dataparallel-imbalanced-memory-usage/22551/20
+
+[原创][深度][PyTorch] DDP系列第二篇：实现原理与源代码解析
+
+Pytorch-CUDA从入门到放弃（二）
+
+Pytorch踩坑记：赋值、浅拷贝、深拷贝三者的区别以及model.state_dict()和model.load_state_dict()的坑点
+
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+

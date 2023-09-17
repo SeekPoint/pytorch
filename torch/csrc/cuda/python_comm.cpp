@@ -14,6 +14,9 @@
 
 namespace torch { namespace cuda { namespace python {
 void initCommMethods(PyObject *module) {
+//4.3.4.4 C++
+//从初始化代码中可以看到，具体在 broadcast_coalesced 完成。
+//具体代码位于 torch/csrc/cuda/comm.cpp。我们研究一下其注释。
   auto m = py::cast<py::module>(module);
   m.def(
        "_broadcast_coalesced",
@@ -42,6 +45,8 @@ void initCommMethods(PyObject *module) {
           py::call_guard<py::gil_scoped_release>(),
           py::arg("tensor"),
           py::arg("out"))
+//          4.2.5 C++
+//在转换文件之中，可以看到 scatter 是我们想分析的目标。
       .def(
           "_scatter",
           [](at::Tensor& tensor,
@@ -56,6 +61,7 @@ void initCommMethods(PyObject *module) {
             }
             // Note: We're holding the GIL up to here.
             pybind11::gil_scoped_release no_gil;
+            // 实际需要看这里
             return scatter(tensor, devices, chunk_sizes, dim, streams);
           },
           py::arg("tensor"),
