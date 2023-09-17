@@ -64,8 +64,10 @@ def scatter_kwargs(inputs, kwargs, target_gpus, dim=0):
     kwargs = tuple(kwargs)
     return inputs, kwargs
 
-
-def gather(outputs, target_device, dim=0):
+# 1.2.1 Python世界
+# gather 主要是调用 Gather.apply(target_device, dim, *outputs) 完成收集工作。
+# Gather 则调用了 comm.gather 完成工作，而 comm.gather 则会带领我们进入到 C++世界。
+def gather(outputs, target_device, dim=0):  # target_device 就是 device[0
     r"""
     Gathers tensors from different GPUs on a specified device.
     Use 'cpu' for CPU to avoid a deprecation warning.
@@ -73,7 +75,7 @@ def gather(outputs, target_device, dim=0):
     def gather_map(outputs):
         out = outputs[0]
         if isinstance(out, torch.Tensor):
-            return Gather.apply(target_device, dim, *outputs)
+            return Gather.apply(target_device, dim, *outputs)  # 调用下面的 Gather
         if out is None:
             return None
         if isinstance(out, dict):

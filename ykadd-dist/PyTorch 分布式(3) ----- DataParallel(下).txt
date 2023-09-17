@@ -1,0 +1,331 @@
+PyTorch 分布式(3) ----- DataParallel(下)
+
+https://www.cnblogs.com/rossiXYZ/p/15538332.html
+
+
+目录
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+0x00 摘要
+0x01 前向操作
+1.1 并行
+1.2 Gather
+1.2.1 Python世界
+1.2.2 C++世界
+0x02 计算损失
+0x03 后向传播
+3.1 分发梯度
+3.1.1 Gather.backward
+3.1.2 Scatter
+3.1.3 C++
+3.2 并行后向传播
+3.3 归并梯度
+3.3.1 Broadcast.backward
+3.3.2 ReduceAddCoalesced
+3.3.3 c++
+3.4 更新模型参数
+0x04 总结
+0xFF 参考
+0x00 摘要
+本文是 PyTorch 分布式的第三篇，继续上文，介绍 DataPrallel 的并行操作和反向传播。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 如何使用GPU
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+0x01 前向操作
+我们先回忆一下目前的前向图，replicate 调用了Broadcast.forward，同时往其context 存储了input_device和num_inputs。
+
++----------------------------------------------------------------------------------------+
+| DataParallel.forward                                                                   |
+|                                                                                        |
+|                                                                                        |
+|              replicate +--------------->   parallel_apply             gather           |
+|                                                                                        |
++----------------------------------------------------------------------------------------+
+
+     +---------------------------+
+     | Broadcast                 |
+     |                           |
+     |                           |
+     |                           |
+     |          forward()  +----------->
+     |                           |
+     |                           |
+     |  +---------------------+  |
+     |  | ctx                 |  |
+     |  |       input_device  |  |
+     |  |                     |  |
+     |  |       num_inputs    |  |
+     |  |                     |  |
+     |  +---------------------+  |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     |                           |
+     +---------------------------+
+
+
+...
+
+1.1 并行
+目前，我们已经使用 Scatter 函数将数据从 device[0] 分配并复制到不同的卡，用 Replicate 函数将模型从 device[0] 复制到不同的卡，
+这样各个卡都有了同样的模型和不同的数据，现在就要分别调用 forward 计算损失和梯度。也就是 parallel_apply 部分。
+
+    # 分发数据
+    inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
+    # 分发模型
+    replicas = self.replicate(self.module, self.device_ids[:len(inputs)])
+    # 并行训练
+    outputs = self.parallel_apply(replicas, inputs, kwargs)
+
+对应我们传播图是：  03-07.png
+
+
+.....
+
+1.2 Gather
+目前，我们已经使用 Scatter 函数将数据从 device[0] 分配并复制到不同的卡，用 Replicate 函数将模型从 device[0] 复制到不同的卡，
+这样各个卡都有了同样的模型和不同的数据，然后分别调用 forward 计算损失和梯度。也就是 parallel_apply 部分。
+
+现在要做的就是把分布式计算的梯度合并到 device[0]，就是 self.output_device。
+
+    # 分发数据
+    inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
+    # 分发模型
+    replicas = self.replicate(self.module, self.device_ids[:len(inputs)])
+    # 并行训练
+    outputs = self.parallel_apply(replicas, inputs, kwargs)
+    # 收集到 devices[0]
+    return self.gather(outputs, self.output_device)
+
+对应我们传播图是：  03-08.png
+我们看看如何把结果收集到 device[0]，以及device[0]如何作为参数服务器。
+
+
+....
+
+
+0x02 计算损失
+03-09.png
+现在，我们已经把梯度收集到 device[0] 之上，现在我们开始进行反向传播，其整体逻辑如上图所示。
+首先是在 device[0] 计算损失。其实这步计算损失算是前向计算和后向传播的中间环节，这里把它算成是反向传播的开端，如下图。
+03-10.png
+我们找出来示例代码看看，里面关键的几点：
+
+    1 数据已经放到了默认GPU，即GPU 0上。
+    2 prediction 是gather到 GPU 0 的前向计算输出。
+    3 使用 loss = criterion(prediction,target_var) 在默认GPU之上计算loss。
+    4 使用 loss.backward() 开始反向传播。
+
+    for batch_idx, (data, label) in pbar:
+        if args.cuda:
+            data,label= data.cuda(),label.cuda(); # 1. 数据已经放到了默认GPU上
+        data_v = Variable(data)
+        target_var = Variable(label)
+        prediction= model(data_v,target_var,args) # 2. prediction 是gather到 GPU 0 的前向计算输出
+
+        # 到目前为止，我们完成了DataParallel.forward()
+        #这里的prediction 预测结果是由两个gpu合并过的，并行计算只存在于前向传播里
+        #前向传播每个gpu计算量为 batch_size/len(device_ids),等前向传播完了将结果聚合到主gpu里
+
+        criterion = nn.CrossEntropyLoss()
+        loss = criterion(prediction,target_var)  # 3. 在默认GPU之上计算loss
+        optimizer.zero_grad()
+        loss.backward()   # 4. 开始反向传播
+        optimizer.step()
+
+0x03 后向传播
+我们前面运行的是上面的 Forward 部分，计算损失，接下来就运行上面代码中 loss.backward() 部分。
+
+3.1 分发梯度
+我们首先来到分发梯度部分，这部分作用是：把损失在 GPUs 之间 scatter，这样后续才可以在每个GPU之上独立进行后向传播。对应下图：
+    03-11.png
+
+
+
+....
+
+
+3.2 并行后向传播
+现在梯度已经分发到各个 GPU，接下来正式进入并行后向传播，这部分作用是：在各个GPU之上并行运行后向传播，计算参数梯度。对应下图：
+    03-12.png
+这部分调用到了原始模型的 backward，具体如下图中的数值 4：
+
++--------------------------------------------------------------------------------------+
+| DataParallel.forward                                                                 |
+|                                                                                      |
+|               1                               2                           3          |
+|           replicate +--------------->   parallel_apply +--------------> gather       |
+|                                                                                      |
++--------------------------------------------------------------------------------------+
+
+  +---------------------------+       +-------------------+       +--------------------+
+  | Broadcast                 |       | module            |       |Gather              |
+  |                           |       |                   |       |                    |
+  |                           |       |                   |       |                    |
+  |              1            |       |         2         |       |         3          |
+  |          forward()  +-----------> |      forward() +--------> |      forward()     |
+  |                           |       |                   |       |                    |
+  |                           |       |                   |       |                    |
+  |  +---------------------+  |       |                   |       | +----------------+ |
+  |  | ctx                 |  |       |                   |       | |ctx             | |
+  |  |       input_device  |  |       |                   |       | |     input_gpus | |
+  |  |                     |  |       |                   |       | |                | |
+  |  |       num_inputs    |  |       |                   |       | |     input_sizes| |
+  |  |                     |  |       |                   |       | |                | |
+  |  +---------------------+  |       |                   |       | |     dim        | |
+  |                           |       |                   |       | +----------------+ |
+  |                           |       |                   |       |                    |
+  |                           |       |                   |       |                    |
+  |                           | <---------+  backward()   | <---------+ backward()     |
+  |                           |       |          4        |       |         3          |
+  |                           |       |                   |       |                    |
+  +---------------------------+       +-------------------+       +--------------------+
+
++--------------------------------------------------------------------------------------+
+| loss.backward()                                                                      |
+|                                                4                          3          |
+|                                     <------------------+  <--------------------+     |
+|                                                                                      |
+|                                                                                      |
++--------------------------------------------------------------------------------------+
+
+3.3 归并梯度
+这部分作用是 在 GPU 0 之上归并梯度，总体流程拓展对应下图：
+03-13.png
+
+
+3.4 更新模型参数
+这部分功能是：更新梯度参数。进行梯度下降，并更新主GPU上的模型参数。
+
+另外，由于模型参数仅在主GPU上更新，而其他从属GPU此时并不是同步更新的，
+所以需要将更新后的模型参数复制到剩余的从属 GPU 中，以此来实现并行。
+这就是在下一次for循环之中进行，以此循环反复。
+
+对应示例代码是：
+
+for batch_idx, (data, label) in pbar:   # 6. 下一次迭代会继续从分发开始
+    if args.cuda:
+        data,label= data.cuda(),label.cuda(); # 1. 数据已经放到了默认GPU上
+    data_v = Variable(data)
+    target_var = Variable(label)
+    prediction= model(data_v,target_var,args) # 2. prediction 是gather到 GPU 0 的前向计算输出
+
+    # 到目前为止，我们完成了DataParallel.forward()
+    #这里的prediction 预测结果是由两个gpu合并过的，并行计算只存在在前向传播里
+    #前向传播每个gpu计算量为 batch_size/len(device_ids),等前向传播完了将结果和到主gpu里
+
+    criterion = nn.CrossEntropyLoss()
+    loss = criterion(prediction,target_var)  # 3. 在默认GPU之上计算loss
+    optimizer.zero_grad()
+    loss.backward()   # 4. 开始反向传播
+    optimizer.step() # 5. 更新模型
+
+
+0x04 总结
+
+我们总结一下流程，起初数据和模型被放入到默认GPU，就是 GPU 0，然后迭代如下：
+
+    scatter 会把数据分发到其他 GPU。
+    replicate 会把模型分发到其他 GPU。
+    parallel_apply 会启动多个线程进行前向计算。
+    gather 会把计算输出收集到 GPU 0。
+    GPU 0 会计算损失。
+    把梯度 scatter 到其他 GPU。
+    模型调用 backward 计算。
+    把梯度归并到 GPU 0。
+    optimizer.step 更新模型。
+具体对应下图之中的数字。
+
+                     +-----+                   +-------+
+                     |GPU1 |                   | GPU1  |
+main thread          +-----+                   +-------+
+ +-----> Forward----> scatter +--------------> replicate------->  parallel_apply  +-------->  gather +---------+
+                        +                           +                     +                                    |
+                      1 |                         2 |                   3 |                                    |
+                        |                           |                     |                                    |
+                        |  +---------+----------+---+                     |                                    |
+                        |  |         |          |                         |                                    |
+                        +---------+----------+  |               +--------------------+                         |
+                        |  |      |  |       |  |               |         |          |                         |
+                        |  | 2    |  | 2     |  | 2       thread|1     thread 2    thread 3                    |
+                      1 |  |    1 |  |     1 |  |               |         |          |                         |
+                        |  v      |  v       |  v               |         |          |                         |
+                        v         v          v                  v         v          v                         |
+                     +--+---+  +--+---+   +--+---+           +--+---+  +--+---+   +--+---+    +-------+        |
+                     | GPU1 |  | GPU2 |   | GPU3 |           | GPU1 |  | GPU2 |   | GPU3 |    | GPU1  |        |
+                     +------+  +------+   +------+           +--+---+  +-+----+   +---+--+    +-+-+--++        |
+                                                                |        |            |         ^ ^  ^         |
+                                                                |        |            |   4     | |  |         |
+                                                                |        |            ----------^ |  |         |
+                                                                |        |                4       |  |         |
+                                                                |        +------------------------+  |         |
+                                                                |                                    |         |
+                                                                +------------------------------------+         |
+        +------------------------------------------------------------------------------------------------------+
+        |                               +------+
+        |                               | GPU1 |
+        |                               +------+                                                                     main thread
+        +-> loss = criterion(...)+-----> scatter   +-------------->  model.backward() +---------->  reduce gradient +-------> optimizer.step
+                     +                      +                               +                          +------+         9
+                     | 5                    | 6                             | 7                        | GPU1 |
+                     |                      |                               |                          +--+---+
+                     |              v---------------v             +--------------------+                  ^
+                     |              |       |       |             |         |          |                  | 8
+                     |              |       |       |         thread 1    thread 2   thread 3             |
+                     |              |       |       |             +         |          |           +-------------+
+                     |              |       |       |             |         |          |           |      |      |
+                     v              v       v       v             v         v          v           |      |      |
+                  +--+---+      +---+-+  +--+--+  +-+---+      +--+--+  +---+--+    +--+--+     +--+--+ +-+--+ +-+---+
+                  | GPU1 |      | GPU1|  | GPU2|  |GPU3 |      | GPU1|  | GPU2 |    |GPU3 |     | GPU1| |GPU2| | GPU3|
+                  +------+      +-----+  +-----+  +-----+      +-----+  +------+    +-----+     +-----+ +----+ +-----+
+
+手机如下： 03-14.png
+
+
+至此，DP 分析完毕，我们下一篇要介绍 DDP 的一些相关知识。
+
+0xFF 参考
+PyTorch 源码解读之 torch.optim：优化算法接口详解
+
+pytorch(分布式)数据并行个人实践总结——DataParallel/DistributedDataParallel
+
+Pytorch的nn.DataParallel
+
+PyTorch 源码解读之分布式训练了解一下？
+
+https://discuss.pytorch.org/t/dataparallel-imbalanced-memory-usage/22551/20
+
+[原创][深度][PyTorch] DDP系列第二篇：实现原理与源代码解析
+
+Pytorch-CUDA从入门到放弃（二）
+
+Pytorch踩坑记：赋值、浅拷贝、深拷贝三者的区别以及model.state_dict()和model.load_state_dict()的坑点
+
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
