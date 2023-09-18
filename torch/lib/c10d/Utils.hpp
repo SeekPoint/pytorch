@@ -641,6 +641,7 @@ std::vector<T> recvVector(int socket) {
   return value;
 }
 
+//这些功能函数是调用如下基础函数来发送接收。
 // this is only for convenience when sending rvalues
 template <typename T>
 void sendValue(int socket, const T& value, bool moreData = false) {

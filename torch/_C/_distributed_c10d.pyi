@@ -134,6 +134,20 @@ class FileStore(Store):
 class HashStore(Store):
     def __init__(self): ...
 
+'''yknote---代码有不一样
+4.1 TCPStore in python
+在 Python 世界之中，就是简单的设定了 host 和 port。
+
+class TCPStore(Store):
+    def __init__(self, host_name, port, world_size=-1, is_master=False, timeout=None, *args, **kwargs): # real signature unknown; NOTE: unreliably restored from __doc__ 
+        pass
+
+    host = property(lambda self: object(), lambda self, v: None, lambda self: None)  # default
+    """Gets the hostname on which the store listens for requests."""
+
+    port = property(lambda self: object(), lambda self, v: None, lambda self: None)  # default
+    """Gets the port number on which the store listens for requests."""
+'''
 class TCPStore(Store):
     def __init__(
         self,

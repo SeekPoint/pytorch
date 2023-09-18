@@ -50,6 +50,9 @@ class BackgroundThread {
   void closeStopSignal();
 };
 
+//4.2.6 TCPStoreMasterDaemon
+//这里的 std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_; 是真实的 kv。
+//所以，TCPStoreMasterDaemon 就是负责对 kv 的操作，比如存取。
 // Separate thread that is only launched on master
 class TCPStoreMasterDaemon : public BackgroundThread {
  public:
@@ -91,6 +94,8 @@ class TCPStoreMasterDaemon : public BackgroundThread {
   std::unordered_map<std::string, std::vector<int>> watchedSockets_;
 };
 
+//4.2.5 TCPStoreWorkerDaemon
+//这个 daemon 进程只是用来处理 watchKey。
 // Separate thread that is launched on all instances (including master)
 // Right now only handles callbacks registered from watchKey()
 class TCPStoreWorkerDaemon : public BackgroundThread {
@@ -124,6 +129,9 @@ class TCPStoreWorkerDaemon : public BackgroundThread {
   bool callbackRegisteredData_ = false;
 };
 
+//4.2 TCPStore in CPP
+//4.2.1 API接口
+//首先，C++之中的 TCPStore 可以认为是一个API接口，其定义如下：
 class TCPStore : public Store {
  public:
   explicit TCPStore(
@@ -184,9 +192,10 @@ class TCPStore : public Store {
 
   std::mutex watchKeyMutex_;
   bool isServer_;
+
   int storeSocket_ = -1;
   int listenSocket_ = -1;
-  int masterListenSocket_ = -1;
+  int masterListenSocket_ = -1; // master 在这里监听
 
   std::string tcpStoreAddr_;
   PortType tcpStorePort_;

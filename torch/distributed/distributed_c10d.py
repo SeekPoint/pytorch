@@ -412,7 +412,38 @@ def get_backend(group=None):
     assert pg_store is not None
     return pg_store[0]
 
+'''
+1.2 初始化进程组
+在调用任何 DDP 其他方法之前，需要使用torch.distributed.init_process_group()进行初始化。
+该方法会初始化默认分布式进程组和分布式包。此方法会阻塞，直到所有进程都加入，函数定义如下：
 
+初始化进程组有两种主要方法：
+    明确指定 store，rank 和 world_size。
+    指定 init_method（一个 URL 字符串），它指示在哪里/如何发现对等点。
+    
+如果两者都没有指定，init_method则假定为“env://”。因此大家可以看到，store 和 init_method 是互斥的。
+
+init_process_group 的参数具体如下：
+
+    后端 – 要使用的后端。有效值包括mpi，gloo，和nccl。
+    该字段应作为小写字符串（例如"gloo"）给出，也可以通过Backend属性（例如Backend.GLOO）访问 。
+    如果在nccl后端每台机器上使用多个进程，则每个进程必须对其使用的每个 GPU 具有独占访问权限，因为在进程之间共享 GPU 可能会导致死锁。
+    
+    init_method – 指定如何初始化进程组的 URL。如果未指定init_method或store指定，则默认为“env://” 。与 store互斥。
+    
+    world_size – 参与作业的进程数。如果store指定，则 world_size 为必需。
+    
+    rank – 当前进程的等级（它应该是一个介于 0 和world_size-1之间的数字）。如果store指定，则 rank 为必需。
+    
+    store – 所有 worker 都可以访问的键/值存储，用于交换连接/地址信息。与init_method 互斥。
+    
+    timeout – 针对进程组执行的操作超时。默认值等于 30 分钟。这适用于gloo后端。
+    对于nccl，这仅在环境变量NCCL_BLOCKING_WAIT 或NCCL_ASYNC_ERROR_HANDLING设置为 1 时 适用。
+    
+    group_name – 组名。
+    
+    pg_options ( Process Group Options , optional ) – 进程组选项，指定在构建特定进程组期间需要传入哪些附加选项。
+'''
 def init_process_group(backend,
                        init_method=None,
                        timeout=default_pg_timeout,
@@ -528,12 +559,14 @@ def init_process_group(backend,
     else:
         # backward compatible API
         if store is None:
+            # 如果没有store，还是要用init_method构建一个store。
             rendezvous_iterator = rendezvous(
                 init_method, rank, world_size, timeout=timeout
             )
             store, rank, world_size = next(rendezvous_iterator)
             store.set_timeout(timeout)
-
+#3.3.2 使用 Store
+# 我们继续看如何使用 store。在 init_process_group 代码之中，接下来就使用了 store 来初始化进程组。
         default_pg = _new_process_group_helper(
             world_size,
             rank,
@@ -563,6 +596,23 @@ def init_process_group(backend,
         if get_backend(default_pg) in [Backend.GLOO, Backend.NCCL]:
             default_pg._set_sequence_number_for_group()
 
+'''
+3.3.2.1 _new_process_group_helper
+为了接着看 _new_process_group_helper，我们首先看看几个全局变量。
+以下几个变量 ProcessGroup 信息做了全局存储，比如 _pg_map[pg] = (Backend.NCCL, store)。
+
+    # Cached process groups
+    # For NCCL and GLOO pg, it is a map from ProcessGroup to (Backend, Store)
+    # For MPI pg, it is a map from ProcessGroup to (Backend, None)
+    _pg_map: Dict[ProcessGroup, Tuple[str, Optional[Store]]] = {}
+    # Process group's names, map from ProcessGroup to str
+    _pg_names: Dict[ProcessGroup, str] = {}
+    # Process group's global rank to local rank mapping
+    _pg_group_ranks: Dict[ProcessGroup, Dict[int, int]] = {}
+
+_new_process_group_helper 之中得到了 store 参数之后，据此生成了一个 prefix_store，
+然后再根据这个 pre_store 来生成了 ProcessGroupGloo。_new_process_group_helper 代码具体如下：
+'''
 def _new_process_group_helper(world_size,
                               rank,
                               group_ranks,
@@ -601,7 +651,7 @@ def _new_process_group_helper(world_size,
 
     backend = Backend(backend)
     pg: Union[ProcessGroupGloo, ProcessGroupMPI, ProcessGroupNCCL]
-    if backend == Backend.MPI:
+    if backend == Backend.MPI: # 没有使用store
         if not is_mpi_available():
             raise RuntimeError(
                 "Distributed package doesn't have MPI built in."
@@ -613,6 +663,7 @@ def _new_process_group_helper(world_size,
         _pg_map[pg] = (Backend.MPI, None)
         _pg_names[pg] = group_name
     else:
+        # 这里会使用store
         # If this is a subgroup (which means group_ranks is specified),
         # we check if the current process is a member of the new group.
         if not is_default_group:
@@ -622,13 +673,13 @@ def _new_process_group_helper(world_size,
 
         # Use the group name as prefix in the default store, such that
         # a single store can be reused by multiple groups.
-        prefix_store = PrefixStore(group_name, store)
+        prefix_store = PrefixStore(group_name, store) # 构建了 PrefixStore
 
         if backend == Backend.GLOO:
             if pg_options is not None:
                 raise RuntimeError("GLOO options not supported")
             pg = ProcessGroupGloo(
-                prefix_store,
+                prefix_store,  # 使用PrefixStore构建进程组
                 rank,
                 world_size,
                 timeout=timeout)
@@ -648,7 +699,7 @@ def _new_process_group_helper(world_size,
                 pg_options._timeout = timeout
 
             pg = ProcessGroupNCCL(
-                prefix_store,
+                prefix_store,  # 使用PrefixStore构建进程组
                 rank,
                 world_size,
                 pg_options)
