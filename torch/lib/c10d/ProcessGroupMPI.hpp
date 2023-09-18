@@ -21,6 +21,10 @@ namespace c10d {
 
 constexpr const char* MPI_BACKEND_NAME = "mpi";
 
+//4.2.3 运行
+//4.2.3.1 执行封装
+//这里有两个封装，WorkEntry 封装计算执行，WorkMPI封装计算执行结果（因为计算是异步的）。具体如下：
+//WorkEntry 是执行方法的封装，或者说每次需要执行的集合通信操作，都要封装在这里。
 // WorkEntry is the state associated with a single MPI run instance.
 // It include the source Tensor list and destination Tensor list, as well as
 // The actual run function that will operate either on src or dst or both.
@@ -52,6 +56,28 @@ struct WorkEntry {
   std::function<void(std::unique_ptr<WorkEntry>&)> run;
 };
 
+/*
+4.2 C++ 世界
+4.2.1 ProcessGroupMPI 定义
+ProcessGroupMPI 定义位于 torch/lib/c10d/ProcessGroupMPI.cpp。这里相当于做了一个工作队列，以及异步操作。几个注意点如下：
+
+    ProcessGroupMPI 类上的所有函数都应在组中的进程之间以相同的顺序调用。
+    这是我们能够保证跨进程匹配相同调用的唯一方法。
+
+    ProcessGroupMPI 类提供的所有MPI函数都在工作线程上异步调度。
+    因此，ProcessGroupMPI 依赖于MPI实现，该实现用于提供 MPI_THREAD_SERIALIZED 的最小线程支持值。
+    也就是说，进程可以是多线程的，多个线程可以进行MPI调用，
+    但一次只能进行一个：MPI调用不是从两个不同的线程同时进行的（所有MPI调用都是序列化的）。
+    但是，如果使用 MPI_THREAD_SERIALIZED，ProcessGroupMPI将只支持单个进程组。
+    换句话说，全局创建的进程组不能超过1个。
+
+    如果希望使用多个ProcessGroupMPI，它要求MPI实现的线程支持值为MPI\u thread\u multiple，
+    也就是说，多个线程可以调用MPI，没有任何限制。
+
+    还要注意，ProcessGroupMPI只支持单个张量操作。换句话说，输入张量向量的大小应始终为1。
+
+    如果使用的MPI是CUDA-aware MPI，则可以支持CUDA tensor，并且ProcessGroupMPI将自动检测此支持。
+*/
 // ProcessGroupMPI implements MPI bindings for c10d.
 //
 // All functions on this class are expected to be called in the same
@@ -76,8 +102,54 @@ struct WorkEntry {
 //
 // CUDA tensor can be supported if the MPI used is CUDA-aware MPI, and
 // ProcessGroupMPI will automatically detect this support.
+/*
+具体如下图：
+
+                                                                        +
+                                                             Worker 1   |   Worker 2
+                                                                        |
+                                                                        |
+                                                                        |
++-----------------+           +--------------------------------------+  |   +------------------------------------+            +---------------+
+| Main Thread     |           |  ProcessGroupMPI                     |  |   | ProcessGroupMPI                    |            | Main Thread   |
+|                 |           |                                      |  |   |                                    |            |               |
+|                 |           |                                      |  |   |                                    |            |               |
+|                 |           |                                      |  |   |                                    |            |               |
+|                 |           |  +--------------------------------+  |  |   |  +------------------------------+  |            |               |
+|                 |           |  |  runLoop        workerThread_  |  |  |   |  | runloop    workerThread_     |  |            |               |
+|                 |           |  |                                |  |  |   |  |                              |  |            |               |
+|                 |           |  |                                |  |  |   |  |                              |  |            |               |
+|  +---------+    |           |  |   +-------------------------+  |  |  |   |  |  +-----------------------+   |  |            |               |
+|  |         |    | allreduce |  |   | queue_                  |  |  |  |   |  |  | queue_                |   |  | allreduce  |   +---------+ |
+|  | Reducer | +-------------------> |                         |  |  |  |   |  |  |                       | <-------------------+ |         | |
+|  |         |    |           |  |   |                         |  |  |  |   |  |  |                       |   |  |            |   | Reducer | |
+|  +---------+    |           |  |   |  +-------------------+  |  |  |  |   |  |  |  +-----------------+  |   |  |            |   |         | |
+|                 |           |  |   |  |WorkEntry          |  |  |  |  |   |  |  |  | WorkEntry       |  |   |  |            |   +---------+ |
+|                 |           |  |   |  |                   |  |  |  |  |   |  |  |  |                 |  |   |  |            |               |
+|                 |           |  |   |  |   MPI_Allreduce <-----------------------------> MPI_Allreduce|  |   |  |            |               |
+|                 |           |  |   |  |                   |  |  |  |  |   |  |  |  |                 |  |   |  |            |               |
+|                 |           |  |   |  +-------------------+  |  |  |  |   |  |  |  +-----------------+  |   |  |            |               |
+|                 |           |  |   |                         |  |  |  |   |  |  |                       |   |  |            |               |
+|                 |           |  |   |                         |  |  |  |   |  |  |                       |   |  |            |               |
+|                 |           |  |   +-------------------------+  |  |  |   |  |  +-----------------------+   |  |            |               |
+|                 |           |  |                                |  |  |   |  |                              |  |            |               |
+|                 |           |  +--------------------------------+  |  |   |  +------------------------------+  |            |               |
+|                 |           |                                      |  |   |                                    |            |               |
+|                 |           |                                      |  |   |                                    |            |               |
+|                 |           |                                      |  |   |                                    |            |               |
++-----------------+           +--------------------------------------+  |   +------------------------------------+            +---------------+
+                                                                        |
+                                                                        |
+                                                                        +
+
+手机如下：  03-26.png
+
+
+*/
 class ProcessGroupMPI : public ProcessGroup {
  public:
+// WorkMPI 是执行结果的封装。
+//在往工作queue插入时候，实际插入的是二元组(WorkEntry, WorkMPI)，我们后续会讲解如何使用。
   class WorkMPI : public ProcessGroup::Work {
    public:
     explicit WorkMPI(

@@ -173,6 +173,41 @@ class Work:
     def synchronize(self): ...
     ...
 
+# 4.1.3
+# 我们以 ProcessGroupMPI 为例来看看，可以看到ProcessGroupMPI的基类是ProcessGroup。
+'''
+ProcessGroup 定义了若干集合通信函数，但是均未实现，不过从其注释之中，我们可以看到派生类会有多种重载实现。
+
+class ProcessGroup(__pybind11_builtins.pybind11_object):
+    # no doc
+    def allgather(self, *args, **kwargs): # real signature unknown; restored from __doc__
+        """
+        allgather(*args, **kwargs)
+        Overloaded function.
+        
+        1. allgather(self: torch._C._distributed_c10d.ProcessGroup, output_tensors: List[List[at::Tensor]], input_tensors: List[at::Tensor], opts: torch._C._distributed_c10d.AllgatherOptions = <torch._C._distributed_c10d.AllgatherOptions object at 0x000001A9460233F0>) -> c10d::ProcessGroup::Work
+        
+        2. allgather(self: torch._C._distributed_c10d.ProcessGroup, output_tensors: List[at::Tensor], input_tensor: at::Tensor) -> c10d::ProcessGroup::Work
+        """
+        pass
+
+    def allgather_coalesced(self, output_lists, *args, **kwargs): # real signature unknown; NOTE: unreliably restored from __doc__ 
+        """ allgather_coalesced(self: torch._C._distributed_c10d.ProcessGroup, output_lists: List[List[at::Tensor]], input_list: List[at::Tensor], opts: torch._C._distributed_c10d.AllgatherOptions = <torch._C._distributed_c10d.AllgatherOptions object at 0x000001A946023370>) -> c10d::ProcessGroup::Work """
+        pass
+
+    def allreduce(self, *args, **kwargs): # real signature unknown; restored from __doc__
+        """
+        allreduce(*args, **kwargs)
+        Overloaded function.
+        
+        1. allreduce(self: torch._C._distributed_c10d.ProcessGroup, tensors: List[at::Tensor], opts: torch._C._distributed_c10d.AllreduceOptions = <torch._C._distributed_c10d.AllreduceOptions object at 0x000001A946023570>) -> c10d::ProcessGroup::Work
+        
+        2. allreduce(self: torch._C._distributed_c10d.ProcessGroup, tensors: List[at::Tensor], op: torch._C._distributed_c10d.ReduceOp = <ReduceOp.SUM: 0>) -> c10d::ProcessGroup::Work
+        
+        3. allreduce(self: torch._C._distributed_c10d.ProcessGroup, tensor: at::Tensor, op: torch._C._distributed_c10d.ReduceOp = <ReduceOp.SUM: 0>) -> c10d::ProcessGroup::Work
+        """
+        pass
+'''
 class ProcessGroup:
     class Options: ...
     def __init__(self): ...
@@ -374,7 +409,8 @@ class ProcessGroupNCCL(ProcessGroup):
     @staticmethod
     def _group_end() -> None: ...
     ...
-
+# 4.1.3
+# 我们以 ProcessGroupMPI 为例来看看，可以看到ProcessGroupMPI的基类是ProcessGroup。
 class ProcessGroupMPI(ProcessGroup):
     def __init__(
         self,

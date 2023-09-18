@@ -515,6 +515,9 @@ class DistributedDataParallel(Module):
                 module_states, self.broadcast_bucket_size, authoritative_rank
             )
 
+# #0x03 使用
+# 既然知道了进程组的本质，我们接下来看看如何使用进程组。
+# 首先，在 _ddp_init_helper 之中会生成 dist.Reducer，进程组会作为 Reducer 的参数之一传入。
     def _ddp_init_helper(self, parameters, expect_sparse_gradient, param_to_name_mapping):
         """
         Initialization helper function that does the following:
@@ -542,7 +545,7 @@ class DistributedDataParallel(Module):
         self.reducer = dist.Reducer(
             parameters,
             list(reversed(bucket_indices)),
-            self.process_group,
+            self.process_group,  # 这里使用了
             expect_sparse_gradient,
             self.bucket_bytes_cap,
             self.find_unused_parameters,

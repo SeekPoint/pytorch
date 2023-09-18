@@ -1,0 +1,190 @@
+PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+https://www.cnblogs.com/rossiXYZ/p/15553945.html
+
+
+目录
+[源码解析] PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+0x00 摘要
+0x01 回顾
+1.1 基础概念
+1.2 初始化进程组
+0x02 概念与设计
+2.1 功能
+2.2 本质
+0x03 使用
+0x04 构建
+4.1 Python 世界
+4.1.1 rendezvous
+4.1.2 _new_process_group_helper
+4.1.3
+4.2 C++ 世界
+4.2.1 ProcessGroupMPI 定义
+4.2.2 初始化
+4.2.2.1 initMPIOnce
+4.2.2.2 ProcessGroupMPI
+4.2.3 运行
+4.2.3.1 执行封装
+4.2.3.2 allreduce
+4.2.3.3 enqueue
+4.2.3.4 runLoop
+4.4 封装
+0xFF 参考
+0x00 摘要
+本文是 PyTorch 分布式系列的第七篇， 介绍 DistributedDataParallel 所依赖的进程组概念。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+
+[源码解析] PyTorch 分布式(4)------分布式应用基础概念
+
+[源码解析] PyTorch分布式(5) ------ DistributedDataParallel 总述&如何使用
+
+[源码解析] PyTorch分布式(6) ---DistributedDataParallel -- 初始化&store
+
+0x01 回顾
+1.1 基础概念
+关于分布式通信，PyTorch 提供的几个概念是：进程组，后端，初始化，Store。
+
+    进程组 ：DDP是真正的分布式训练，可以使用多台机器来组成一次并行运算的任务。
+    为了能够让 DDP 的各个worker之间通信，PyTorch 设置了进程组这个概念。
+
+    后端 ：后端这个概念是一个逻辑上的概念。本质上后端是一种IPC通信机制。
+    对于用户来说，就是采用那种方式来进行集合通信，从代码上看，就是走什么流程（一系列流程），
+    以及后端使用 ProcessGroupMPI 还是 ProcessGroupGloo .....。
+
+    初始化 : 虽然有了后端和进程组的概念，但是如何让 worker 在建立进程组之前发现彼此？
+    这就需要一种初始化方法来告诉大家传递一个信息：如何联系到其它机器上的进程？
+
+    Store : 可以认为是分布式键值存储，这个存储在组中的进程之间共享信息以及初始化分布式包 （通过显式创建存储来作为init_method的替代）。
+
+1.2 初始化进程组
+在调用任何 DDP 其他方法之前，需要使用torch.distributed.init_process_group()进行初始化进程组。
+
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+import os
+
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
+    # initialize the process group
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
+
+该方法会初始化默认分布式进程组和分布式包。此方法会阻塞，直到所有进程都加入，函数定义如下：
+
+init_process_group ( backend ,
+                       init_method = None ,
+                       timeout = default_pg_timeout ,
+                       world_size =- 1 ,
+                       rank =- 1 ,
+                       store = None ,
+                       group_name = '' ,
+                       pg_options = None )
+
+初始化进程组有两种主要方法：
+
+    明确指定 store，rank 和 world_size。
+    指定 init_method（一个 URL 字符串），它指示在哪里/如何发现对等点。
+
+如果两者都没有指定，init_method则假定为“env://”。
+因此大家可以看到，store 和 init_method 是互斥的。
+参数具体如下：
+
+    后端 – 要使用的后端。
+    有效值包括mpi，gloo，和nccl。该字段应作为小写字符串（例如"gloo"）给出，也可以通过Backend属性（例如Backend.GLOO）访问 。
+    如果在nccl后端每台机器上使用多个进程，则每个进程必须对其使用的每个 GPU 具有独占访问权限，因为在进程之间共享 GPU 可能会导致死锁。
+
+    init_method – 指定如何初始化进程组的 URL。如果未指定init_method或store指定，则默认为“env://” 。与 store互斥。
+
+    world_size – 参与作业的进程数。如果store指定，则 world_size 为必需。
+
+    rank – 当前进程的等级（它应该是一个介于 0 和world_size-1之间的数字）。如果store指定，则 rank 为必需。
+
+    store – 所有 worker 都可以访问的键/值存储，用于交换连接/地址信息。与init_method 互斥。
+
+    timeout – 针对进程组执行的操作超时。默认值等于 30 分钟。
+    这适用于gloo后端。对于nccl，这仅在环境变量NCCL_BLOCKING_WAIT 或NCCL_ASYNC_ERROR_HANDLING设置为 1 时 适用。
+
+    group_name – 组名。
+
+    pg_options ( Process Group Options , optional ) – 进程组选项，指定在构建特定进程组期间需要传入哪些附加选项。
+
+0x02 概念与设计
+2.1 功能
+默认情况下，集合通信在默认组（也称为world）上运行，并要求所有进程都进入分布式函数调用。但是，一些工作可以从更细粒度的通信中受益。
+这就是分布式组发挥作用的地方。new_group() 函数可用于创建一个新分布式组，这个新组是所有进程的任意子集。
+new_group() 返回一个不透明的组句柄，此句柄可以作为group参数提供给所有集合函数（集合函数是分布式函数，用于在某些编程模式中交换信息）。
+
+2.2 本质
+抛开概念，从代码看其本质。进程组就是给每一个训练的 process 建立一个通信thread。
+主线程（计算线程）在前台进行训练，这个通信 thread 在后台做通信。
+我们以 ProcessGroupMPI 为例，是在通信线程之中另外添加了一个 queue，做buffer 和 异步处理。
+这样，进程组中所有进程都可以组成一个集体在后台进行集合通信操作。
+
+比如下面，左侧worker之中就有两个线程，计算线程负责计算梯度，然后要求通信线程与其它worker进行交换梯度。
+
++---------------------------------------------------------------+        +--------------+
+| Worker Process                                                |        | Other Worker |
+|                                                               |        |              |
+|  +----------------------+       +-----------------------+     |        | +----------+ |
+|  | Computation thread   |       | Communication thread  |     |        | |   Comm   | |
+|  |                      |       |                       |     |        | |  thread  | |
+|  |                      |       |                       |     |        | |          | |
+|  |     Main Thread      |       |    workerThread_      |     |        | |          | |
+|  |                      |       |                       |     |        | |          | |
+|  |                      |       |                       |     |        | |          | |
+|  | Gradient computation |       |                       |     |        | |          | |
+|  |          +           |       |                       |     |        | |          | |
+|  |          |           |       |                       |   + |    +   | |          | |
+|  |          |           |       |                       |  /| |    |\  | |          | |
+|  |          v           | /|_|\ |                       | / +-+----+ \ | |          | |
+|  |    Does All+Reduce   |/ grad\|   Does communication  |/  Gradient  \| |          | |
+|  |                      |\  _  /|                       |\            /| |          | |
+|  |                      | \| |/ |                       | \ +-+----+ / | |          | |
+|  |                      |       |                       |  \| |    |/  | |          | |
+|  |                      |       |                       |   + |    +   | |          | |
+|  |                      |       |                       |     |        | |          | |
+|  |                      |       |                       |     |        | |          | |
+|  +----------------------+       +-----------------------+     |        | +----------+ |
+|                                                               |        |              |
++---------------------------------------------------------------+        +--------------+
+
+
+。。。。
+
+
+0xFF 参考
+pytorch(分布式)数据并行个人实践总结——DataParallel/DistributedDataParallel
+
+https://www.telesens.co/2019/04/04/distributed-data-parallel-training-using-pytorch-on-aws/
+
+DISTRIBUTED TRAINING WITH UNEVEN INPUTS USING THE JOIN CONTEXT MANAGER

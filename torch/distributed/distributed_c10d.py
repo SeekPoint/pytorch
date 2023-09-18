@@ -363,7 +363,8 @@ def is_torchelastic_launched():
     """
     return os.getenv("TORCHELASTIC_RUN_ID") is not None
 
-
+# 4.4 封装
+# PyTorch 对各种 process group 做了封装，这样用户就可以调用 GroupMember.WORLD 来完成各种操作，但是用户是无感的。
 def _get_default_group():
     """
     Getting the default process group created by init_process_group
@@ -385,6 +386,18 @@ def _get_default_store():
     _, default_store = _pg_map[default_pg]
     return default_store
 
+'''
+0x04 构建
+4.1 Python 世界
+4.1.1 rendezvous
+从 init_process_group 源码之中看，几种构建实现在细节上有所不同，我们只是看gloo和mpi。
+
+    gloo利用 rendezvous 设置了master地址。
+    
+    MPI不需要 rendezvous，而是利用mpirun启动。
+
+两种方法都生成了一个 ProcessGroup 赋值给 default_pg，然后用 default_pg 设置 GroupMember.WORLD。
+'''
 def _update_default_pg(pg):
     GroupMember.WORLD = group.WORLD = pg
 
@@ -547,7 +560,7 @@ def init_process_group(backend,
                 "are ignored since they are assigned by the "
                 "MPI runtime.".format(world_size, rank))
 
-        default_pg = _new_process_group_helper(
+        default_pg = _new_process_group_helper(  # 生成了一个 ProcessGroup 赋值给 default_pg
             -1,
             -1,
             [],
@@ -555,19 +568,19 @@ def init_process_group(backend,
             None,
             group_name=group_name,
             timeout=timeout)
-        _update_default_pg(default_pg)
+        _update_default_pg(default_pg)   # 用 default_pg 设置 GroupMember.WORLD
     else:
         # backward compatible API
         if store is None:
             # 如果没有store，还是要用init_method构建一个store。
-            rendezvous_iterator = rendezvous(
+            rendezvous_iterator = rendezvous(  # 先生成一个store
                 init_method, rank, world_size, timeout=timeout
             )
             store, rank, world_size = next(rendezvous_iterator)
             store.set_timeout(timeout)
 #3.3.2 使用 Store
 # 我们继续看如何使用 store。在 init_process_group 代码之中，接下来就使用了 store 来初始化进程组。
-        default_pg = _new_process_group_helper(
+        default_pg = _new_process_group_helper(  # 再进行构建 ProcessGroup
             world_size,
             rank,
             [],
@@ -576,7 +589,7 @@ def init_process_group(backend,
             pg_options=pg_options,
             group_name=group_name,
             timeout=timeout)
-        _update_default_pg(default_pg)
+        _update_default_pg(default_pg)  # 用 default_pg 设置 GroupMember.WORLD
 
     _pg_group_ranks[GroupMember.WORLD] = {i: i for i in range(GroupMember.WORLD.size())}  # type: ignore[attr-defined, index]
     _backend = _pg_map[GroupMember.WORLD][0]  # type: ignore[index]
@@ -612,6 +625,10 @@ def init_process_group(backend,
 
 _new_process_group_helper 之中得到了 store 参数之后，据此生成了一个 prefix_store，
 然后再根据这个 pre_store 来生成了 ProcessGroupGloo。_new_process_group_helper 代码具体如下：
+
+4.1.2 _new_process_group_helper
+各种后端都会使用 _new_process_group_helper 进行具体构建，_new_process_group_helper 其实就是调用了不同的C++实现，
+比如 ProcessGroupGloo, ProcessGroupMPI, ProcessGroupNCCL。
 '''
 def _new_process_group_helper(world_size,
                               rank,
@@ -657,7 +674,7 @@ def _new_process_group_helper(world_size,
                 "Distributed package doesn't have MPI built in."
                 " MPI is only included if you build PyTorch from"
                 " source on a host that has MPI installed.")
-        pg = ProcessGroupMPI.create(group_ranks)
+        pg = ProcessGroupMPI.create(group_ranks)  # 构建了 ProcessGroupMPI
         if not pg:
             return GroupMember.NON_GROUP_MEMBER
         _pg_map[pg] = (Backend.MPI, None)
@@ -678,7 +695,7 @@ def _new_process_group_helper(world_size,
         if backend == Backend.GLOO:
             if pg_options is not None:
                 raise RuntimeError("GLOO options not supported")
-            pg = ProcessGroupGloo(
+            pg = ProcessGroupGloo(   # 构建了 ProcessGroupGloo
                 prefix_store,  # 使用PrefixStore构建进程组
                 rank,
                 world_size,
@@ -698,7 +715,7 @@ def _new_process_group_helper(world_size,
                 pg_options.is_high_priority_stream = False
                 pg_options._timeout = timeout
 
-            pg = ProcessGroupNCCL(
+            pg = ProcessGroupNCCL(  # 构建了 ProcessGroupNCCL
                 prefix_store,  # 使用PrefixStore构建进程组
                 rank,
                 world_size,
@@ -715,6 +732,47 @@ def _new_process_group_helper(world_size,
             _pg_names[pg] = group_name
 
     return pg
+    '''
+    目前流程如下：
+    
+                                      +
+                                      |
+                                      |
+                                      v
+                              init_process_group
+                                      +
+                                      |
+                                      |
+                         +------------+-------------+
+                         |                          |
+                         |                          |
+                         v                          v
+                    Backend.MPI        Backend.GLOO & Backend.NCCL
+                         +                          +
+                         |                          |
+                         |                          |
+                         |                          v
+                         |                  store = rendezvous()
+                         |                          +
+                         |                          |
+                         |                          |
+                         +------------+-------------+
+                                      |
+                                      |
+                                      v
+    
+                           _new_process_group_helper
+                                      +
+                                      |
+                                      |
+                                      |
+           +------------------------------------------------------+
+           |                          |                           |
+           |                          |                           |
+           v                          v                           v
+    
+    ProcessGroupMPI         ProcessGroupGloo(store)        ProcessGroupNCCL(store)
+    '''
 
 
 def destroy_process_group(group=None):
@@ -2455,6 +2513,8 @@ def all_to_all_single(output,
     else:
         work.wait()
 
+# 又比如，在 torch/distributed/distributed_c10d.py 之中如下方法可以看到 all_to_all 和 all_gather 之类的函数，
+# 其注释有很详细的用法（这里因为篇幅所限略去），大家有兴趣可以自行学习。
 def all_to_all(output_tensor_list,
                input_tensor_list,
                group=None,

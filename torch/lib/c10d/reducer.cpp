@@ -26,6 +26,7 @@ constexpr int kUnsetDivFactor = -1;
 
 } // namespace
 
+//其次，在 Reducer 构建函数之中，会把进程组配置给 Reducer 的成员变量 process_group_ 之上。
 Reducer::Reducer(
     std::vector<std::vector<at::Tensor>> replicas,
     std::vector<std::vector<size_t>> bucket_indices,
@@ -36,7 +37,7 @@ Reducer::Reducer(
     bool gradient_as_bucket_view,
     std::unordered_map<size_t, std::string> paramNames)
     : replicas_(std::move(replicas)),
-      process_group_(std::move(process_group)),
+      process_group_(std::move(process_group)),   // 在这里
       expect_sparse_gradients_(std::move(expect_sparse_gradients)),
       expect_autograd_hooks_(false),
       require_finalize_(false),
@@ -772,6 +773,8 @@ void Reducer::mark_variable_ready(VariableIndex index) {
   }
 }
 
+//最后，当需要对梯度做 all-reduce 时候，则会调用 process_group_->allreduce(tensors) 进行处理。
+//现在，我们就知道如何使用进程组了。
 void Reducer::all_reduce_bucket(Bucket& bucket) {
   std::vector<at::Tensor> tensors;
   tensors.reserve(bucket.replicas.size());
@@ -791,7 +794,7 @@ void Reducer::all_reduce_bucket(Bucket& bucket) {
   // TODO(@sinannasir): merge `work` and `future_work`. Related to GH Issue
   // #41266.
   if (comm_hook_ == nullptr) {
-    bucket.work = process_group_->allreduce(tensors);
+    bucket.work = process_group_->allreduce(tensors);  // 这里会进行调用
   } else {
     GradBucket grad_bucket(
         next_bucket_,

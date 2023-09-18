@@ -146,6 +146,7 @@ c10::intrusive_ptr<c10::ivalue::Future> ProcessGroup::Work::getFuture() {
   TORCH_CHECK(false, "ProcessGroup::Work::getFuture not implemented.")
 }
 
+//ProcessGroupMPI的基类代码如下：
 void ProcessGroup::Work::finish(std::exception_ptr exception) {
   std::unique_lock<std::mutex> lock(mutex_);
   completed_ = true;

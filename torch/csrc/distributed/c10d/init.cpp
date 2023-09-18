@@ -1368,6 +1368,8 @@ Example::
       intrusive_ptr_no_gil_destructor_class_<::c10d::ProcessGroupMPI>(
           module, "ProcessGroupMPI", processGroup);
 
+//而无论哪个ProcessGroup的派生类，都指向了C++世界，比如在 torch/csrc/distributed/c10d/init.cpp 之中有如下代码：
+//因此可见，最后调用到的是 createProcessGroupMPI，于是我们直接去C++世界看看。
   // Define static create function instead of a constructor, because
   // this function may return null. This happens if this process is not
   // part of a sub group that is to be created.

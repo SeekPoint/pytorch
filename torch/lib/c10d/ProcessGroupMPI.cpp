@@ -106,7 +106,7 @@ void ProcessGroupMPI::WorkMPI::finishWorkMPIError(std::exception_ptr eptr) {
   future_->setError(eptr);
   finish(eptr);
 }
-
+//finishWorkMPI 会标示并且进行通知。
 void ProcessGroupMPI::WorkMPI::finishWorkMPI() {
   future_->markCompleted(at::IValue(outputTensors_));
   finish();
@@ -223,6 +223,8 @@ void ProcessGroupMPI::mpiExit() {
   MPI_CHECK(MPI_Finalize());
 }
 
+//4.2.2.1 initMPIOnce
+//调用了 MPI_Init_thread API 初始化了 MPI 执行环境。
 void ProcessGroupMPI::initMPIOnce() {
   // Initialize MPI environment
   std::call_once(onceFlagInitMPI, []() {
@@ -241,6 +243,9 @@ void ProcessGroupMPI::initMPIOnce() {
   });
 }
 
+//4.2.2 初始化
+//createProcessGroupMPI 方法完成了进程组的初始化，其主要是调用了 MPI 编程常见套路，
+//比如initMPIOnce，MPI_Comm_create，MPI_Barrier之类。
 c10::intrusive_ptr<ProcessGroupMPI> ProcessGroupMPI::createProcessGroupMPI(
     std::vector<int> ranks) {
   // Once initialization
@@ -291,12 +296,14 @@ c10::intrusive_ptr<ProcessGroupMPI> ProcessGroupMPI::createProcessGroupMPI(
   // process group instance. This is in line with the semantics of the
   // other process group types.
   if (groupComm == MPI_COMM_NULL) {
-    return c10::intrusive_ptr<ProcessGroupMPI>();
+    return c10::intrusive_ptr<ProcessGroupMPI>();  // 生成
   }
 
-  return c10::make_intrusive<ProcessGroupMPI>(rank, size, groupComm);
+  return c10::make_intrusive<ProcessGroupMPI>(rank, size, groupComm);  // 生成
 }
 
+//4.2.2.2 ProcessGroupMPI
+//ProcessGroupMPI 构建方法之中 生成了 workerThread_，其运行 runLoop。
 ProcessGroupMPI::ProcessGroupMPI(int rank, int size, MPI_Comm pgComm)
     : ProcessGroup(rank, size), stop_(false), pgComm_(pgComm) {
   if (pgComm_ == MPI_COMM_NULL) {
@@ -331,6 +338,8 @@ void ProcessGroupMPI::abort() {
   MPI_Abort(pgComm_, EXIT_FAILURE);
 }
 
+//4.2.3.4 runLoop
+//主循环runLoop方法就是不停的取出entry来处理。
 void ProcessGroupMPI::runLoop() {
   std::unique_lock<std::mutex> lock(pgMutex_);
 
@@ -344,15 +353,15 @@ void ProcessGroupMPI::runLoop() {
 
     queue_.pop_front();
 
-    auto& workEntry = std::get<0>(workTuple);
-    auto& work = std::get<1>(workTuple);
+    auto& workEntry = std::get<0>(workTuple); // 进行计算
+    auto& work = std::get<1>(workTuple);  // 拿到WorkMPI
 
     lock.unlock();
     queueConsumeCV_.notify_one();
 
     try {
       workEntry->run(workEntry);
-      work->finishWorkMPI();
+      work->finishWorkMPI();  // 会等待WorkMPI的计算结果
     } catch (...) {
       work->finishWorkMPIError(std::current_exception());
     }
@@ -360,13 +369,17 @@ void ProcessGroupMPI::runLoop() {
     lock.lock();
   }
 }
-
+//4.2.3.3 enqueue
+//enqueue 方法是往queue插入二元组(WorkEntry, WorkMPI)，里面的 entry->dst 就是 计算结果存放到 WorkMPI 之中。
 c10::intrusive_ptr<ProcessGroup::Work> ProcessGroupMPI::enqueue(
     std::unique_ptr<WorkEntry> entry,
     const char* profilingTitle,
     const c10::optional<std::vector<at::Tensor>>& inputTensors) {
+  // 生成 WorkMPI，把 entry->dst 就是 计算结果存放到 WorkMPI 之中
   auto work = c10::make_intrusive<WorkMPI>(entry->dst, profilingTitle, inputTensors);
   std::unique_lock<std::mutex> lock(pgMutex_);
+
+  // 插入二元组
   queue_.push_back(std::make_tuple(std::move(entry), work));
   lock.unlock();
   queueProduceCV_.notify_one();
@@ -396,6 +409,9 @@ c10::intrusive_ptr<ProcessGroup::Work> ProcessGroupMPI::broadcast(
       c10::optional<std::vector<at::Tensor>>(tensors));
 }
 
+//4.2.3.2 allreduce
+//以allreduce 为例，看看如何处理。就是把 MPI_Allreduce 封装到 WorkEntry 之中，然后插入到 queue。
+//后续 runLoop 之中就是取出 WorkEntry，然后运行 MPI_Allreduce。
 c10::intrusive_ptr<ProcessGroup::Work> ProcessGroupMPI::allreduce(
     std::vector<at::Tensor>& tensors,
     const AllreduceOptions& opts) {
@@ -406,7 +422,7 @@ c10::intrusive_ptr<ProcessGroup::Work> ProcessGroupMPI::allreduce(
         auto data = (entry->src)[0];
         c10::DeviceGuard guard(data.device());
         std::unique_lock<std::mutex> globalLock(pgGlobalMutex_);
-        MPI_CHECK(MPI_Allreduce(
+        MPI_CHECK(MPI_Allreduce(  // 封装了此函数
             MPI_IN_PLACE,
             data.data_ptr(),
             data.numel(),
