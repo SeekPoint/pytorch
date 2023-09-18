@@ -1,0 +1,62 @@
+PyTorch 之 Checkpoint 机制解析
+https://zhuanlan.zhihu.com/p/455541708
+
+
+Checkpoint 机制
+该技术的核心是一种使用时间换空间的策略。在现有的许多方法中被大量使用，例如 DenseNet、Swin Transformer 源码中都可以看到它的身影。
+为了了解它的工作原理，我们先得弄明白的一个问题是，PyTorch 模型在训练过程中显存占用主要是用来存储什么？
+关于这一点，Connolly 的文章 《PyTorch 显存机制分析》（https://zhuanlan.zhihu.com/p/424512257） 介绍的非常详细：
+
+开门见山的说，PyTorch 在进行深度学习训练的时候，有 4 大部分的显存开销，分别是
+模型参数(parameters)，模型参数的梯度(gradients)，
+优化器状态(optimizer states) 以及 中间激活值(intermediate activations) 或者叫中间结果(intermediate results)。
+而通过 Checkpoint 技术，我们可以通过一种取巧的方式，
+使用 PyTorch 提供的 “no-grad” （no_grad()）模式来避免将这部分运算被autograd记录到反向图“backward graph”中，
+从而避免了对于中间激活值的存储需求。
+
+个人理解（欢迎指出错误）：前向传播时 autograd 记录各个操作反向传播需要的一些信息和中间变量。
+反向传播之后，用于计算梯度的中间结果会被释放。也就是说，模型参数、优化器状态和参数梯度是始终在占用着存储空间的，中间激活值在反向传播之后就自动被清空了。
+这里我简单修改了 《PyTorch 显存机制分析》（https://zhuanlan.zhihu.com/p/424512257） 中给出的例子
+进行了一下验证（https://github.com/lartpang/CodeForArticle/tree/main/CheckpointAndGPUUsage.PyTorch） 。
+
+这里实际上会引申出另一个问题，为什么自定义 Function 一般情况下会减少显存占用？
+（在 Vision Longformer 中各种实现的对比里可以明显看到这一现象）我觉得主要是因为自定义 Function 的时候，
+我们可以从一整个模块的角度来更有针对性的在 ctx 中存储中间变量，
+而自动求导引擎可能关注的太细了，导致存储许多不必要的中间变量。关于这一点暂时不知道如何验证。
+这可以避免存储模型特定层中间运算结果，从而有效降低了前向传播中显存的占用。这些中间结果会在反向传播的时候被即时重新计算一次。
+要注意，被 checkpoint 包裹的层反向传播时仍然会在第一次反向传播的时候开辟存储梯度的空间。
+
+因为 checkpoint 是在 torch.no_grad() 模式下计算的目标操作的前向函数，这并不会修改原本的叶子结点的状态，有梯度的还会保持。
+只是关联这些叶子结点的临时生成的中间变量会被设置为不需要梯度，因此梯度链式关系会被断开。
+通过这样的方式，虽然延长了反向传播的时间，但是却也在一定程度上缓解了存储大量中间变量带来的显存占用。
+
+源码解析   yknote---这里版本略有差异！！！
+以下代码来自 PyTorch v1.10.1 版本：https://github.com/pytorch/pytorch/blob/v1.10.1/torch/utils/checkpoint.py。
+最新的版本中补充了一些新的内容，待其最终发布后再说吧，下面的内容本身已经将 checkpoint 的核心介绍了。
+
+辅助函数
+...
+
+
+
+参考链接
+Checkpoint 源码：https://github.com/pytorch/pytorch/blob/master/torch/utils/checkpoint.py
+PyTorch 的 Autograd - xiaopl 的文章 - 知乎 https://zhuanlan.zhihu.com/p/69294347
+PyTorch 源码解读之 torch.autograd：梯度计算详解 - OpenMMLab 的文章 - 知乎 https://zhuanlan.zhihu.com/p/321449610
+浅谈 PyTorch 中的 tensor 及使用 - xiaopl 的文章 - 知乎 https://zhuanlan.zhihu.com/p/67184419
+https://pytorch.org/docs/stable/notes/autograd.html#locally-disable-grad-doc
+https://pytorch.org/tutorials/beginner/introyt/autogradyt_tutorial.html
+发布于 2022-01-10 16:58
+
+
+发布一条带图评论吧
+
+2 条评论
+
+【checkpoint 的 work 机制--太长不看版】
+i. 将原来的前向过程放入 torch.no_grad() 上下文管理器，从而不需要为中间激活状态保存梯度；
+ii. 同时，在前向的时候记录输入的类型(是否张量)以及张量所在的设备和对应的随机状态(cpu&gpu)；
+iii. 反向传播时，恢复之前记录的随机状态，取出当前层的原输入，从中剥离(detach)计算图，得到对应的成为叶子节点的输入(在原模型中它们是中间激活状态，如果不称为叶子节点，那么反向传播后它们的梯度会被释放)，模拟一遍原来的前向过程，得到输出；
+iv. 将以上输出中是张量的、需要梯度的记录下来，结合传过来的后面层的梯度一起传入 torch.autograd.backward()，从而获得了 iii 中称为叶子节点的对应的梯度；
+v. 将以上计算出来的梯度与原输入对应起来返回(对于不需要梯度的，则返回 None)
+2022-03-26
