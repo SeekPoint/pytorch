@@ -373,7 +373,23 @@ class DistributedDataParallel(Module):
         >>> torch.distributed.init_process_group(backend='nccl', world_size=4, init_method='...')
         >>> net = torch.nn.parallel.DistributedDataParallel(model, pg)
     """
-
+    '''
+    0x02 初始化
+    因为 Python 世界是可以在很多时刻给类设置成员变量，因此我们还是从 __init__ 看起。
+    2.1 __init__
+        其核心逻辑是：
+        设置设备类型。
+        设置设备IDs。
+        设置 self.process_group，默认就是 GroupMember.WORLD。
+        配置各种类成员变量。
+        检查 parameters。
+        设定bucket大小。
+        构建参数。
+        将 rank 0 的state_dict() 广播到其他worker，以保证所有worker的模型初始状态相同。
+        建立reducer。
+    
+    具体代码如下：
+    '''
     def __init__(
         self,
         module,
@@ -398,6 +414,7 @@ class DistributedDataParallel(Module):
         if device_ids is not None and len(device_ids) > 1:
             raise ValueError("device_ids can only be None or contain a single element.")
 
+        # 设置设备类型
         self.is_multi_device_module = len({p.device for p in module.parameters()}) > 1
         distinct_device_types = {p.device.type for p in module.parameters()}
         if len(distinct_device_types) != 1:
@@ -409,6 +426,7 @@ class DistributedDataParallel(Module):
             )
         self.device_type = list(distinct_device_types)[0]
 
+        # 设置设备IDs
         if (
             device_ids is None
             or len(device_ids) == 0  # For backward compatibility.
@@ -436,11 +454,13 @@ class DistributedDataParallel(Module):
 
             self.output_device = _get_device_index(output_device, True)
 
+        # 设置process group
         if process_group is None:
             self.process_group = _get_default_group()
         else:
             self.process_group = process_group
 
+        # 配置各种成员变量
         self.static_graph = False
         self.dim = dim
         self.module = module
@@ -469,6 +489,7 @@ class DistributedDataParallel(Module):
                 "module is deprecated. Please avoid using it."
             )
 
+        # 检查 parameters
         # Check that a module does not have Uninitialized parameters
         for param in module.parameters():
             if isinstance(param, torch.nn.parameter.UninitializedParameter):
@@ -486,16 +507,28 @@ class DistributedDataParallel(Module):
             os.environ.get("PYTORCH_DDP_USE_SIDE_STREAM", "1") == "1"
         )
 
+        # 构建参数
         # TODO(wayi@): Remove this field since SPMD is no longer supported,
         # and also remove all the relevant unnecessary loops.
         # Module replication within process (single-process multi device)
-        self._module_copies = [self.module]
+        '''
+        对于 DDP，第一个关键步就是构建参数，这里要注意，如果目前情况是单机多GPU，
+        也就是单进程多设备（和DP一样了）情况，那么需要在进程之内进行模型复制。
+        
+        但是未来不会支持了，会去掉。所以 parameters 就是 [ToyModel] 的参数集合，parameters[0] 就是 ToyModel 的参数。
+        后面介绍 BucketReplica 会提到。
+        '''
+        # 这里需要注意，就是以后不支持了
+        self._module_copies = [self.module]  # 构建一个比如 [ToyModel] 这样的列表
         # Build parameters for reducer.
         parameters, expect_sparse_gradient = self._build_params_for_reducer()
         # Verify model equivalence.
         dist._verify_model_across_ranks(self.process_group, parameters)
+
         # Sync params and buffers. Ensures all DDP models start off at the same value.
+        # 将 rank 0 的state_dict() 广播到其他worker，以保证所有worker的模型初始状态相同；
         self._sync_params_and_buffers(authoritative_rank=0)
+
         # In debug mode, build a mapping of parameter index -> parameter.
         if dist._get_debug_mode() != dist._DistributedDebugLevel.OFF:
             param_to_name_mapping = self._build_param_to_name_mapping(parameters)
@@ -504,6 +537,13 @@ class DistributedDataParallel(Module):
         # Builds reducer.
         self._ddp_init_helper(parameters, expect_sparse_gradient, param_to_name_mapping)
 
+'''
+
+2.4.2 _sync_params_and_buffers
+_sync_params_and_buffers 是依据 module的state_dict 来收集可以训练的参数，然后把这些参数广播出去。
+
+具体代码是：
+'''
     def _sync_params_and_buffers(self, authoritative_rank=0):
         module_states = []
         for name, param in self.module.state_dict().items():
@@ -514,10 +554,29 @@ class DistributedDataParallel(Module):
             self._distributed_broadcast_coalesced(
                 module_states, self.broadcast_bucket_size, authoritative_rank
             )
-
-# #0x03 使用
-# 既然知道了进程组的本质，我们接下来看看如何使用进程组。
-# 首先，在 _ddp_init_helper 之中会生成 dist.Reducer，进程组会作为 Reducer 的参数之一传入。
+    '''
+    2.5 初始化功能函数
+    接下来会调用 _ddp_init_helper 进行初始化业务函数。
+    
+    2.5.1 _ddp_init_helper
+    _ddp_init_helper 是用来初始化业务的函数，其主要逻辑如下：
+    
+        对参数进行分桶，尽可能按照前向传播的逆序（前向传播中先计算出来的梯度，会先反向传播）把参数分配平均分配入桶，
+        这样可以提高通信速度和归并速度；
+        
+        重置分桶状态；
+        
+        生成一个Reducer，其内部会注册 autograd_hook，其用来在反向传播时候进行梯度同步；
+        
+        进行logging配置；
+        
+        给SyncBatchNorm Layer传递 DDP handle；
+        
+    具体代码如下：
+    '''
+    # #0x03 使用
+    # 既然知道了进程组的本质，我们接下来看看如何使用进程组。
+    # 首先，在 _ddp_init_helper 之中会生成 dist.Reducer，进程组会作为 Reducer 的参数之一传入。
     def _ddp_init_helper(self, parameters, expect_sparse_gradient, param_to_name_mapping):
         """
         Initialization helper function that does the following:
@@ -535,6 +594,7 @@ class DistributedDataParallel(Module):
         # computation finishes. Experiments showed 1MB is a reasonable value.
         bucket_indices = dist._compute_bucket_assignment_by_size(
             parameters[0],
+            # 桶的大小限制是一个数组
             [dist._DEFAULT_FIRST_BUCKET_BYTES, self.bucket_bytes_cap],
             expect_sparse_gradient[0],
         )
@@ -544,7 +604,7 @@ class DistributedDataParallel(Module):
         # are used in the forward pass in the order they are defined.
         self.reducer = dist.Reducer(
             parameters,
-            list(reversed(bucket_indices)),
+            list(reversed(bucket_indices)),  # 利用桶index
             self.process_group,  # 这里使用了
             expect_sparse_gradient,
             self.bucket_bytes_cap,
@@ -590,13 +650,34 @@ class DistributedDataParallel(Module):
         self._ddp_init_helper(parameters, expect_sparse_gradient, param_to_name_mapping)
         if self.static_graph:
             self._set_static_graph()
-
+    '''
+    2.2 构建参数
+    。。。
+    我们看看模型中有哪些重要参数：
+    
+        parameter ：在反向传播之中需要被optimizer更新的参数。我们可以通过 model.parameters() 得到这些参数。
+        buffer : 在反向传播过程之中不需要被optimizer更新的参数。我们可以通过 model.buffers() 得到这些参数。
+    
+    2.2.1 _build_params_for_reducer
+    具体 _build_params_for_reducer 就为reducer建立参数，逻辑大致如下：
+    
+        遍历_module_copies，得到(module, parameter)列表 modules_and_parameters，这些参数是需要求导的，不能在忽略列表之中。
+        用集合去除可能在多个modules中共享的参数。
+        构建一个参数列表。
+        检查是否一个module期盼一个sparse梯度，把结果放到 expect_sparse_gradient 之中。
+        得到module的参数，与下面的buffer一起，都是用来同步到其他worker的。
+        得到module的buffer，module_buffers 在后续同步时候会用到。
+        返回参数列表和expect_sparse_gradient。
+    '''
+    # 之前在初始化过程中，设定了 self._module_copies = [self.module]
     def _build_params_for_reducer(self):
         # Build tuple of (module, parameter) for all parameters that require grads.
         modules_and_parameters = [
             [
                 (module, parameter)
+                # 得到module列表
                 for module_name, module in replica.named_modules()
+                # 得到参数列表，并且参数是需要求导，不在忽略列表之中
                 for parameter in [
                     param
                     # Note that we access module.named_parameters instead of
@@ -612,6 +693,7 @@ class DistributedDataParallel(Module):
         ]
 
         # Deduplicate any parameters that might be shared across child modules.
+        # 用集合去除可能在多个modules中共享的参数
         memo = set()
         modules_and_parameters = [
             # "p not in memo" is the deduplication check.
@@ -621,6 +703,7 @@ class DistributedDataParallel(Module):
         ]
 
         # Build list of parameters.
+        # 构建一个参数列表
         parameters = [
             list(parameter for _, parameter in replica)
             for replica in modules_and_parameters
@@ -636,6 +719,7 @@ class DistributedDataParallel(Module):
 
         # Build list of booleans indicating whether or not to expect sparse
         # gradients for the corresponding parameters.
+        # 参数是否期盼sparse gradients
         expect_sparse_gradient = [
             list(produces_sparse_gradient(module) for module, _ in replica)
             for replica in modules_and_parameters
@@ -643,10 +727,12 @@ class DistributedDataParallel(Module):
 
         # The following modules_params and modules_buffers are used for
         # param/buffer sync in _sync_params.
+        # 得到module的参数，与下面的buffer一起，都是用来同步到其他worker的
         self.modules_params = [
             list(self._get_parameters(m)) for m in self._module_copies
         ]
         # Collect buffers for modules, filtering out buffers that should be ignored.
+        # 得到module的buffer，module_buffers 在后续同步时候会用到
         named_module_buffers = [
             [(buffer, buffer_name) for buffer_name, buffer in m.named_buffers()]
             for m in self._module_copies
@@ -661,6 +747,20 @@ class DistributedDataParallel(Module):
         ]
 
         return parameters, expect_sparse_gradient
+    ''' 
+    此时 parameters 示例如下，可以看到其只有 [0] 元素有意义，这个 [0] 原始本身包括4个元素：
+
+        parameters = {list: 1} 
+        0 = {list: 4}           
+         0 = {Parameter: 10} Parameter containing:\ntensor([[-4.0381e-02,  3.8828e-02, 1  )   
+         1 = {Parameter: 10} Parameter containing:\ntensor([-0.0438, -0.2033,  0.2771,  0.0721,  ) 
+         2 = {Parameter: 5} Parameter containing:\ntensor([[-0.0094, -0.1319,  0.0713,  0.3155,  )
+         3 = {Parameter: 5} Parameter containing:\ntensor([-0.0008,  0.0582, -0.1245, -0.2538, )
+         __len__ = {int} 4
+        __len__ = {int} 1
+
+yknote以上信息是什么工具看到的？？
+    '''
 
     def _build_param_to_name_mapping(self, parameters):
         param_to_param_index = {
@@ -931,6 +1031,10 @@ class DistributedDataParallel(Module):
         )
         return work, requires_sync_tensor
 
+    '''
+    2.2.2 modules_buffers
+    这里多说一句，何处用到 self.modules_buffers？后来在广播参数时候就会用到，比如：
+    '''
     # When running in join mode, checks and performs sync of module buffers if
     # the models have buffers that should be synchronized in the forward pass.
     def _check_and_sync_module_buffers(self):
@@ -1286,6 +1390,7 @@ class DistributedDataParallel(Module):
         self.logger._set_comm_hook_name(str(comm_hook_type))
         dist._register_builtin_comm_hook(self.reducer, comm_hook_type)
 
+#我们看看，_distributed_broadcast_coalesced调用了 dist._broadcast_coalesced
     def _distributed_broadcast_coalesced(
         self, tensors, buffer_size, authoritative_rank=0
     ):
@@ -1300,6 +1405,7 @@ class DistributedDataParallel(Module):
             and len(self.modules_buffers[0]) > 0
         )
 
+    # 这里使用了 _find_common_rank 来得到目前 DDP 使用的所有有效 ranks。
     def _find_common_rank(self, input_rank, rank_cond):
         # -1 indicates that this rank is not under consideration to be the
         # common_rank
@@ -1307,12 +1413,13 @@ class DistributedDataParallel(Module):
             [input_rank if rank_cond else -1],
             device=self.device,
         )
+        # 使用MAX操作得到最大数值
         dist.all_reduce(rank_to_use, op=ReduceOp.MAX, group=self.process_group)
         if rank_to_use.item() == -1:
             raise ValueError(
                 "BUG! Expected rank_cond to be true for at least one process."
             )
-        return rank_to_use.item()
+        return rank_to_use.item() # 返回全部ranks
 
     def _sync_params(self):
         with torch.no_grad():

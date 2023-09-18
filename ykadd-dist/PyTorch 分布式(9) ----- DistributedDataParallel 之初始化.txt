@@ -1,0 +1,333 @@
+PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+https://www.cnblogs.com/rossiXYZ/p/15584032.html
+
+
+目录
+[源码解析] PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+0x00 摘要
+0x01 综述
+1.1 数据并行
+1.2 DDP架构
+1.2.1 分布式数据并行
+1.2.2 进程
+1.3 DDP 总体实现
+0x02 初始化
+2.1 __init__
+2.2 构建参数
+2.2.1 _build_params_for_reducer
+2.2.2 modules_buffers
+2.3 验证模型
+2.3.1 背景知识
+2.3.2 具体代码
+2.4 广播状态
+2.4.1 state_dict
+2.4.2 _sync_params_and_buffers
+2.4.3 dist._broadcast_coalesced
+2.5 初始化功能函数
+2.5.1 _ddp_init_helper
+2.5.2 计算分桶
+2.5.2.1 论文内容
+2.5.2.2 分组依据
+2.5.2.3 compute_bucket_assignment_by_size
+2.5.3 Reducer
+0xFF 参考
+0x00 摘要
+前文我们对DDP的一些支撑模块已经做了介绍，这为本文做了必要的铺垫，本文就开始介绍Python世界代码和C++世界的初始化部分。下文介绍C++世界的核心代码。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+
+[源码解析] PyTorch 分布式(4)------分布式应用基础概念
+
+[源码解析] PyTorch分布式(5) ------ DistributedDataParallel 总述&如何使用
+
+[源码解析] PyTorch分布式(6) ---DistributedDataParallel -- 初始化&store
+
+[源码解析] PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+
+[源码解析] PyTorch 分布式(8) -------- DistributedDataParallel之论文篇
+
+0x01 综述
+1.1 数据并行
+DDP是数据并行训练的实现，为了唤醒大家的记忆，我们还是要看看数据并行的一个整体流程，来自fairscale github源码。
+03-19.png
+
+1.2 DDP架构
+以下文字翻译自 https://pytorch.org/docs/master/notes/ddp.html，这是DDP架构的一个总论。
+下面是 DDP 实现组件。堆栈图显示了代码的结构。
+03-34.png
+我们顺着此架构图从上往下看。
+
+1.2.1 分布式数据并行
+最上面是分布式数据并行组件。
+
+    Distributed.py：
+        这是 DDP 的 Python 入口点。它实现了初始化步骤，
+        对应了nn.parallel.DistributedDataParallel模块的forward函数，该模块会调用C++库。
+
+        它的_sync_param功能是：
+        当一个DDP进程在多个设备上工作时，会执行进程内参数同步，并且它还从rank 0 进程向所有其他进程广播模型缓冲区。
+
+        进程间参数同步在 Reducer.cpp之中实现。
+
+    comm.h：实现合并广播助手函数（coalesced broadcast helper ），
+    该函数在初始化期间被调用以广播模型状态，并在前向传播之前同步模型缓冲区。
+
+    reducer.h：提供反向传播中梯度同步的核心实现。它具有三个入口点函数：
+
+        Reducer: 其构造函数在distributed.py被调用，Reducer将注册 Reducer::autograd_hook()到梯度累加器。
+
+        autograd_hook() 当梯度就绪时，autograd 引擎将调用该函数。
+
+        prepare_for_backward()在 distributed.py之中，当 DDP 前向传递结束时，会调用prepare_for_backward()。
+        如果在DDP构造函数中，把find_unused_parameters设置为True，DDP 会遍历 autograd 计算图以查找未使用的参数。
+
+1.2.2 进程
+以下是两个进程相关组件。
+
+    ProcessGroup.hpp ：包含所有进程组实现的抽象 API。c10d 库提供了 3 个开箱即用的实现，
+    即 ProcessGroupGloo，ProcessGroupNCCL和ProcessGroupMPI。
+    DistributedDataParallel用ProcessGroup::broadcast()在初始化期间将模型状态从rank 0 的进程发送到其他进程，
+    并对ProcessGroup::allreduce()梯度求和。
+
+    Store.hpp ：协助进程组实例的集合服务找到彼此。
+
+1.3 DDP 总体实现
+我们把论文和 https://pytorch.org/docs/master/notes/ddp.html 结合起来，看看 DDP 总体实现。
+03-35.png
+我们总结一次DistributedDataParallel迭代中的步骤如下（与上图不完全一致，有部分细化）：
+
+    Prerequisite：
+
+        DDP 依赖 c10dProcessGroup进行通信。因此，应用程序必须ProcessGroup在构建 DDP 之前创建实例。
+
+    Constuctor：
+
+        rank 0 进程会引用本地模块，把模型state_dict()参数广播到所有进程之中，这样可以保证所有进程使用同样初始化数值和模型副本进行训练。
+
+        每个 DDP 进程创建一个 local Reducer，稍后将在向后传递期间处理梯度同步。
+
+        为了提高通信效率，Reducer将参数梯度组织成桶，一次规约一个桶。
+
+            初始化桶，按照逆序把 parameters 分配到桶之中，这样可以提高通信效率。
+
+            可以通过设置DDP 构造函数中的参数bucket_cap_mb来配置桶的大小。
+
+            从参数梯度到桶的映射是在构建时根据桶大小限制和参数大小确定的。
+            模型参数以（大致）Model.parameters()与给定模型相反的顺序分配到桶中 。
+            使用相反顺序的原因是因为 DDP 期望梯度在反向传递期间以大约该顺序准备就绪。
+
+            下图显示了一个示例。请注意，grad0和grad1在 bucket1中，另外两个梯度在 bucket0中。
+            当然，这种假设可能并不总是正确的，当这种情况发生时，它可能会损害 DDP 后向速度，因为它无法 Reducer尽早开始通信。
+            03-36.png
+
+        除了分桶，Reducer还在构造期间注册 autograd 钩子，每个参数一个钩子。当梯度准备好时，将在向后传递期间触发这些钩子。
+        具体就是遍历参数，为每个参数加上 grad_accumulator 和 autograd_hook。
+
+    Forward Pass:
+
+        每个进程读去自己的训练数据，DistributedSampler确保每个进程读到的数据不同。
+
+        DDP 获取输入并将其传递给本地模型。
+
+        模型进行前向计算，结果设置为 out。现在计算都是在每个进程（CUDA设备）上完成。
+
+        如果find_unused_parameters设置为True，DDP 会分析本地模型的输出，从 out 开始遍历计算图，
+        把未使用参数标示为 ready，因为每次计算图都会改变，所以每次都要遍历。
+
+            此模式（Mode）允许在模型的子图上向后运行，
+            并且 DDP 通过从模型输出out遍历 autograd 图并将所有未使用的参数标记为就绪，以减少反向传递中涉及的参数。
+
+            在向后传递期间，Reducer只会等待未准备好的参数，但它仍然会规约所有桶。
+            将参数梯度标记为就绪并不能帮助 DDP 跳过桶，但它会阻止 DDP 在向后传递期间永远等待不存在的梯度。
+
+            请注意，遍历 autograd 图会引入额外的开销，因此应用程序仅应必要时才设置 find_unused_parameters为True 。
+
+        返回out。模型网络输出不需要gather到 rank 0进程了，这与 DP不同。
+
+    Backward Pass:
+
+        backward()在 loss 上直接调用该函数 Tensor，这是 DDP 无法控制的，DDP 使用构造时注册的 autograd hooks 来触发梯度同步。
+        当一个梯度准备好时，它在该梯度累加器上的相应 DDP 钩子将触发。
+
+        在 autograd_hook 之中进行all-reduce。假设参数index是param_index，
+        则利用param_index获取到参数，标示为ready，如果某个桶里面梯度都ready，则该桶是ready。
+
+        当一个桶中的梯度都准备好时，会 在该桶上Reducer启动异步allreduce以计算所有进程的梯度平均值。
+
+        如果所有桶都ready，则等待所有 all-reduce 完成。
+        当所有桶都准备好时，Reducer将阻塞等待所有allreduce操作完成。完成此操作后，将平均梯度写入param.grad所有参数的字段。
+
+        所有进程的梯度都会reduce，更新之后，大家的模型权重都相同。所以在向后传播完成之后，跨不同DDP进程的对应的相同参数上的 grad 字段应该是相等的。
+
+        不需要像 DP 那样每次迭代之后还要广播参数。但是 Buffers 还是需要在每次迭代由 rank 0 进程广播到其他进程之上。
+
+    Optimizer Step:
+
+        从优化器的角度来看，它正在优化本地模型。
+
+        所有 DDP 进程上的模型副本都可以保持同步，因为它们都从相同的状态开始，并且在每次迭代中都具有相同的平均梯度。
+
+
+...
+
+2.3 验证模型
+接下来是验证模型阶段。
+
+2.3.1 背景知识
+因为后续用到了如下代码，所以我们首先看看背景知识 broadcast。
+不熟悉这部分的朋友会有疑问是：
+为什么 broadcast 可以从 rank 0 广播到其他rank，明明所有rank都调用到了同样的 broadcast 代码。
+
+    process_group->broadcast(vec)->wait(); // 把 rank 0 的 meta 广播到对应的设备
+
+我们来到 torch/lib/c10d/ProcessGroupMPI.cpp。
+可以看到，其使用了 MPI 的 MPI_Bcast API 来进行广播操作，其中 opts.rootRank是关键所在。
+
+    .....
+
+在 C++ 世界对应了如下：
+
+    struct BroadcastOptions {
+      int rootRank = 0;
+      int rootTensor = 0;
+      std::chrono::milliseconds timeout = kUnsetTimeout;
+    };
+
+在定义时候看到，BroadcastOptions 被C++自动初始化为0，
+所以所有 rank 的进程都是使用 rootRank = 0 进行调用 MPI_Bcast，结果就是从 rank = 0 来向其他 rank 进行广播。
+
+    c10::intrusive_ptr<ProcessGroup::Work> broadcast(
+        std::vector<at::Tensor>& data,
+        const BroadcastOptions& opts = BroadcastOptions()) override;
+
+
+......
+
+2.4 广播状态
+下一步是广播状态，把模型初始参数和变量从 rank 0 广播到其他 ranks。
+
+    # Sync params and buffers. Ensures all DDP models start off at the same value.
+    # 将 rank 0 的state_dict() 广播到其他worker，以保证所有worker的模型初始状态相同；
+    self._sync_params_and_buffers(authoritative_rank=0)
+
+2.4.1 state_dict
+我们先来看看需要广播什么。
+pytorch 的 state_dict 是一个字典对象，其将模型的每一层与它的对应参数建立映射关系，比如 model 每一层的weights及偏置等等。
+只有那些参数可以训练的层（比如卷积层，线性层等）才会被保存到模型的state_dict中，池化层、BN层这些本身没有参数的层就不会保存在 state_dict 之中，
+比如针对下面模型。
+
+    class ToyModel(nn.Module):
+        def __init__(self):
+            super(ToyModel, self).__init__()
+            self.net1 = nn.Linear(10, 10)
+            self.relu = nn.ReLU()
+            self.net2 = nn.Linear(10, 5)
+
+state_dict 如下：
+
+    self.module.state_dict() = {OrderedDict: 4}
+     'net1.weight' = {Tensor: 10} tensor([[ 0.2687,  0.0840, -0.1032,  0.3079,  0.0385, -0.0495, -0.3068, -0.1271,\n         -0.1067, -0.1966],\n        [-0.1203,  0.1789,  0.0666,  0.1882,  0.1335,  0.1921, -0.1145, -0.1781,\n          0.0661, -0.2339],\n        [ 0.1865, -0.2076,  0.2071,  0
+     'net1.bias' = {Tensor: 10} tensor([ 0.2146, -0.1599,  0.2350, -0.2843, -0.0773, -0.2151,  0.1864, -0.3068,\n        -0.2093,  0.1365])
+     'net2.weight' = {Tensor: 5} tensor([[ 0.1922, -0.0148, -0.1884,  0.2124, -0.1361,  0.0172, -0.2371,  0.1946,\n          0.2047, -0.2697],\n        [-0.2690,  0.1372,  0.2269,  0.0436, -0.1353, -0.2054, -0.2418, -0.2300,\n          0.1987,  0.0007],\n        [ 0.0995, -0.2659, -0.2374, -0
+     'net2.bias' = {Tensor: 5} tensor([0.1488, 0.0791, 0.1667, 0.1449, 0.0545])
+
+
+2.5.2 计算分桶
+首先，_compute_bucket_assignment_by_size 完成了分桶功能。这里parameters[0] 就是对应的张量列表。
+
+    _DEFAULT_FIRST_BUCKET_BYTES = 1048576
+    # reduction bucket size
+    self.bucket_bytes_cap = int(bucket_cap_mb * 1024 * 1024)
+
+    bucket_indices = dist._compute_bucket_assignment_by_size(
+                parameters[0],
+                # 桶的大小限制是一个数组
+                [dist._DEFAULT_FIRST_BUCKET_BYTES, self.bucket_bytes_cap],
+                expect_sparse_gradient[0],
+            )
+
+2.5.2.1 论文内容
+我们接下来就要结合论文内容来分析。
+
+    梯度bucketing的思想是基于这样一个观察，即集合通信在大张量上更有效。
+
+    实验表明，如果DDP在短时间内等待并将多个梯度存储到一个AllReduce操作中，它可以实现更高的吞吐量和更低的延迟，
+    而不是在每个梯度存储可用时立即启动专用的AllReduce。这对于具有许多小参数的模型尤其有用。
+    但是，DDP不应在一个AllReduce中传输所有数据，否则，在计算结束之前无法启动任何通信。
+
+    参数到桶映射（Parameter-to-Bucket Mapping）对DDP速度有相当大的影响。
+    在每次向后传播中，将所有参数梯度中的张量复制到桶中，并在AllReduce之后将平均梯度复制回桶中。
+    为了加速复制操作，存储桶始终与参数在同一设备上创建。如果模型跨越多个设备，DDP会考虑设备关联性，以确保同一存储桶中的所有参数都位于同一设备上。
+    AllReduce的顺序也会对结果产生影响，因为它决定了多少通信可以与计算重叠。DDP按model.parameters()的相反顺序启动AllReduce。
+
+所以，为了提高通信效率，DDP 将Reducer参数梯度组织成为桶，一次规约一个桶。
+从参数梯度到桶的映射是在构建时根据桶大小限制和参数大小确定的，。用户可以通过设置bucket_cap_mb来配置桶的大小。
+
+模型参数以（大致）Model.parameters()与给定模型相反的顺序分配到桶中 。使用相反顺序的原因是：
+
+    反向传播的次序是前向传播计算的反序。
+
+    DDP 期望梯度在反向传递期间以前向传播的大致顺序来就绪。
+
+0xFF 参考
+pytorch分布式系列3——分布式训练时，torch.utils.data.distributed.DistributedSampler做了什么？
+
+pytorch分布式系列1——搞清torch.distributed.launch相关的环境变量
+
+pytorch分布式系列2——DistributedDataParallel是如何做同步的？
+
+pytorch(分布式)数据并行个人实践总结——DataParallel/DistributedDataParallel
+
+Pytorch的nn.DataParallel
+
+https://discuss.pytorch.org/t/dataparallel-imbalanced-memory-usage/22551/20
+
+https://pytorch.org/docs/stable/distributed.html
+
+PyTorch 源码解读之分布式训练了解一下？
+
+实操教程｜PyTorch AutoGrad C++层实现
+
+PYTORCH 自动微分（一）
+
+PyTorch如何加速数据并行训练？分布式秘籍大揭秘
+
+pytorch分布式训练（二init_process_group）
+
+https://pytorch.org/tutorials/intermediate/ddp_tutorial.html
+
+https://pytorch.org/docs/master/notes/ddp.html
+
+https://pytorch.org/tutorials/intermediate/dist_tuto.html
+
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+
+Pytorch模型中的parameter与buffer
+
+https://pytorch.org/docs/master/notes/ddp.html

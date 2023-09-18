@@ -395,11 +395,11 @@ c10::intrusive_ptr<ProcessGroup::Work> ProcessGroupMPI::broadcast(
         auto data = (entry->src)[0];
         c10::DeviceGuard guard(data.device());
         std::unique_lock<std::mutex> globalLock(pgGlobalMutex_);
-        MPI_CHECK(MPI_Bcast(
+        MPI_CHECK(MPI_Bcast(  // 调用MPI API
             data.data_ptr(),
             data.numel(),
             mpiDatatype.at(data.scalar_type()),
-            opts.rootRank,
+            opts.rootRank,   // 这里是关键，只是从root广播其他rank
             pgComm_));
       };
   auto entry = std::make_unique<WorkEntry>(&tensors, &tensors, std::move(runFunc));

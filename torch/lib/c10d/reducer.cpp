@@ -1807,7 +1807,9 @@ void Reducer::set_static_graph() {
 }
 
 namespace {
-
+//2.5.2.2 分组依据
+//DDP 按照类型和设备作为key来分组，因为不同设备上的tensor不应该分在一组上，同类型张量应该分在一桶。
+//用类型和设备作为key 就可以保证同设备上同类型张量分配在同一个桶里。
 // Tensors may be coalesced into buckets. Buckets must contain tensors of
 // the same type, on the same device, so a bucket can identified by a
 // composite key of a tensor's type identifier and its device.
@@ -1820,7 +1822,7 @@ struct BucketKey {
 
   // See torch/csrc/utils/hash.h for dispatch code.
   static size_t hash(const BucketKey& key) {
-    return c10::get_hash(key.type, key.device);
+    return c10::get_hash(key.type, key.device);   // 用类型和设备作为key
   }
 };
 
@@ -1830,11 +1832,60 @@ inline bool operator==(const BucketKey& lhs, const BucketKey& rhs) {
 
 } // namespace
 
+/*
+我们来看看 compute_bucket_assignment_by_size的具体逻辑：
+
+    定义了桶大小限制列表。bucket_size_limit_iterators。
+
+    定义了所有桶的列表 buckets，每一个实际桶可以认为是 BucketAccumulator。
+
+    遍历传入的所有张量：
+
+        给所有的tensor一个index，从0开始递增，一直到 tensors.size()，如果已经传入了 indices，就拿到张量的index。
+
+        如果配置了期待sparse gradient，则把这个张量自己放入一个桶，因为没法和其他张量放在一起。
+
+        使用张量信息构建桶的key，找到对应的桶。
+
+            拿到BucketAccumulator，往该桶的张量列表里面插入新张量的index，indices 是 tensor index list。
+
+            增加对应桶大小。
+
+        如果需要，就设定成大小限制的初始值。
+
+        拿到当前最小值限制。
+
+        如果桶的尺寸大于最小值限制，就是说目前桶的尺寸已经达到了桶的最大限制，按说需要转移到新桶了。
+
+            实际上确实转移到了逻辑上的新桶，但是实际还是在现有桶内执行，因为 type, device 还是同样的，
+            还是应该在原有桶内继续累积，不过原有桶的indice已经转移到了result之中，就相当于清空了。
+
+            把桶内容插入到返回result，就是说，当桶尺寸过大的时候，就先插入到result之中。
+
+            重新生成桶，bucket是个引用，所以直接赋值，就相当于清空原有的桶，就是原来桶继续用，但是桶内原有的indices已经转移到了result之中。
+
+            前进到下一个尺寸限制。
+
+        把剩余的桶内indices插入到返回值，因为之前已经有些直接插入到了result之中。
+
+        对result 进行排序：
+
+            如果 tensor_indices 非空，说明张量的顺序已经是梯度准备好的顺序，不需要再排序了。
+
+            如果 tensor_indices 是空的，依据最小张量index来排序，
+            这里假定张量的顺序是他们使用的顺序（或者说是他们梯度产生次序的反序）。这种排序可保证桶是按照连续不断的顺序准备好。
+
+            注意，这里就是正序排列，等到创建Reducer的时候，才反序传入：list(reversed(bucket_indices))。
+
+        最后返回 result，result 最终如下，里面每个vector 都对应了一个bucket，里面是都是 tensor 的 index，这里都是从小到大顺序排序。
+
+
+*/
 std::vector<std::vector<size_t>> compute_bucket_assignment_by_size(
     const std::vector<at::Tensor>& tensors,
-    const std::vector<size_t>& bucket_size_limits,
+    const std::vector<size_t>& bucket_size_limits,  // 桶大小限制
     const std::vector<bool>& expect_sparse_gradient,
-    const std::vector<int64_t>& tensor_indices) {
+    const std::vector<int64_t>& tensor_indices) {  //实际上，初始化时候没有传入 tensor_indices
   // Either expect_sparse_gradient is not specified or it has as many elements
   // as the vector with tensors.
   TORCH_INTERNAL_ASSERT(
@@ -1843,7 +1894,7 @@ std::vector<std::vector<size_t>> compute_bucket_assignment_by_size(
   TORCH_INTERNAL_ASSERT(tensors.size() > 0);
 
   std::vector<std::vector<size_t>> result;
-  result.reserve(tensors.size());
+  result.reserve(tensors.size());  // 预留大小
 
   // Keep iterator into the size_limit vector by tensor type and device.
   // This is done so that we can use the consecutive bucket limits per type.
@@ -1853,51 +1904,64 @@ std::vector<std::vector<size_t>> compute_bucket_assignment_by_size(
       c10::hash<BucketKey>>
       bucket_size_limit_iterators;
 
+//2.5.2.3 compute_bucket_assignment_by_size
+//其关键结构如下，BucketAccumulator 可以认为是实际的桶。
   // Local accumulator type for a single bucket.
   struct BucketAccumulator {
-    std::vector<size_t> indices;
-    size_t size = 0;
-  };
+    std::vector<size_t> indices;  // 桶内容，是张量列表
+    size_t size = 0;  // 桶大小，比如若干mb
+  };  // 桶的逻辑内容
 
   // Keep vector of indices and size accumulator by tensor type and device.
   std::unordered_map<BucketKey, BucketAccumulator, c10::hash<BucketKey>>
-      buckets;
+      buckets;  // 所有桶的列表，每一个实际桶可以认为是 BucketAccumulator
 
-  for (size_t i = 0; i < tensors.size(); i++) {
-    const auto& tensor = tensors[i];
+  for (size_t i = 0; i < tensors.size(); i++) {  // 遍历传入的所有张量
+    const auto& tensor = tensors[i];  //拿到张量
     TORCH_CHECK(!tensor.is_sparse(), "No support for sparse tensors.");
 
     // when tensor_indices is empty, the index of tensors[i] assigned to
     // bucket is i, otherwise the tensor index is tensor_indices[i].
-    auto tensor_index = i;
+    auto tensor_index = i;  // 就是给所有的tensor一个index，从0开始递增，一直到 tensors.size()
     if (!tensor_indices.empty()) {
-      tensor_index = tensor_indices[i];
+      tensor_index = tensor_indices[i];  // 如果有index，就拿到张量的index
     }
     // If we expect a sparse gradient to be produced for this tensor, it cannot
     // be grouped together with other gradients and gets its own bucket.
+    // 如果配置了期待sparse gradient，则把这个张量自己放入一个桶，因为没法和其他张量放在一起
     if (!expect_sparse_gradient.empty() &&
         expect_sparse_gradient[tensor_index]) {
       result.push_back({tensor_index});
       continue;
     }
 
-    auto key = BucketKey(tensor.scalar_type(), tensor.device());
-    auto& bucket = buckets[key];
-    bucket.indices.push_back(tensor_index);
-    bucket.size += tensor.numel() * tensor.element_size();
+    auto key = BucketKey(tensor.scalar_type(), tensor.device()); //使用张量信息构建桶的key
+    auto& bucket = buckets[key];  // 找到对应的桶, 拿到BucketAccumulator
+    bucket.indices.push_back(tensor_index);  // 往该桶的张量列表里面插入新张量的index，indices 是 tensor index list
+    bucket.size += tensor.numel() * tensor.element_size(); // 增加对应桶大小
 
     // Initialize bucket size limit iterator if necessary.
+    // 如果需要，就设定成大小限制的初始值
     if (bucket_size_limit_iterators.count(key) == 0) {
       bucket_size_limit_iterators[key] = bucket_size_limits.begin();
     }
 
+    // bucket_size_limit_iterator 就是桶大小的范围, 即 [_DEFAULT_FIRST_BUCKET_BYTES, int(bucket_cap_mb * 1024 * 1024)]
     auto& bucket_size_limit_iterator = bucket_size_limit_iterators[key];
-    const auto bucket_size_limit = *bucket_size_limit_iterator;
+    const auto bucket_size_limit = *bucket_size_limit_iterator;  // 当前最小值限制
+
     if (bucket.size >= bucket_size_limit) {
-      result.emplace_back(std::move(bucket.indices));
+    // 如果桶的尺寸大于最小值限制，就是说目前桶的尺寸已经达到了桶的最大限制，
+    //按说需要转移到新桶了（实际上确实转移到了逻辑上的新桶，但是实际还是在现有桶内执行，
+    //因为 type, device 还是同样的，还是应该在原有桶内继续累积，不过原有桶的indice已经转移到了result之中，就相当于清空了）
+      result.emplace_back(std::move(bucket.indices)); // 把桶内容插入到返回result，就是说，当桶尺寸过大的时候，就先插入到result之中。
+
+      // 重新生成桶，bucket是个引用，所以直接赋值，就相当于清空原有的桶，
+      // 就是原来桶继续用，但是桶内原有的indices已经转移到了result之中。
       bucket = BucketAccumulator();
 
       // Advance to the next bucket size limit for this type/device.
+      // 前进到下一个尺寸限制
       auto next = bucket_size_limit_iterator + 1;
       if (next != bucket_size_limits.end()) {
         bucket_size_limit_iterator = next;
@@ -1905,6 +1969,7 @@ std::vector<std::vector<size_t>> compute_bucket_assignment_by_size(
     }
   }
 
+// Add remaining buckets. 把剩余的桶内indices插入到返回值，因为之前已经有些直接插入到了result之中
   // Add remaining buckets.
   for (auto& it : buckets) {
     auto& bucket = it.second;
@@ -1920,20 +1985,97 @@ std::vector<std::vector<size_t>> compute_bucket_assignment_by_size(
   // which they are used (or the reverse order in which their gradients are
   // produced). This sorting step ensures that the buckets are ready in
   // consecutive order.
+  // 如果 tensor_indices 非空，说明张量的顺序已经是梯度准备好的顺序，不需要再排序了
+  // 如果 tensor_indices 是空的，依据最小张量index来排序，这里假定张量的顺序是他们使用的顺序（或者说是他们梯度产生次序的反序）。
+  // 这种排序可保证桶是按照连续不断的顺序准备好。
+  // 注意，这里就是正序排列，等到创建Reducer的时候，才反序传入：list(reversed(bucket_indices))
   if (tensor_indices.empty()) {
     std::sort(
         result.begin(),
         result.end(),
         [](const std::vector<size_t>& a, const std::vector<size_t>& b) {
-          const auto amin = std::min_element(a.begin(), a.end());
-          const auto bmin = std::min_element(b.begin(), b.end());
+        //// 对于任意两个vector，排序的依据是：用这两个vector之中最小index来排
+          const auto amin = std::min_element(a.begin(), a.end()); // a中的最小index
+          const auto bmin = std::min_element(b.begin(), b.end()); // b中的最小index
           return *amin < *bmin;
         });
   }
 
-  return result;
+  return result; // result 最终如下，里面每个vector 都对应了一个bucket，里面是都是 tensor 的 index，这里都是从小到大顺序排序。
+  /*
+result 最终如下，里面每个vector 都对应了一个bucket，里面是都是 tensor 的 index，这里都是从小到大顺序排序。
+
+这里注意的是：因为 传入参数 tensors就是 parameters[0]，而 parameters[0] 是按照 parametes() 的返回结果来的，
+即，模型参数以（大致）Model.parameters()与给定模型相反的顺序分配到桶中 。
+使用相反顺序的原因是因为 DDP 期望梯度在反向传递期间以大约该顺序准备就绪。
+最终 DDP 是按model.parameters()的相反顺序启动AllReduce。
+
++-----------------------------------------------------------------------+
+|                                                                       |
+|  <tensor index 1, tensor index 2, tensor index 3, tensor index 4>     |
+|                                                                       |
+|                                                                       |
+|  <tensor index 5, tensor index 6, tensor 7>                           |
+|                                                                       |
+|                                                                       |
+|  ......                                                               |
+|                                                                       |
+|                                                                       |
+|  <tensor index 8, tensor index 9, tensor index 10, tensor index 11>   |
+|                                                                       |
++-----------------------------------------------------------------------+
+
+2.5.3 Reducer
+接下来的代码就是生成了一个Reducer。
+    self.reducer = dist.Reducer(
+    ...
+我们在后续文章中会详细介绍 Reducer。
+  */
 }
 
+
+/*
+2.3.2 具体代码
+我们接下来看看如何验证模型。
+
+_verify_model_across_ranks 的作用是验证模型（replica 0）的相关参数在广播之后，跨进程时候拥有同样的size/strides。
+
+    # Verify model equivalence.
+    dist._verify_model_across_ranks(self.process_group, parameters)
+
+通过下面代码我们可知，_verify_model_across_ranks 实际调用到verify_replica0_across_processes。
+
+    module.def(
+        "_verify_model_across_ranks",
+        &::c10d::verify_replica0_across_processes,
+        py::arg("process_group"),
+        py::arg("replicas"),
+        py::call_guard<py::gil_scoped_release>());
+
+verify_replica0_across_processes 之中，参数model_replicas 就是前面的 parameters，其逻辑如下：
+
+    首先，从 model_replicas 得到 metadata。
+
+    然后把metadata克隆到metadata_dev。
+
+    然后，把 process 0 的 metadata_dev 广播到对应的设备。
+
+        每个进程都会运行同样的代码，但是 process_group->broadcast 之中，
+        只有 rank 0 会设置为 root_rank，这样就只广播 rank 0 的数据。
+
+        广播之后，所有进程的 metadata_dev 都一样，就是 process 0 内的数据。
+
+    然后把 metadata_dev 拷贝回 control，把 control 和 model_replicas[0]比较，看看是否和原来相等。
+
+        检查 control 是否和 model_replicas 的尺寸一样。
+
+        这里使用了 accessor，LibTorch 使用 accessor 快速访问 Tensor，
+        如果 tensor 在CPU上，使用 accessor，如果在 GPU上，使用 packed_accessor 访问，
+        这部分在 "核心开发者全面解读PyTorch 内部机制" 有相关提及。
+
+具体代码如下：
+
+*/
 // Verifies corresponding params in replica 0 have the same sizes/strides
 // across processes.
 void verify_replica0_across_processes(
@@ -1951,6 +2093,8 @@ void verify_replica0_across_processes(
   // to populate metadata.  But no harm keeping work aligned across processes.
   auto metadata_accessor = metadata.accessor<int64_t, 1>();
   i = 0;
+
+  // 把model_replicas[0]拷贝到metadata_accessor，其实就是metadata
   for (const auto& t : model_replicas[0]) {
     for (const auto& sz : t.sizes()) {
       metadata_accessor[i++] = sz;
@@ -1960,14 +2104,22 @@ void verify_replica0_across_processes(
     }
   }
 
+// 然后把metadata克隆到metadata_dev
   auto metadata_dev = metadata.clone().to(model_replicas[0][0].device());
   std::vector<at::Tensor> vec{metadata_dev};
-  process_group->broadcast(vec)->wait();
 
+//  广播metadata_dev
+  process_group->broadcast(vec)->wait(); // 把process 0 的 meta 广播到对应的设备
+
+// 这之后，metadata_dev 就是所有进程的结果大家都一样了
   // Technically, process 0 doesn't need to double-check metadata, because it
   // was the source.  But no harm keeping work aligned.
   auto control = at::empty({static_cast<long>(i)}, options);
+
+  // 把 metadata_dev 拷贝回 control
   control.copy_(metadata_dev, /*non_blocking=*/false);
+
+  // 然后把 control 和 model_replicas[0]比较，看看是否和原来相等
   auto control_accessor = control.accessor<int64_t, 1>();
   i = 0;
   for (size_t p = 0; p < model_replicas[0].size(); p++) {
