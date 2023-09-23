@@ -1,0 +1,476 @@
+PyTorch 分布式(10)------DistributedDataParallel之Reducer静态架构
+https://www.cnblogs.com/rossiXYZ/p/15584523.html
+
+目录
+[源码解析] PyTorch 分布式(10)------DistributedDataParallel之Reducer静态架构
+0x00 摘要
+0x01 引论
+1.1 调用
+0x02 Reducer 定义
+0x03 Bucket
+3.1 设计
+3.2 定义
+3.2.1 BucketReplica有几个
+3.2.2 关键
+3.2.3 具体定义
+3.3 设置
+0x03 BucketReplica
+3.1 Views
+3.2 定义
+3.3 初始化
+0x04 查询类
+4.1 VariableIndex
+4.1.1 成员变量
+4.1.2 定义
+4.2 VariableLocator
+4.2.1 定义
+4.2.2 成员变量
+4.2.2.1 初始化
+4.2.2.2 使用
+0x05 累积相关类
+5.1 grad_accumulators_
+5.1.1 初始化
+5.1.2 使用
+5.2 gradAccToVariableMap_
+5.2.1 初始化
+5.2.2 使用
+5.3 numGradHooksTriggeredMap_
+5.3.1 初始化
+5.3.2 使用
+5.4 numGradHooksTriggeredMapPerIteration_
+5.4.1 使用
+5.5 perIterationReadyParams_
+5.5.1 设置
+5.5.2 重置
+5.5.3 使用
+5.6 使用过的参数
+5.6.1 论文
+5.6.2 初始化
+5.6.3 重置
+5.6.4 设置
+5.6.5 使用
+5.7 计算梯度支撑类
+5.7.1 RpcContext
+5.7.2 hooks_
+5.7.3 comm_hook_
+5.7.3.1 概念
+5.7.3.2 使用
+5.7.4 runGradCallbackForVariable
+5.7.4.1 Reducer
+5.7.4.2 DistAutogradContext
+0xFF 参考
+0x00 摘要
+通过上文分析，我们已经知道了 DDP 的基本架构和如何初始化，本文就看看其核心 Reducer 的静态架构。Reducer提供了反向传播中梯度同步的核心实现。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+
+[源码解析] PyTorch 分布式(4)------分布式应用基础概念
+
+[源码解析] PyTorch分布式(5) ------ DistributedDataParallel 总述&如何使用
+
+[源码解析] PyTorch分布式(6) ---DistributedDataParallel -- 初始化&store
+
+[源码解析] PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+
+[源码解析] PyTorch 分布式(8) -------- DistributedDataParallel之论文篇
+
+[源码解析] PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+
+0x03 Bucket
+3.1 设计
+在规约梯度之前将梯度批处理在一起可以降低开销和/或加快完成时间。但是只能对同一设备上相同类型的梯度进行批处理。
+
+桶是梯度的集合，统一设备上相同类型的梯度被放到同一个桶之中。在代码之中，Bucket 就是桶的概念。
+
+在每次向后传播中，将所有参数梯度中的张量复制到桶中，并在AllReduce之后将平均梯度复制回桶中。
+为了加速复制操作，存储桶始终与参数在同一设备上创建。如果模型跨越多个设备，DDP会考虑设备关联性，以确保同一存储桶中的所有参数都位于同一设备上。
+AllReduce的顺序也会对结果产生影响，因为它决定了多少通信可以与计算重叠。
+DDP按model.parameters()的相反顺序启动AllReduce。
+
+3.2 定义
+3.2.1 BucketReplica有几个
+为了更好的说明，我们首先要分析一下 BucketReplica 是什么。我们从注释出发看看。
+首先，一个桶 Bucket 有多个BucketReplica，每一个模型对应一个BucketReplica。
+    // A bucket holds N bucket replicas (1 per model replica).
+但是只用了一个 [0] 元素，因为目前不支持单进程多设备模式，所以假定桶里只有一个replica。
+
+        GradBucket grad_bucket(
+            next_bucket_,
+            tensors[0],
+            // 这里的注释指明了不支持 SPMD
+            // Since currently we do not support single-process multiple-device
+            // mode, we can assume only one replica in the bucket.
+            bucket.replicas[0].offsets,
+            bucket.replicas[0].lengths,
+            bucket.replicas[0].sizes_vec);
+        bucket.future_work = comm_hook_->runHook(grad_bucket);
+
+再结合前文代码，未来不会支持 SPMD。
+parameters 就是 [ToyModel] 这个模型列表的参数集合，parameters[0] 就是 ToyModel 的参数。
+
+    # 下面注释指明了未来也不会支持 SPMD
+    # TODO(wayi@): Remove this field since SPMD is no longer supported,
+    # and also remove all the relevant unnecessary loops.
+    # Module replication within process (single-process multi device)
+
+    self._module_copies = [self.module] # 构建一个比如 [ToyModel] 这样的列表
+    # Build parameters for reducer.
+    parameters, expect_sparse_gradient = self._build_params_for_reducer()
+
+综合以上我们知道：
+
+    DDP 原来是希望像 DP 那样支持 SPMD，所以本进程就需要维护多个 GPU 之上的多个模型副本的参数，
+    即，parameters 就是一个数组，数组中每个元素是一个模型副本的参数。
+
+    parameters 被赋值为 Reducer.replicas_，而 Reducer.replicas_ 用来赋值给 bucket.replicas。
+
+    因为未来不支持Reducer.replicas_，所以只有 parameters[0] 有意义。
+
+所以我们得出结论：
+
+    BucketReplica 就是一个模型的待求梯度参数组。replica 对应一个 device （GPU）上的模型副本的参数信息（部分），
+    即，一个 replica 代表了 [1..N] 个需要被规约的梯度，这些梯度拥有同样的 dtype，位于同样的设备上。
+
+    事实上，只有 bucket.replicas[0] 有意义，就对应了上面代码中的 [self.module] 之中的部分需求导张量，就是 parameters[0] 。
+
+3.2.2 关键
+我们再总结一下 Bucket 的关键：
+
+replicas 成员变量就是 bucket 对应的各个BucketReplica。一个 BucketReplica 代表了 [1..N] 个需要被规约的梯度，这些梯度拥有同样的 dtype，位于同样的设备上。
+
+    只有 bucket.replicas[0] 有意义，就对应了本模型的待求梯度参数组之中本bucket对应的张量。
+
+    如何赋值？就是使用 Reducer.replicas_ 来赋值，而 replicas_ 就是参数 parameters。我们下面就会介绍。
+
+variable_indices 成员变量用来记录本桶之中有哪些variable 的index。
+
+如何赋值？使用前面介绍的 bucket_indices 进行赋值。
+    bucket.variable_indices = std::move(bucket_indices[bucket_index]);
+如何使用？intra_bucket_index 是bucket.variable_indices的序号，利用序号得到真正的variable index。
+后文会依据代码再进行阐释。
+    size_t variable_index = bucket.variable_indices[intra_bucket_index];
+
+3.2.3 具体定义
+最后，Bucket 具体定义如下：
+、、、
+  struct Bucket {
+
+
+、、、
+
+
+0x03 BucketReplica
+如前面讨论的，一个 BucketReplica 代表了 [1..N] 个需要被规约的梯度，这些梯度拥有同样的 dtype，位于同样的设备上。
+是一个模型待求梯度参数的一部分，具体是哪些，由 bucket 的 variable_indices 决定。
+
+其关键成员变量为：
+
+    std::vector<at::Tensor> variables
+    是构成此bucket副本的variable。我们在这里使用refcounted value，这样我们就可以在完成规约之后，轻松地将bucket内容 unflatten 到参与变量中。
+
+    at::Tensor contents ：
+    把桶的内容展平的结果，即Flattened (1 dimensional) 之后的结果。
+
+    std::vector<at::Tensor> bucket_views_in ：
+    提供了从输入角度在 contents 之中查看具体梯度的方法。
+
+    std::vector<at::Tensor> bucket_views_out ：
+    提供了从输出角度在 contents 之中查看具体梯度的方法。
+
+具体可以参见如下注释：
+    Views serve as entry points to copy_ each grad's data in/out of the flat contents tensor.
+
+3.1 Views
+关于 std::vector<at::Tensor> bucket_views_in 和 std::vector<at::Tensor> bucket_views_out 的进一步说明：
+
+    在 PyTorch 之中，视图是指创建一个方便查看的东西，
+    视图与原数据共享内存，它只是将原有的数据进行整理，直接显示其中部分内容或者进行重排序后再显示出来。
+
+    每个 view 都将按照如下布局（sizes + strides）创建，这个布局与grad的预期布局相匹配。
+
+    bucket_views_in 和 bucket_views_out 这两个变量提供在 contents 之中操作具体梯度的方法，
+    或者说，它们提供了视图（views），该视图可以操作contents 之中每个张量的梯度。
+    用户把这两个变量作为入口点来把每个梯度的数据从 content 之中移入和移出。
+
+    我们为bucket_视图保留两种状态的原因是：
+    如果注册了DDP通信钩子（communication hook）， bucket_views_out 可以用钩子的 future_work值重新初始化。
+    所以我们需要为bucket_views_in[i].copy_(grad) 保留一个对 replica 原始 contents 的单独视图引用。
+
+    bucket_views_in[i].copy_(grad)和 grad.copy_(bucket_views_out[i]) 提供了将梯度数据移入/移出contents的方便方法。
+
+另外，以下三个成员变量存储桶的每个flat张量信息，比如offsets存储了各个张量在flat bucket contents中的offset。
+
+    // Per-variable offset/length into the flat bucket contents tensor and grad
+    // bucket.
+    std::vector<size_t> offsets;
+    std::vector<size_t> lengths;
+    // Per-variable sizes into the grad bucekt.
+    std::vector<c10::IntArrayRef> sizes_vec;
+
+3.2 定义
+BucketReplica 具体定义为：
+
+// A bucket replica represents [1..N] gradients to be reduced,
+
+。。。。
+
+
+
+
+
+0x05 累积相关类
+以下是梯度累积相关类。
+
+5.1 grad_accumulators_
+grad_accumulators_ 可以认为是一个矩阵，矩阵的每个item就是一个 AccumulateGrad（Node类型），就是用来计算梯度的。
+目前看来，这里只是一个bookkeeping作用。
+    std::vector<std::vector<std::shared_ptr<torch::autograd::Node>>>
+        grad_accumulators_;
+具体如下图，variable1 是一个实际的 张量，grad_accumulators_ 中的一个item 就指向 variable1 的 AccumulateGrad。
+
+                                        variable1 +----+
+                                                       |
+                                                       |
+                                                       v
++-----------------------------------+    +-------------+-----------+
+|grad_accumulators_                 |    | Variable                |
+|                                   |    |                         |
+|                                   |    |   +------------------+  |
+| [replica_index][variable_index]+---------->+ AccumulateGrad   |  |
+|                                   |    |   |                  |  |
+|                                   |    |   |                  |  |
++-----------------------------------+    |   |    post_hooks_+--------> autograd_hook(index)
+                                         |   |                  |  |
+                                         |   |                  |  |
+                                         |   +------------------+  |
+                                         |                         |
+                                         +-------------------------+
+
+5.1.1 初始化
+....
+
+
+5.2 gradAccToVariableMap_
+gradAccToVariableMap_ 的定义如下：
+    std::unordered_map<torch::autograd::Node*, VariableIndex> gradAccToVariableMap_;
+作用是给每个 Node 一个对应的VariableIndex，具体如图，下面就给 variable 1 一个 index 1：
+
+                                                        +--------------+
+                                                        | Variable     |
+                                                  +---> |              |
+                                                  |     |              |
+                                                  |     +--------------+
+                                                  |
+                                                  |
++-------------------------------------+           |
+| gradAccToVariableMap_               |           |
+|                                     |           |
+|                                     |           +
+|         <Node*, VariableIndex> +---------> [variable1 ：index1, variable2 : index2]
+|                                     |                     +
+|                                     |                     |
+|                                     |                     |
++-------------------------------------+                     |
+                                                            |
+                                                            v
+                                                  +---------+-----------------------------+
+                                                  |VariableIndex                          |
+                                                  |                                       |
+                                                  |          replica_index of Variable1   |
+                                                  |                                       |
+                                                  |          variable_index of Variable1  |
+                                                  |                                       |
+                                                  +---------------------------------------+
+5.2.1 初始化。。。
+
+...
+
+具体逻辑我们展示一下：
+
+    对于 张量 2，就没有使用过，所以 delay_all_reduce 方法 之中直接放入到未使用参数。
+    对于 张量 1：
+        numGradHooksTriggeredMap_ 初始化是 0。
+
+        第一次迭代之后变成 1。
+
+        后向传播时候，调用 prepare_for_backward 和 reset_bucket_counting，
+        把 numGradHooksTriggeredMap_赋值给 numGradHooksTriggeredMapPerIteration_。
+
+        autograd_hook 之中会递减，然后如果是 0，就设置此变量为 ready，可以规约了。
+
+
+   Variable 2
+
+                                     delay_all_reduce
+
+   numGradHooksTriggeredMap_[2] = 0  +---------------> unused_parameters_.push_back(0)
+
+
++----------------------------------------------------------------------------------------+
+
+   Variable 1
+
+
+
+    numGradHooksTriggeredMap_[1] = 0
+
+                   +
+                   |
+                   |  first_iteration
+                   |
+                   v
+
+    numGradHooksTriggeredMap_[1] = 1
+
+                   +
+                   |  prepare_for_backward
+                   |
+                   |  reset_bucket_counting
+                   v
+
+ numGradHooksTriggeredMapPerIteration_ = numGradHooksTriggeredMap_
+                   +
+                   |
+                   |
+                   | backward
+                   |
+                   | autograd_hook
+                   v
+                                                               YES
+ if (++numGradHooksTriggeredMapPerIteration_[index]=== 0)?? +------->  mark_variable_ready(1)
+                   +
+                   |  NO
+                   |
+                   v
+。。。。。
+
+
+  /*
+
+  std::vector<at::Tensor> local_used_maps_; // autograd_hook中会设置，对应论文中的
+  std::vector<at::Tensor> local_used_maps_dev_; // GPU
+5.6 使用过的参数
+以下两个变量用来记录本地使用过的参数，其标示在未启用同步的情况下（no_sync is on），
+在当前迭代或者 no_sync session 之中，这些参数是否在本地被使用过。
+
+每个模型副本对应map中的一个张量，每个张量是参数数量的一维int32（one-dim int32）张量。
+
+这些张量在autograd_hook中标记，以指示已使用了相应的参数。
+这些张量会在当前迭代或无同步会话（no_sync session）的后向传播结束时进行allreduce，以计算出全局未使用的参数。
+
+5.6.1 论文
+此处可以结合论文看看。
+
+全局未使用参数（Globally Unused Parameters）的梯度在向前和向后过程中应保持不变。
+检测未使用的参数需要全局信息，因为在一个DDP过程中，一个参数可能在一次操作中不存在，但可能在另一个过程的同一次迭代中参与训练。
+因此DDP在位图中维护本地未使用的参数信息，并启动额外的AllReduce以收集全局位图。
+由于位图比张量尺寸小得多，因此模型中的所有参数共享同一位图，而不是创建每桶位图（per-bucket bitmaps）。
+位图位于CPU上，以避免为每次更新启动专用CUDA内核。但是，某些ProcessGroup后端可能无法在CPU 张量上运行AllReduce。
+例如，ProcessGroupNCCL仅支持CUDA张量。此外，由于DDP应该与任何定制的ProcessGroup后端一起工作，它不能假设所有后端都支持CPU张量。
+为了解决这个问题，DDP在同一设备上维护另一个位图作为第一个模型参数，
+并调用非阻塞拷贝操作（non-blocking copy）将CPU位图移动到设备位图以进行集合通信。
+
+
+5.6.2 初始化
+初始化函数如下：void Reducer::initialize_local_used_map() {
+
+5.6.3 重置
+finalize_bucket_dense 和 finalize_backward 都会重置。
+
+5.6.4 设置
+autograd_hook 之中如果使用了，就设置为1
+
+5.6.5 使用
+在 mark_variable_ready 时候会调用到 all_reduce_local_used_map，如果需要同步，这里进行同步。我们还是翻译一下注释：
+
+    DDP 用异步H2D来避免阻塞开销。异步复制和allreduce 会着眼于当前流，因此将正确排序。
+
+    关于主机操作的正确顺序也很重要。H2D copy_ 是按流排序的，而主机对 local_used_maps_ 的更改是按主机排序的。
+
+    如果大量积压的cuda流工作将 copy_ 操作推迟到将来，并且如果从现在到finalize_backward 之间没有发生阻塞调用，
+    那么finalize_backward 会在流执行复制之前将主机上使用的本地映射重新归零，在这种情况下，copy_会读取到这些零，
+    而不是我们在这里告诉它读取的值。
+
+    将 local_used_maps_[i] 复制到pinned临时内存（固定的缓存分配器应该异步提供）可以避免这种恶劣的、罕见的争用情况。
+
+    在希望使用所有参数的情况下，从现在到重新调零，DDP本身不会做任何阻塞工作，因此这种危险情况是真实存在的。
+
+    所以，Reducer 采用防御性操作，以确保 local_used_maps_tmp 与local_used_maps_[i] 不同。
+
+void Reducer::all_reduce_local_used_map() {
+。。。
+  */
+
+
+....
+
+
+至此，我们初步介绍了一些基本类，下一章继续介绍（是在是太多了......）。
+
+0xFF 参考
+pytorch分布式系列3——分布式训练时，torch.utils.data.distributed.DistributedSampler做了什么？
+
+pytorch分布式系列1——搞清torch.distributed.launch相关的环境变量
+
+pytorch分布式系列2——DistributedDataParallel是如何做同步的？
+
+pytorch(分布式)数据并行个人实践总结——DataParallel/DistributedDataParallel
+
+Pytorch的nn.DataParallel
+
+https://discuss.pytorch.org/t/dataparallel-imbalanced-memory-usage/22551/20
+
+https://pytorch.org/docs/stable/distributed.html
+
+PyTorch 源码解读之分布式训练了解一下？
+
+实操教程｜PyTorch AutoGrad C++层实现
+
+PYTORCH 自动微分（一）
+
+PyTorch如何加速数据并行训练？分布式秘籍大揭秘
+
+pytorch分布式训练（二init_process_group）
+
+https://pytorch.org/tutorials/intermediate/ddp_tutorial.html
+
+https://pytorch.org/docs/master/notes/ddp.html
+
+https://pytorch.org/tutorials/intermediate/dist_tuto.html
+
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+
+Pytorch模型中的parameter与buffer
+
+
+
+
+
+
+

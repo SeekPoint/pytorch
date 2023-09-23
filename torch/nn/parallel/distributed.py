@@ -507,7 +507,7 @@ class DistributedDataParallel(Module):
             os.environ.get("PYTORCH_DDP_USE_SIDE_STREAM", "1") == "1"
         )
 
-        # 构建参数
+        # 构建参数   # 下面注释指明了未来也不会支持 SPMD
         # TODO(wayi@): Remove this field since SPMD is no longer supported,
         # and also remove all the relevant unnecessary loops.
         # Module replication within process (single-process multi device)
@@ -598,13 +598,58 @@ _sync_params_and_buffers 是依据 module的state_dict 来收集可以训练的�
             [dist._DEFAULT_FIRST_BUCKET_BYTES, self.bucket_bytes_cap],
             expect_sparse_gradient[0],
         )
-
+        '''
+        0x01 引论
+        1.1 调用
+        Reducer 的创建代码如下，是在_ddp_init_helper 之中。
+        
+        调用的 parameters 举例如下， parameters[0] 就是 rank 0 上模型的 parameters，
+        可以看到其只有 [0] 元素有意义，这个 [0] 原始本身包括 20 个元素：
+        
+            parameters = {list: 1} 
+            0 = {list: 4}           
+             0 = {Parameter: 10} Parameter containing:\ntensor([[-4.0381e-02,  3.8828e-02, 1  )   
+             1 = {Parameter: 10} Parameter containing:\ntensor([-0.0438, -0.2033,  0.2771,  0.0721,  ) 
+             2 = {Parameter: 5} Parameter containing:\ntensor([[-0.0094, -0.1319,  0.0713,  0.3155,  )
+             3 = {Parameter: 5} Parameter containing:\ntensor([-0.0008,  0.0582, -0.1245, -0.2538, )
+             ...
+             20 = {Parameter: 5} Parameter containing:\ntensor([-0.0008,  0.0582, -0.1245, -0.2538, )                                                   
+             __len__ = {int} 20
+            __len__ = {int} 1
+        
+        bucket_indices 举例如下：
+        
+        关于 tensor indices，就是给所有的tensor一个index，从0开始递增，一直到 tensors.size()。假如模型的 parameters 一共有20个张量，则 tensor index 从 0 到 19，分成 6 个buckets，则在这6个buckets之中，每个 tensor index 都是唯一不重复的。
+        
+        +-----------------------------------------------------------------------+
+        |                                                                       |
+        |  <tensor index 0, tensor index 1, tensor index 2, tensor index 3>     |
+        |                                                                       |
+        |                                                                       |
+        |  <tensor index 4, tensor index 5, tensor 6>                           |
+        |                                                                       |
+        |                                                                       |
+        |  ......                                                               |
+        |                                                                       |
+        |                                                                       |
+        |  <tensor index 16, tensor index 17, tensor index 18, tensor index 19> |
+        |                                                                       |
+        +-----------------------------------------------------------------------+
+        
+        python代码无意义，我们只能看看C++。
+            
+            class Reducer(__pybind11_builtins.pybind11_object):
+                def __init__(self, replicas, *args, **kwargs): 
+                    """ __init__(self: torch._C._distributed_c10d.Reducer, replicas: List[List[at::Tensor]], bucket_indices: List[List[int]], process_group: c10d::ProcessGroup, expect_sparse_gradients: List[List[bool]] = [], bucket_bytes_cap: int = 26214400, find_unused_parameters: bool = False, gradient_as_bucket_view: bool = False, param_to_name_mapping: Dict[int, str] = {}) -> None """
+                    pass
+        于是我们来到了 torch/lib/c10d/reducer.h 和 torch/lib/c10d/reducer.cpp。        
+        '''
         # Note: reverse list of buckets because we want to approximate the
         # order in which their gradients are produced, and assume they
         # are used in the forward pass in the order they are defined.
         self.reducer = dist.Reducer(
-            parameters,
-            list(reversed(bucket_indices)),  # 利用桶index
+            parameters,  # parameters[0]是张量列表
+            list(reversed(bucket_indices)),  # 利用桶index  # 桶信息
             self.process_group,  # 这里使用了
             expect_sparse_gradient,
             self.bucket_bytes_cap,

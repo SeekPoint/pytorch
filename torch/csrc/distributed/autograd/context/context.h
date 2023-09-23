@@ -131,6 +131,7 @@ class TORCH_API DistAutogradContext {
   std::unordered_map<int64_t, std::shared_ptr<RecvRpcBackward>>
       recvAutogradFunctions_;
 
+//DistAutogradContext 的 accumulatedGrads_会记录张量对应的当前梯度。
   // Gradients accumulated in this context so far. The key is the variable on
   // which the gradient needs to be accumulated and the value is the gradient
   // that needs to be accumulated on that variable..

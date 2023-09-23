@@ -26,9 +26,36 @@ constexpr int kDefaultBucketBytesCap = int(25 * 1024 * 1024);
 // Collect runtime stats once for every kDDPRuntimeLoggingSampleRate iterations.
 constexpr int kDDPRuntimeLoggingSampleRate = 100;
 
+/*
+0x04 查询类
+以下两个类用来让 autograd hook 函数确定张量对应桶。
+
+4.1 VariableIndex
+VariableIndex 就是确定某个 tensor 在某个桶中的位置。这个对于 autograd hook 有用。
+对于autograd hook 回调，回调函数所在进程只是知道自己的梯度张量，
+但是回调函数需要知道这个张量位于哪个replica，以及位于replica之中哪个位置，这样才能进一步规约。
+
+4.1.1 成员变量
+Reducer 等类的实例之中，只有一个 VariableIndex 的成员变量，这个独立成员变量是：
+
+    std::vector<VariableIndex> unused_parameters_
+
+VariableIndex 更多是作为其他成员变量的一部分或者参数存在，比如在 Reducer 之中，gradAccToVariableMap_ 就是使用了 VaribaleIndex。
+
+    std::unordered_map<torch::autograd::Node*, VariableIndex>
+          gradAccToVariableMap_;
+          // 存了grad_accumulator & index 的对应关系，这样以后在 autograd graph 寻找 unused parameters 就方便了
+
+4.1.2 定义
+VariableIndex 定义如下：
+
+*/
 // Locates a specific variable by replica index and variable index.
 struct VariableIndex {
-  size_t replica_index;
+  size_t replica_index; // 位于哪个replica
+  // variable index，注意，不是"位于replica之中哪个位置"，而是所有 varibale的index，
+  //比如一共有10个参数，variable_index 的取值是从0～9。那么"位于replica之中哪个位置"由什么来确定？
+  //由下面的 VariableLocator 确定。
   size_t variable_index;
 
   VariableIndex() = default;
@@ -48,6 +75,8 @@ inline bool operator==(const VariableIndex& lhs, const VariableIndex& rhs) {
     && lhs.variable_index == rhs.variable_index;
 }
 
+//0x02 Reducer 定义
+//Reducer提供了反向传播中梯度同步的核心实现，其定义相当复杂，我们甚至需要去掉一些不重要的成员变量以便展示：
 class Reducer {
  public:
   // The constructor takes a list of variables for every model replica.
@@ -160,14 +189,19 @@ class Reducer {
   void push_rebuilt_params(const VariableIndex& index);
 
   mutable std::mutex mutex_;
-  const std::vector<std::vector<at::Tensor>> replicas_;
-  const c10::intrusive_ptr<::c10d::ProcessGroup> process_group_;
+  const std::vector<std::vector<at::Tensor>> replicas_;  // 传入的张量
+  const c10::intrusive_ptr<::c10d::ProcessGroup> process_group_;  // 进程组
   std::vector<std::vector<bool>> expect_sparse_gradients_;
 
   std::vector<std::vector<std::shared_ptr<torch::autograd::Node>>>
-      grad_accumulators_;
+      grad_accumulators_; // 对应的 index 存了相应的 grad_accumulator，就是 tensor index对应的grad_accumulator
   std::unordered_map<torch::autograd::Node*, VariableIndex>
-      gradAccToVariableMap_;
+      gradAccToVariableMap_; // 存了grad_accumulator & index 的对应关系，这样以后在 autograd graph 寻找 unused parameters 就方便了
+
+  /*
+5.7.2 hooks_
+其作用就是保持了 autograd hook，也是起到了bookkeeping 作用。
+  */
   std::vector<std::pair<uintptr_t, std::shared_ptr<torch::autograd::Node>>>
       hooks_;
 
@@ -178,7 +212,7 @@ class Reducer {
   bool has_marked_unused_parameters_;
   const bool find_unused_parameters_;
   const bool gradient_as_bucket_view_;
-  std::vector<VariableIndex> unused_parameters_;
+  std::vector<VariableIndex> unused_parameters_; // 如果没有用到，直接设置为就绪，第一次迭代之后久不会改变了
   // Locally used parameter maps indicating if parameters are used locally
   // during the current iteration or no_sync session if no_sync is on. One
   // tensor for each model replica and each tensor is one-dim int32 tensor of
@@ -189,8 +223,8 @@ class Reducer {
   //
   // local_used_maps_:     CPU tensors for bookkeeping locally used params
   // local_used_maps_dev_: dev tensors for reducing globally unused params
-  std::vector<at::Tensor> local_used_maps_;
-  std::vector<at::Tensor> local_used_maps_dev_;
+  std::vector<at::Tensor> local_used_maps_; // autograd_hook中会设置，对应论文中的
+  std::vector<at::Tensor> local_used_maps_dev_; // GPU
   // Indicate that reduction is done and D2H copy is done as well.
   bool local_used_maps_reduced_;
 
@@ -233,9 +267,51 @@ class Reducer {
   // Buckets are filled as the gradients they hold are computed (triggered by
   // autograd hooks). Buckets are reduced in a predetermined order that is
   // identical across processes.
+/*
+3.2 定义
+BucketReplica 具体定义为：
+目前为止，逻辑如下，如前所述，每个bucket只有 replicas[0] 有意义。
+
+                                    +-----------------------------------------------------+
++----------------------------+      | +-------+      +----------------------------------+ |
+| Reducer                    |      | |Bucket |      |Bucket                            | |
+|                            |      | |       |      |                                  | |
+|                            |      | |       |      |            Future  future_work   | |
+|  vector<Bucket> buckets_ +------> | |       | ...  |                                  | |
+|                            |      | |       |      |       ProcessGroup::Work  work   | |
+|                            |      | |       |      |                                  | |
+|                            |      | |       |      | vector<size_t> variable_indices  | |
+|                            |      | |       |      |                                  | |
+|                            |      | |       |      |  vector<BucketReplica> replicas  | |
+|                            |      | |       |      |                          +       | |
+|                            |      | |       |      |                          |       | |
+|                            |      | |       |      |                          |       | |
++----------------------------+      | +-------+      +----------------------------------+ |
+                                    +-----------------------------------------------------+
+                                                                                |
+                                                                                |
+                                                                                v
+                           +--------------------------------------------------------------+
+                           | +---------------+       +----------------------------------+ |
+                           | |BucketReplica  |       | BucketReplica                    | |
+                           | |               |       |                                  | |
+                           | |               |       |                                  | |
+                           | |               |       |  vector<Tensor> bucket_views_in  | |
+                           | |               |  ...  |                                  | |
+                           | |               |       |  vector<Tensor> bucket_views_out | |
+                           | |               |       |                                  | |
+                           | |               |       |  Tensor contents                 | |
+                           | |               |       |                                  | |
+                           | |               |       |  vector<Tensor> variables        | |
+                           | |               |       |                                  | |
+                           | |               |       |                                  | |
+                           | +---------------+       +----------------------------------+ |
+                           +--------------------------------------------------------------+
+
+*/
   struct BucketReplica {
     // Flattened (1 dimensional) contents of bucket.
-    at::Tensor contents;
+    at::Tensor contents; // 这里打平了
 
     // Views into contents for each grad.  Each view will be created with
     // layout (sizes + strides) matching the grad's expected layout
@@ -248,8 +324,8 @@ class Reducer {
     // re-initialized with the value of hook's `future_work`. We still need to
     // keep a separate view reference to replica's original contents for
     // `bucket_views_in[i].copy_(grad)` call.
-    std::vector<at::Tensor> bucket_views_in;
-    std::vector<at::Tensor> bucket_views_out;
+    std::vector<at::Tensor> bucket_views_in; // 怎么从contents 之中查找
+    std::vector<at::Tensor> bucket_views_out; // 一个输出视图
 
     // Variables that contribute to this bucket replica. Use refcounted value
     // here so that we can easily unflatten the bucket contents into the
@@ -305,13 +381,13 @@ class Reducer {
   // One bucket per replica. Reduction is kicked off when every bucket is ready.
   //
   struct Bucket {
-    std::vector<BucketReplica> replicas;
+    std::vector<BucketReplica> replicas;  // 每个模型副本对应一个桶
 
     // Global indices of participating variables in the bucket
-    std::vector<size_t> variable_indices;
+    std::vector<size_t> variable_indices; // 具体每个桶里面有哪些 variable。
 
     // Number of replicas to be marked done before this bucket is ready.
-    size_t pending;
+    size_t pending;  // 计数，
 
     // Keep work handle around when this set of buckets is being reduced.
     c10::intrusive_ptr<c10d::ProcessGroup::Work> work;
@@ -325,16 +401,24 @@ class Reducer {
   };
 
   std::vector<Bucket> buckets_;
+/*
+4.2 VariableLocator
+4.2.1 定义
+VariableLocator 用来在 bucket 之中确定一个varaible。为了找到一个张量位置，我们需要知道在哪个桶，在桶的张量之中的哪个位置。
 
+    哪个桶 : bucket_index 是Reducer.buckets_列表的位置，表示 buckets_ 之上的一个bucket。
+    桶副本的哪个位置 : intra_bucket_index 是在 bucket.replica 之中 vector 域的 variable index。
+
+*/
   // A variable locator locates a particular variable in the bucket
   // structure. The `bucket_index` field points to the bucket in the `buckets_`
   // vector. The `intra_bucket_index` field points to the index of the variable
   // in any of the vector fields in the bucket replica.
   struct VariableLocator {
     // Index into the `buckets_` variable.
-    size_t bucket_index;
+    size_t bucket_index; // 哪个桶
     // Index of parameter in single bucket replica.
-    size_t intra_bucket_index;
+    size_t intra_bucket_index; // 在桶副本的哪个位置
 
     VariableLocator() = default;
 
@@ -343,7 +427,8 @@ class Reducer {
       intra_bucket_index = intra_bucket_index_;
     }
   };
-
+//4.2.2 成员变量
+//Reducer 的成员变量为：
   // Map the index of a variable to its location in the bucket structure.
   std::vector<VariableLocator> variable_locators_;
 
@@ -408,6 +493,13 @@ class Reducer {
   std::vector<int64_t> rebuilt_param_indices_;
   const int64_t bucket_bytes_cap_;
 
+/*
+5.7 计算梯度支撑类
+我们接下来分析一些计算梯度所涉及到的基本函数和支撑类。
+
+5.7.1 RpcContext
+该类用来封装 distributed::autograd::ContextPtr。
+*/
   struct RpcContext {
     using ContextPtr = torch::distributed::autograd::ContextPtr;
     // The shared_ptr is to hold the context instance.
@@ -436,11 +528,25 @@ class Reducer {
   int divFactor_;
 
   bool static_graph_;
-
+/*
+5.3 numGradHooksTriggeredMap_
+记录在本张量的梯度就绪之前，该张量的 autograd_hook 应该被调用几次。第一次迭代之后，不再增加，所以这个数值应该就是1或者0。
+用来设置 unused_parameters_ 和 配置 numGradHooksTriggeredMapPerIteration_。
+5.3.1 初始化
+如何初始化？在构建函数之中有：
+    numGradHooksTriggeredMap_[index] = 0;
+第一次迭代之后，后续调用 autogrid_hook 就递增加一。
+*/
   // Key: VariableIndex, Value: the number of times that a variable's autograd_hook()
   // should be triggered before marking this variable's grad as ready for communication.
   // Map will not change after 1st iteration.
   std::unordered_map<VariableIndex, int, c10::hash<VariableIndex>> numGradHooksTriggeredMap_;
+
+/*
+5.4 numGradHooksTriggeredMapPerIteration_
+在本张量的梯度就绪之前，该张量的 autograd_hook 还需要被调用几次。如果为0，就说明这个桶应该整体就绪了。
+本成员变量是使用 numGradHooksTriggeredMap_ 来重置。
+*/
   // Key: VariableIndex, Value: the number of times that a variable's autograd_hook()
   // are left to be triggered before marking this variable's grad as ready for communication.
   // Map will change after 1st iteration to track a grad is ready for communication or not.
@@ -476,6 +582,11 @@ class Reducer {
   // about errors when certain parameters do not get gradient.
   std::unordered_map<size_t, std::string> param_names_;
   // Per iteration set of parameter indices that have been marked ready.
+
+  /*
+5.5 perIterationReadyParams_
+每个迭代之中，perIterationReadyParams_ 表示就绪的参数。
+  */
   std::unordered_set<size_t> perIterationReadyParams_;
   // Retrieves parameter names that have not been marked as ready as part of
   // previous iteration.

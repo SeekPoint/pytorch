@@ -98,19 +98,27 @@ Reducer::Reducer(
   {
     const auto replica_count = replicas_.size();
     grad_accumulators_.resize(replica_count);
+
+    // 以下两个for循环会遍历所有的张量
     for (size_t replica_index = 0; replica_index < replica_count;
          replica_index++) {
       const auto variable_count = replicas_[replica_index].size();
       grad_accumulators_[replica_index].resize(variable_count);
       for (size_t variable_index = 0; variable_index < variable_count;
            variable_index++) {
-        auto& variable = replicas_[replica_index][variable_index];
+           /*
+在 Reducer 的构造函数中，有如下代码用于autogrid_hook的设定，这是给每个 replica 上的每个张量设置了一个 hook。
+如果autograd hook 不知道此梯度对应哪个 bucket，就无法告诉 DDP，这个 bucket 整体ready了。
+
+如何找到桶？需要使用下面的 VariableLocator。
+           */
+        auto& variable = replicas_[replica_index][variable_index];  // 生成了 VariableIndex
         const auto index = VariableIndex(replica_index, variable_index);
 
         // The gradient accumulator function is lazily initialized once.
         // Therefore we can use its presence in the autograd graph as
         // evidence that the parameter has participated in an iteration.
-        auto grad_accumulator =
+        auto grad_accumulator = // 得到一个张量的grad_accumulator
             torch::autograd::impl::grad_accumulator(variable);
 
 #ifndef _WIN32
@@ -126,7 +134,14 @@ Reducer::Reducer(
                       this->rpc_context_.set(
                           ThreadLocalDistAutogradContext::getContextPtr());
 #endif
-                      this->autograd_hook(index);
+                        /*
+                        4.2.2.2 使用
+                        如何使用？我们用下面做为例子。
+                        当 autograd hook 调用时候，使用 VariableIndex index 来回调，
+                        autograd_hook 最终调用到 mark_variable_ready_dense，
+                        这里进而通过 variable_locators_ 来确定桶，然后进行后续操作。
+                        */
+                      this->autograd_hook(index); // Hook的参数是 VariableIndex，目的是为了让 hook 可以顺利找到张量
                       return outputs;
                     })),
             grad_accumulator);
@@ -138,6 +153,8 @@ Reducer::Reducer(
         // Note that the mapping of gradient accumulator to variable should be
         // one to one as we deduplicate shared parameters before constructing
         // Reducer.
+//        5.2.1 初始化
+//如何初始化？在 Reducer 构造函数中有如下，就是给每个需要求导的 Varaible 一个VariableIndex。
         if (find_unused_parameters_) {
           gradAccToVariableMap_[grad_accumulator.get()] = index;
         }
@@ -155,7 +172,7 @@ Reducer::Reducer(
                 " variable ",
                 variable_index));
         grad_accumulators_[replica_index][variable_index] =
-            std::move(grad_accumulator);
+            std::move(grad_accumulator);  // 把这个张量的 grad_accumulator 复制到 grad_accumulators_
       }
     }
   }
@@ -184,6 +201,30 @@ Reducer::Reducer(
 // Therefore, we can avoid allocating memory for local_used_maps and
 // local_used_maps_dev_ if find_unused_parameters_ is false.
 
+/*
+5.7.3 comm_hook_
+5.7.3.1 概念
+我们通过 [DDP Communication Hook] 来看看概念。
+
+DDP通信钩子是一种增强功能，它提供了一个钩子，其可用于覆盖DDP来进行跨rank梯度通信，这可用于梯度压缩/GossipGrad等算法。
+可以使用Python API register_comm_hook来注册钩子函数。
+
+如果未注册DDP通信钩子（DDP communication hook），则reducer只需调用allreduce即可对桶进行规约。
+如果注册了，则会调用钩子并使用future work handle来处理。
+如果注册，reducer也会跳过"将梯度除以世界大小（world size）" 这个步骤。
+这样做的目的是：通信钩子可以完全覆盖我们执行通信的方式，用户可以完全控制如何处理梯度。
+
+PythonCommHook是CommHookInterface的子类，其可以注册一个 Python 钩子。
+此外，还有一些内置的C++钩子实现，可以通过调用Python API register_builtin_comm_hook来指定。
+
+5.7.3.2 使用
+我们通过 torch/distributed/algorithms/ddp_comm_hooks/default_hooks.py 来看看。
+
+下面的 hook 就是在 all-reduce 前后进行自己的特殊处理。
+如果使用这个 hook，就使用 ddp_model.register_comm_hook(process_group, fp16_compress_hook)。
+
+def fp16_compress_hook(
+*/
 // Note [DDP Communication Hook]
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~
 // If DDP communication hook is not registered, the reducer reduces the buckets
@@ -304,13 +345,15 @@ void Reducer::copy_grad_to_bucket(
 void Reducer::mark_variable_ready_dense(VariableIndex index) {
   const auto replica_index = index.replica_index;
   const auto variable_index = index.variable_index;
-  const auto& bucket_index = variable_locators_[variable_index];
-  auto& bucket = buckets_[bucket_index.bucket_index];
-  auto& replica = bucket.replicas[replica_index];
-  auto& variable = replica.variables[bucket_index.intra_bucket_index];
-  const auto offset = replica.offsets[bucket_index.intra_bucket_index];
+  const auto& bucket_index = variable_locators_[variable_index];  // 找到张量对应的桶index
+  auto& bucket = buckets_[bucket_index.bucket_index];  // 找到桶
+  auto& replica = bucket.replicas[replica_index];  // 再通过桶找到对应的 replica
+  auto& variable = replica.variables[bucket_index.intra_bucket_index];   // 找到了张量
+  const auto offset = replica.offsets[bucket_index.intra_bucket_index];  // 找到了张量信息
   const auto length = replica.lengths[bucket_index.intra_bucket_index];
   auto& bucket_view = replica.bucket_views_in[bucket_index.intra_bucket_index];
+
+// 接下来就可以继续处理了
 
   // Copy contents of gradient tensor to bucket tensor.
   // If the gradient is not set, we assume it wasn't computed
@@ -453,6 +496,8 @@ const c10::Stream Reducer::get_current_stream() {
   return guard.getStream(device);
 }
 
+//numGradHooksTriggeredMap_  这里也会进行处理。如果为0，则插入unused_parameters_。
+
 // Right now delay_all_reduce is only called when static_graph_=true and
 // num_iterations_==1.
 void Reducer::delay_all_reduce() {
@@ -483,7 +528,7 @@ void Reducer::delay_all_reduce() {
          variable_index++) {
       const auto index = VariableIndex(replica_index, variable_index);
       // set unused_parameters_
-      if (numGradHooksTriggeredMap_[index] == 0) {
+      if (numGradHooksTriggeredMap_[index] == 0) {   // 如果为0，则插入unused_parameters_
         unused_parameters_.push_back(index);
       }
       require_finalize_ = true;
@@ -504,6 +549,13 @@ void Reducer::delay_all_reduce() {
   finalize_backward();
 }
 
+/*
+numGradHooksTriggeredMapPerIteration_
+5.4.1 使用
+如何使用？在静态图情况下，如果不是第一次迭代（此时刚刚产生梯度），
+就会把 numGradHooksTriggeredMapPerIteration_[index] 递减，
+如果为0，就说明该变量就绪，可以进行集合操作梯度规约了。
+*/
 // The function `autograd_hook` is called after the gradient for a
 // model parameter has been accumulated into its gradient tensor.
 // This function is only to be called from the autograd thread.
@@ -521,6 +573,7 @@ void Reducer::autograd_hook(VariableIndex index) {
     return;
   }
 
+// 在这里会记录，已经使用了。
   // See Note [Skip allreducing local_used_maps_dev]
   if (dynamic_graph_find_unused() || static_graph_first_iteration()) {
     // Since it gets here, this param has been used for this iteration. We want
@@ -531,8 +584,8 @@ void Reducer::autograd_hook(VariableIndex index) {
   }
 
   if (static_graph_first_iteration()) {
-    numGradHooksTriggeredMap_[index] += 1;
-    return;
+    numGradHooksTriggeredMap_[index] += 1; // 静态图第一次迭代时候，这里会增加1
+    return; // 然后直接返回，注意！
   }
 
   // If `find_unused_parameters_` is true there may be model parameters that
@@ -687,6 +740,11 @@ void Reducer::checkAndRaiseMarkedTwiceError(size_t curVariableIndex) {
   }
 }
 
+/*
+5.5 perIterationReadyParams_
+5.5.1 设置
+就是如果某个variable是就绪状态，就插入到 perIterationReadyParams_。
+*/
 void Reducer::mark_variable_ready(VariableIndex index) {
   // Rebuild bucket only if 1) it is the first time to rebuild bucket 2)
   // static_graph_ is true or find_unused_parameters_ is false,
@@ -798,6 +856,7 @@ void Reducer::all_reduce_bucket(Bucket& bucket) {
   } else {
     GradBucket grad_bucket(
         next_bucket_,
+         // 这里的注释指明了不支持 SPMD
         tensors[0],
         // Since currently we do not support single-process multiple-device
         // mode, we can assume only one replica in the bucket.
@@ -831,7 +890,67 @@ void Reducer::mark_bucket_ready(size_t bucket_index) {
     all_reduce_bucket(bucket);
   }
 }
+/*
+3.3 设置
+Reducer 的成员变量buckets_ 是关键，这是Reducer 之中所有的桶。
+    std::vector<Bucket> buckets_;
+在初始化函数中有如何初始化 buckets_，核心是：
 
+    找到本bucket在 bucket_indices 之中的 index。
+    在 parameters 之中找到 index 对应的张量。
+    在 BucketReplica 之中配置这些张量，就是本bucket应该规约的张量。
+
+...
+用图例表示如下，这里假设 bucket index 是 1，即第 2 个桶，所以 variable_indices 对应了 bucket_indices 中的相应部分。比如 BucketReplica[0] 里面是 Tensor 4,5,6，而variable_indices就是 Tensor 4,5,6 分别的 index。
+
+下图中的 bucket_indices 是 Reducer 构造函数的参数之一。
+
++--------------------------------+   +------------------------------------+
+|Reducer                         |   |                                    |
+|                                |   |bucket 0, bucket 1, ...... bucket n |
+|      vector<Bucket> buckets_ +---> |    +                               |
+|                                |   |    |                               |
++--------------------------------+   +------------------------------------+
+                                          |
+                          +---------------+              +------------------------------+
+                          |                         +--> | Tensor 4, Tensor 5, Tensor 6 |
+                          |                         |    +------------------------------+
+                          |                         |
+                          v                   +-----------------------------------------+
++-------------------------+-----------+       |     |                                   |
+| Bucket                              |       | +---+-----------+     +---------------+ |
+|                                     |       | | BucketReplica |     | BucketReplica | |
+|                                     |       | |               | ... |               | |
+|   vector<BucketReplica> replicas +--------> | +---------------+     +---------------+ |
+|                                     |       +-----------------------------------------+
+|                                     |
+|   vector<size_t> variable_indices +------->  <tensor index 4, tensor index 5, tensor 6>
+|                                     |
++-------------------------------------+
+
+
+
+
+
+bucket_indices    +-----------------------------------------------------------------------+
+     +            |                                                                       |
+     |            |  <tensor index 0, tensor index 1, tensor index 2, tensor index 3>     |
+     |            |                                                                       |
+     +----------> |                                                                       |
+                  |  <tensor index 4, tensor index 5, tensor 6>                           |
+                  |                                                                       |
+                  |                                                                       |
+                  |  ......                                                               |
+                  |                                                                       |
+                  |                                                                       |
+                  |  <tensor index 16, tensor index 17, tensor index 18, tensor index 19> |
+                  |                                                                       |
+                  +-----------------------------------------------------------------------+
+
+
+4.2.2.1 初始化
+如何初始化？
+*/
 void Reducer::initialize_buckets(
     std::vector<std::vector<size_t>> bucket_indices) {
   // If initialize_buckets is called inside DDP constructor, then
@@ -863,7 +982,7 @@ void Reducer::initialize_buckets(
   const auto bucket_count = bucket_indices.size();
   const auto replica_count = replicas_.size();
   buckets_.reserve(bucket_count);
-  for (size_t bucket_index = 0; bucket_index < bucket_count; bucket_index++) {
+  for (size_t bucket_index = 0; bucket_index < bucket_count; bucket_index++) { // 遍历桶
     Bucket bucket;
 
     // TODO(@pietern): Validate indices.
@@ -874,7 +993,7 @@ void Reducer::initialize_buckets(
     // Variables that expect sparse gradients must have their own bucket.
     if (bucket_indices[bucket_index].size() == 1) {
       const auto variable_index = bucket_indices[bucket_index].front();
-      bucket.expect_sparse_gradient =
+      bucket.expect_sparse_gradient =  // 设置 bucket
           expect_sparse_gradients_[0][variable_index];
     } else {
       for (const auto variable_index : bucket_indices[bucket_index]) {
@@ -888,10 +1007,11 @@ void Reducer::initialize_buckets(
     // Iterate over model replicas.
     for (size_t replica_index = 0; replica_index < replica_count;
          replica_index++) {
-      BucketReplica replica;
+      BucketReplica replica;  // 设置replica
 
       if (bucket.expect_sparse_gradient) {
         const auto variable_index = bucket_indices[bucket_index].front();
+        // 找到index对应的tensor
         const auto& variable = replicas_[replica_index][variable_index];
         TORCH_INTERNAL_ASSERT(bucket_indices[bucket_index].size() == 1);
         replica.variables = {variable};
@@ -913,6 +1033,7 @@ void Reducer::initialize_buckets(
           TORCH_CHECK(
               variable_index < replicas_[replica_index].size(),
               "Out of range variable index specified.");
+          // 找到index对应的tensor
           const auto& variable = replicas_[replica_index][variable_index];
           if (!options.has_device()) {
             options = options.device(variable.device());
@@ -930,13 +1051,14 @@ void Reducer::initialize_buckets(
                 "All parameters in a bucket must have the same dtype.");
           }
           const auto length = variable.numel();
-          replica.variables.push_back(variable);
+          replica.variables.push_back(variable);  // 插入张量
           replica.offsets.push_back(offset);
           replica.lengths.push_back(length);
           replica.sizes_vec.push_back(variable.sizes());
           offset += length;
         }
 
+        // Allocate bucket contents tensor. 分配内存
         // Allocate bucket contents tensor.
         replica.contents = at::empty({static_cast<long>(offset)}, options);
 
@@ -982,30 +1104,124 @@ void Reducer::initialize_buckets(
       }
 
       // Add bucket replica to enclosing bucket.
-      bucket.replicas.push_back(std::move(replica));
+      bucket.replicas.push_back(std::move(replica));  //插入桶列表
     }
 
     // Map participating variables to this bucket.
     // This is identical across replicas so we only need to do this once.
     size_t intra_bucket_index = 0;
-    for (const auto variable_index : bucket_indices[bucket_index]) {
+    for (const auto variable_index : bucket_indices[bucket_index]) { // 遍历桶里面的张量，所有桶里每个张量index 都是唯一的
       TORCH_CHECK(
           variable_index < variable_locators_.size(),
           "Out of range variable index specified.");
       variable_locators_[variable_index] =
-          VariableLocator(bucket_index, intra_bucket_index++);
+          VariableLocator(bucket_index, intra_bucket_index++);  // intra_bucket_index 就是递加
     }
     bucket.variable_indices = std::move(bucket_indices[bucket_index]);
 
-    buckets_.push_back(std::move(bucket));
+    buckets_.push_back(std::move(bucket));//插入桶列表
   }
 }
+/*
+问题：variable_locators_[variable_index] 在不同的桶之间，不会重复吗？
+不会，因为 VariableLocator(bucket_index, intra_bucket_index++) 从定义上看，bucket_index 和 intra_bucket_index 的组合是唯一的。
 
+我们给出一个例子。关于 tensor indices，就是给所有的tensor一个index，从0开始递增，一直到 tensors.size()。
+假如模型的 parameters 一共有12个张量，则 tensor index 从 0 到 11。
+假如分成 6 个buckets，则在这6个buckets之中，每个 tensor index 都是唯一不重复的。
+
++-----------------------------------------------------------------------+
+|                                                                       |
+|  <tensor index 0, tensor index 1, tensor index 2, tensor index 3>     |
+|                                                                       |
+|                                                                       |
+|  <tensor index 4, tensor index 5, tensor 6>                           |
+|                                                                       |
+|                                                                       |
+|  ......                                                               |
+|                                                                       |
+|                                                                       |
+|  <tensor index 16, tensor index 17, tensor index 18, tensor index 19> |
+|                                                                       |
++-----------------------------------------------------------------------+
+
+这样，对应的 variable_locators_ 是：
+
+variable_locators_[tensor index 0] =  VariableLocator(bucket 0, 0)，即 tensor index 0 属于 bucket 0 的 第一个variable。
+
+variable_locators_[tensor index 1] =  VariableLocator(bucket 0, 1)，即 tensor index 1 属于 bucket 0 的 第二个variable。
+
+variable_locators_[tensor index 2] =  VariableLocator(bucket 0, 2)，即 tensor index 2 属于 bucket 0 的 第三个variable。
+
+variable_locators_[tensor index 3] =  VariableLocator(bucket 0, 3)，即 tensor index 3 属于 bucket 0 的 第四个variable。
+*/
+
+
+
+
+/*
+3.3 初始化
+部分初始化的代码在 Reducer::initialize_buckets 之中。
+
+    // Allocate bucket contents tensor. 分配内存
+    replica.contents = at::empty({static_cast<long>(offset)}, options);
+
+    initialize_bucket_views(replica, replica.contents);
+
+initialize_bucket_views 具体代码如下，这里需要对几个 PyTorch 函数进行说明。
+
+    as_strided ：依据现有tensor以及给定的步长来创建一个视图（类型仍然为tensor），
+    与原数据共享内存，不存储诗句，所以两个view都不是真实的存储，只是视图。
+
+    narrow ：返回一个新的张量，其是原来张量的缩小版。
+
+initialize_bucket_views 主要逻辑是：
+
+    遍历replica的张量，针对每一个张量，依据其是dense还是sparse进行不同处理，最后插入到replica.bucket_views_in之中。
+
+    把 replica.bucket_views_out 设置为 replica.bucket_views_in，正常应该是相等的。
+
+    如果gradient_as_bucket_view_设置为true，则需要处理两种情况：
+
+        当调用 rebuild_buckets 重建 bucket时，initialize_bucket_view 可以在initialize_bucket内调用，
+        如果grad在上一次迭代中已经定义/计算过，则需要将旧的grad复制到新的bucket_view中，并让grad指向新的bucket_view。
+
+        initialize_bucket_view 也可以在构建时候在 initialize_bucket 内调用。在构建时间内不会定义 Grad，
+        在这种情况下，不要让梯度指向bucket_view，因为对于全局未使用的参数，梯度应保持为未定义。
+
+具体代码如下：
+
+
+具体如下图：
+
++------------------------------------------+
+| BucketReplica                            |
+|                                          |
+|       vector<Tensor> bucket_views_in +--------------------+
+|                                          |                |
+|                                          |                |
+|       vector<Tensor> bucket_views_out +--------------+    |
+|                                          |           |    |
+|                                          |           |    |
+|                                          |           v    v
+|                                          |     +-----+----+--------------------------+
+|       Tensor contents  +---------------------> |Flattened (Tensor1, Tensor2, Tensor3)|
+|                                          |     +-------------------------------------+
+|                                          |
+|                                          |
+|       vector<Tensor> variables  +------------>  [Tensor1,Tensor2,Tensor3]
+|                                          |
+|                                          |
+|                                          |
++------------------------------------------+
+
+另外，mark_variable_ready_sparse, mark_variable_ready_dense， finalize_backward 都有对 contents 赋值。
+*/
 // (see Note:  "Gradient Layout Contract" in initialize_buckets).
 void Reducer::initialize_bucket_views(
     Reducer::BucketReplica& replica,
     at::Tensor& contents) {
-  for (size_t i = 0; i < replica.variables.size(); i++) {
+  for (size_t i = 0; i < replica.variables.size(); i++) {  // 遍历replica的张量
     auto& v = replica.variables[i];
     const auto offset = replica.offsets[i];
     const auto length = replica.lengths[i];
@@ -1013,13 +1229,13 @@ void Reducer::initialize_bucket_views(
       // If the param's memory is dense, match its layout, anticipating
       // the autograd engine (AccumulateGrad) will also create gradients
       // matching its layout.
-      replica.bucket_views_in.push_back(
+      replica.bucket_views_in.push_back(  // dense类型
           contents.as_strided(v.sizes(), v.strides(), offset));
     } else {
       // Fall back to a C-style contiguous view, again anticipating
       // AccumulateGrad will do the same when stashing grads for non-dense
       // params.
-      replica.bucket_views_in.push_back(
+      replica.bucket_views_in.push_back(  // sparse类型
           contents.narrow(0, offset, length).view(v.sizes()));
     }
     // By default `bucket_views_out` and `bucket_views_in` are
@@ -1041,9 +1257,11 @@ void Reducer::initialize_bucket_views(
         if (grad.defined() && !grad.is_alias_of(bucket_view)) {
           bucket_view.copy_(grad);
           grad = bucket_view;
+          // 梯度被修改，需要写回去
           // The grad is modefied and needs to be written back.
           return true;
         }
+        // 梯度没有被修改，不需要回写
         // The grad is not modified and does not need to be written back.
         return false;
       });
@@ -1084,6 +1302,11 @@ void Reducer::prepare_for_forward() {
   }
 }
 
+//numGradHooksTriggeredMap_
+//5.3.2 使用
+//如何使用？这里会reset。
+//当新一次迭代时候，会重置这个值，prepare_for_backward 会调用到 reset_bucket_counting。
+//而且是使用 numGradHooksTriggeredMap_ 来重置。
 void Reducer::reset_bucket_counting() {
   next_bucket_ = 0;
   // Reset num_buckets_ready_ at the beginning of backward computation
@@ -1102,6 +1325,11 @@ void Reducer::reset_bucket_counting() {
   }
 }
 
+/*
+5.2.2 使用
+gradAccToVariableMap_ 的使用如下，search_unused_parameters 就是遍历查找 gradAccToVariableMap_，
+如果某一个accumulator 函数没有在 gradAccToVariableMap_ 里面，就说明不用计算梯度。
+*/
 // Traverse the autograd graph starting at the specified output.
 // All parameters for which we have a pointer to their gradient accumulation
 // functions, but don't show up in the autograd graph will be marked ready for
@@ -1139,6 +1367,7 @@ void Reducer::search_unused_parameters(
     }
   }
 
+  // 遍历查找，如果某一个accumulator 函数没有在这图里面，就说明不用计算梯度
   // Find accumulator functions that don't show up in this graph.
   for (const auto& it : gradAccToVariableMap_) {
     // If the accumulator function is present in the graph, we know
@@ -1162,6 +1391,11 @@ void Reducer::search_unused_parameters(
   }
 }
 
+/*
+5.5 perIterationReadyParams_
+5.5.2 重置
+在反向传播之前，会重置这个变量。
+*/
 void Reducer::prepare_for_backward(
     const std::vector<torch::autograd::Variable>& outputs) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -1218,6 +1452,11 @@ void Reducer::copy_bucket_to_grad(
   });
 }
 
+/*5.5perIterationReadyParams_
+5.5.3 使用
+就是遍历perIterationReadyParams_，如果没找到，就返回。
+在 rebuild_buckets 方法中会调用 ensure_prior_reduction_finished，里面会调用这两个方法来校验。
+*/
 std::vector<std::string> Reducer::getUnmarkedParamsForIteration() {
   std::vector<std::string> unMarkedParamNames;
   for (const auto& it : param_names_) {
@@ -1420,15 +1659,26 @@ void Reducer::finalize_backward() {
   }
 }
 
+/*
+
+5.7.4 runGradCallbackForVariable
+mark_variable_ready_dense 函数会调用到 runGradCallbackForVariable。
+
+5.7.4.1 Reducer
+Reducer的runGradCallbackForVariable如下，
+其调用 distributed::autograd::ContextPtr.runGradCallbackForVariable 来处理。
+*/
 void Reducer::runGradCallbackForVariable(
     at::Tensor& variable,
     GradCallback&& cb) {
+  // 加载rpc context
   auto context_ptr = rpc_context_.context_ptr.load();
   if (context_ptr == nullptr) {
     cb(variable.mutable_grad());
   } else {
     // Under distributed autograd
 #ifndef _WIN32
+// 下面分析
     context_ptr->runGradCallbackForVariable(variable, std::move(cb));
 #endif
   }

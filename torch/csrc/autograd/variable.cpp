@@ -199,6 +199,8 @@ namespace impl {
     }
   }
 
+//5.1.2 使用
+//grad_accumulator 返回的是 Node，也就是 AccumulateGrad，是一个Node类型，我们取出了检查校验代码。
   std::shared_ptr<Node> grad_accumulator(const Variable& self) {
     auto autograd_meta = get_autograd_meta(self);
     if (!autograd_meta) {
