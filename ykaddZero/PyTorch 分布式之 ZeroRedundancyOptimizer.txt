@@ -1,0 +1,242 @@
+PyTorch 分布式之 ZeroRedundancyOptimizer
+https://www.cnblogs.com/rossiXYZ/p/15782054.html
+
+目录
+[源码解析] PyTorch 分布式之 ZeroRedundancyOptimizer
+0x00 摘要
+0x01 历史
+1.1 Github说明
+1.2 解析
+0x02 背景知识
+2.1 ZeRO
+2.2 Fairscale 的 ZeRO 实现
+2.3 Optimizer State Sharding (OSS)
+2.3.1 训练流程
+2.3.2 最佳实践
+2.3.3 性能说明
+0x03 如何使用
+3.1 背后思想
+3.2 如何使用
+3.3 小结
+0x04 初始化
+4.1 将参数分区
+4.2 将参数分给rank
+4.3 _per_device_params
+4.4 _update_trainable
+4.4.1 同步参数组
+4.4.2 建立single buffer
+0x05 更新参数
+5.1 更新
+5.2 广播
+5.3 同步本地参数
+0xFF 参考
+
+0x00 摘要
+PyTorch Zero Redundancy Optimizer 是一类旨在解决数据并行训练和模型并行训练之间权衡问题的算法。
+Zero Redundacy Optimizer 的思想来源于微软的ZeRO，具体实现是基于 Fairscale 的OSS。
+
+Fairscale 实现了 ZeRO 的三个阶段的算法，Fairscale 是 Facebook AI Research (FAIR) 开源的项目，
+个人理解为是Facebook 大规模深度学习分布式训练的一个试验田，如果其中某个模块发展成熟，就会合并到 PyTorch 之中。
+
+OSS 就是Fairscale实现的 ZeRO-1，其实现了优化器状态分片（参见下图红色方框）。
+PyTorch 则是基于 FairScale 的 OSS 实现了 ZeroRedundancyOptimizer。
+
+注：本文基于 PyTorch 1.9.0。
+
+
+0x01 历史
+1.1 Github说明
+ZeroRedundancyOptimizer 是在 https://github.com/pytorch/pytorch/pull/46750 引入的，我们看看其说明。
+
+ZeroRedundancyOptimizer: an implementation of a standalone sharded optimizer wrapper #46750
+Implement the first stage of ZeRO, sharding of the optimizer state,
+as described in this blog post and this paper.
+This implementation is completely independent from the DeepSpeed framework,
+and aims at providing ZeRO-compliant building blocks within the PyTorch scheme of things.
+
+This works by:
+
+acting as a wrapper to a pytorch optimizer. ZeROptimizer does not optimize anything by itself,
+it only shards optimizers for distributed jobseach rank distributes parameters according to
+ a given partitioning scheme (could be updated), and owns the update of a given shard only
+the .step() is called on each rank as expected, the fact that the optimizer actually works on
+a shard of the model is not visible from the outside when the update is completed,
+each rank broadcasts the updated model shard to all the other ranks
+This can be used with DDP,
+although some communications are wasted in that case (gradients are all-reduced to all ranks).
+This implementation was initially developed in Fairscale,
+and can also be used with an optimized DDP which only reduces to the relevant ranks.
+More context on ZeRO and PyTorch can be found in this RFC
+
+The API with respect to loading and saving the state is a known pain point and should probably be discussed an updated.
+Other possible follow ups include integrating more closely to a modularized DDP,
+making the checkpoints partition-agnostic,
+exposing a gradient clipping option and making sure that mixed precision states are properly handled.
+
+original authors include @msbaines, @min-xu-ai and myself(blefaudeux )
+
+1.2 解析
+因此，我们可以知道如下信息：
+
+    Zero Redundacy Optimizer 的思想来源于微软的ZeRO。
+
+    Fairscale 实现了 ZeRO 的三个阶段的算法，Fairscale 是 Facebook AI Research (FAIR) 开源的项目，
+    个人理解为是Facebook 大规模深度学习分布式训练的一个试验田，如果某个模块发展成熟，就会合并到 PyTorch 之中。
+
+    OSS 是Fairscale实现的 ZeRO-1，其实现了优化器状态分片。
+
+    PyTorch 就是基于 FairScale 的 OSS 实现了 ZeroRedundancyOptimizer。
+
+我们有必要具体看一下。
+
+0x02 背景知识
+2.1 ZeRO
+ZeRO（零冗余优化器，Zero Redundacy Optimizer）是微软开源的DeepSpeed（一种优化大规模训练的框架）的一部分。
+ZeRO 是一种深度学习模型的内存优化方法，其寻求模型并行和数据并行的一个中间点，以最大化模型的可扩展性。
+
+ZeRO的优化涉及了深度学习模型内存使用的多个方面，包括激活内存、碎片内存和模型状态内存。
+
+    模型状态内存（Model State Memory）：
+        深度学习模型的状态可归为：优化器状态、梯度和参数这三个基本过程。
+
+    激活内存（Activation Memory）：
+        在优化了模型状态内存之后，人们发现激活函数也会导致瓶颈。激活函数计算位于前向传播之中，用于支持后向传播。
+
+    碎片内存（Fragmented Memory）：
+        深度学习模型的低效有时是由于内存碎片所导致的。在模型之中，每个张量的生命周期不同，由于不同张量寿命的变化而会导致一些内存碎片。
+        由于这些碎片的存在，会导致即使有足够的可用内存，也会因为缺少连续内存而使得内存分配失败。
+        ZeRO 根据张量的不同寿命主动管理内存，防止内存碎片。
+
+比如优化可以参见下图：
+    08.png
+图片来源 https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/。
+
+2.2 Fairscale 的 ZeRO 实现
+我们接下来看看 Fairscale 的使用指南。
+    09.png
+这其实是分布式/大规模机器学习方案的一个梳理，从中可以看到，
+其依据 ZeRO <https://arxiv.org/pdf/1910.02054.pdf>实现了三种不同的算法，分别对应了 ZeRO的三个阶段：
+
+    Optimizer State Sharding (OSS) 实现了 Optimizer 分片，优化了分区优化器状态的内存使用。
+
+    Sharded Data Parallel (SDP) 负责 Optimizer + Gradient State Sharding。
+
+    Fully Sharded Data Parallel (FSDP) 实现了 Optimizer + Gradient + Horizontal Model Sharding。
+
+2.3 Optimizer State Sharding (OSS)
+因为OSS是ZeroRedundancyOptimizer的源头，所以我们先看看其思路。OSS实现了与优化器内存相关的优化。
+像Adam这样的优化器通常需要保持动量、方差。
+即便可以使用FP16精度的参数和梯度进行训练，参数和梯度也需要保存为FP32精度。
+当每个rank更新完整模型时，这意味着相当大一部分内存被优化器状态的冗余表示所占用。
+为了克服这种冗余，优化器状态分片需要将模型优化步骤划分在不同的rank之间，以便每个rank只负责更新模型的对应分片。
+这反过来又确保优化器状态在每个rank上小得多，并且它不包含跨rank的冗余信息。
+
+2.3.1 训练流程
+OSS 训练流程可以从DDP的执行流程做如下修改：
+
+    1 wrapped optimizer根据参数大小（而不是使用顺序）以贪心算法方式来对优化器状态进行分片。
+    这是为了确保每个rank具有几乎相同大小的优化器内存。
+
+    2 训练过程类似于PyTorch的分布式数据并行（DDP）的过程。在每个rank上先完成前向传播，然后是向后传播。
+    在后向传播过程中，使用allreduce同步梯度。
+
+    3 每个rank只更新它负责的优化器状态参数，然后丢弃其余的优化器参数。
+
+    4 更新后，将执行broadcast或allgather操作，以确保所有rank都收到最新更新的参数值。
+
+具体参见下图。
+    10.png
+
+2.3.2 最佳实践
+几条最佳实践如下：
+
+    OSS公开了一个broadcast_fp16 flag，您可能应该在多节点作业中使用它。在单节点实验中通常不需要这样做。
+
+    如果您的模型在大小方面极不平衡（例如，存在一个巨大的张量），那么这种方法将不会有很大帮助，而张量切分选项，
+    如 fairscale.nn.FullyShardedDataParallel 将更可取。
+
+    OSS与大多数DDP功能保持兼容。
+
+    OSS应该是DDP环境中的一个临时解决方案。
+
+2.3.3 性能说明
+以下是一些关于性能的说明。
+
+    在单个节点上，OSS应该总是比vanilla PyTorch快，内存节省会因使用的优化器而异。
+
+    当您使用具有附加状态的优化器（如Adam）时，OSS非常有用。
+
+    如果您使用的是SGD或任何内存占用有限的优化器，那么在使用多个节点时，由于上面流程之中步骤4中的额外通信，您可能会看到速度减慢。
+    在第2步的allreduce过程中，也有一些用于存储梯度的浪费内存，这些内存随后被丢弃。
+
+    当使用多个节点时，OSS也可以比vanilla PyTorch快或慢，
+    具体取决于所使用的优化器和可选标志（如上文提到的broadcast_fp16、梯度压缩、梯度累积）
+
+    如果您可以使用更大的batch size，最好是则采取更大的batch size并减少所涉及的rank数，
+    或者使用梯度累积，因为这样可以降低通信成本。
+
+我们接下来正式进入 ZeroRedundancyOptimizer。
+
+0x03 如何使用
+我们首先使用 https://pytorch.org/tutorials/recipes/zero_redundancy_optimizer.html 来看看如何使用 ZeroRedundancyOptimizer。
+
+3.1 背后思想
+ZeroRedundancyOptimizer的思想来自 DeepSpeed/ZeRO project 和 Marian ，
+这两个项目会跨分布式数据并行进程对优化器状态进行分片，以减少每个进程的内存占用。
+ZeRO的优化策略主要是通过对模型状态进行切分以优化显存占用，模型状态主要包括优化器状态，梯度和模型参数。
+
+ZeroRedundancyOptimizer 则实现了对优化器状态（optimizer states）的切分，优化器状态就是优化器运行所需要的参数和本地状态。
+例如，SGD需要和模型参数一样大小的动量，Adam优化器对于用每个参数保存了exp_avg 和 exp_avg_sq 状态。
+因此，Adam优化器的内存消耗至少是模型大小的两倍。所以，当模型较大时，优化器状态是不小的显存开销。
+
+在分布式数据并行入门教程（Getting Started With Distributed Data Parallel ）中，
+我们展示了如何使用DistributedDataParallel（DDP）来训练模型。
+在DDP中：
+
+    每个worker进程（rank，node或者device）都保留优化器的专用副本。
+
+    由于DDP已经在反向传播中用all-reduce同步了梯度，因此所有优化器副本在每次迭代中都将在相同的参数和梯度值上运行。
+
+    这些优化器用all-reduce后的gradients去更新模型参数，这就是DDP可以使各个模型副本（rank）保持相同参数状态的原因。
+
+根据这一观察结果，我们可以通过在DDP进程之间分割优化器状态来减少优化器内存占用。更具体地说，就是：
+
+    把优化器切分到不同worker之上，
+    每个worker上的优化器实例只保留其模型参数分片所对应的那部分（1/world_size）优化器状态，而不是为所有参数创建对应的参数状态。
+
+    优化器 step() 函数只负责更新其分片中的参数，
+    当worker完成参数更新之后，会将更新后的参数广播给所有其他对等DDP进程，以便所有模型副本仍处于相同的状态。
+
+3.2 如何使用
+ZeroRedundancyOptimizer可与torch.nn.parallel.DistributedDataParallel结合使用，以减少每个rank的内存峰值消耗。
+下面的代码演示了如何使用ZeroRedundancyOptimizer. 大部分代码类似于 Distributed Data Parallel notes中给出的简单DDP示例。
+主要区别在于example函数中的if else子句，这个语句包装了优化器构造，可以在ZeroRedundancyOptimizer和Adam 之间进行切换。
+我们只要使用 ZeroRedundancyOptimizer对常规的optimizer进行warp即可。
+
+...ex01.py
+
+
+3.3 小结
+经过上面的原理分析和使用说明，我们知道：
+ZeroRedundancyOptimizer类可以对任意一个optim.Optimizer 进行封装，并可以在组中的ranks之中分割自己的状态。
+每个rank中的本地优化器实例只负责更新大约 1 / world_size 的参数，因此只需要保持 1 / world_size 大小的优化器状态。
+所以我们下面分析的重点就是：
+    如何将优化器参数进行分区？
+    每个rank如何知道自己对应的参数？
+
+
+...
+
+
+0xFF 参考
+谈谈torch1.10中的ZeroRedundancyOptimizer和Join
+
+https://pytorch.org/tutorials/recipes/zero_redundancy_optimizer.html
+
+https://pytorch.org/docs/master/distributed.optim.html
+
+https://medium.com/swlh/inside-microsofts-new-frameworks-to-enable-large-scale-ai-953e9a977912
+
+https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/
+
+分类: 001_机器学习 , 006_深度学习 , 011_分布式机器学习
