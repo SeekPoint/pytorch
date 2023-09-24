@@ -760,7 +760,7 @@ void Reducer::copy_bucket_to_grad(
     在 GraphTask::exec_post_processing 之中会调用 finalize_backward。
     调用 wait 于其他 worker 同步。
     调用 copy_bucket_to_grad 从桶拷贝回autograd引擎对应的梯度。
-    
+
 因此，我们就知道了一个在反向传播过程之中，autograd 引擎如何与DDP交互，如何一边做反向计算，一边利用DDP归并梯度的完整过程。
 
                                                                              +
