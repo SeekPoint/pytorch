@@ -26,10 +26,55 @@ constexpr int kUnsetDivFactor = -1;
 
 } // namespace
 
+/*
+0x02 Reducer 初始化
+代码位于：torch/lib/c10d/reducer.h 和 torch/lib/c10d/reducer.cpp
+
+2.1 构造函数
+具体逻辑如下：
+    看看本模块是不是多设备模块，
+    具体是: 遍历张量，得到张量的设备，把设备插入到一个set结构之中，如果set内的设备多于一个，是多设备
+
+    如果 expect_sparse_gradients没有设置，就把expect_sparse_gradients_初始化为false。
+
+    调用 initialize_buckets 初始化 buckets 并尽可能按照逆序将 parameters 分配到 buckets 之中，
+    这样按桶通信就可以提高效率。后续在运行时候也可能再次重新初始化桶。
+
+    为每个 parameter 加上 grad_accumulator，它们在 backward 时负责梯度同步。
+
+        因为这些variables是autograd图的叶子张量，所以它们的grad_fn都被设置为 gradient accumulation function。
+
+        Reducer保存了指向这些functions的指针，这样Reducer就可以知道它们在autograd传播之中是否被使用，
+        如果没有使用，那么就把这些functions的梯度张量（grad tensors）设置为规约就绪状态。
+
+        遍历张量，为每个张量生成一个类型为VariableIndex的变量index。
+
+        得到Variable::AutogradMeta的grad_accumulator_，即用于累加叶子 Variable 的梯度累加器。
+
+        把reducer的autograd_hook函数添加进去每个grad_accumulator_之中，变量index是hook的参数。
+        这个 hook 挂在 autograd graph 之上，在 backward 时负责梯度同步。
+        grad_accumulator 执行完后，autograd_hook 就会运行。
+
+    gradAccToVariableMap_ 存了grad_accumulator & index 的对应关系（函数指针和参数张量的对应关系），
+    这样以后在 autograd graph 遍历寻找 unused parameters 就方便了。
+
+    初始化 backward_stats_。
+
+    调用 initialize_local_used_map 初始化各种 unused map。
+
+*/
+
 //其次，在 Reducer 构建函数之中，会把进程组配置给 Reducer 的成员变量 process_group_ 之上。
+
+// Note [Skip allreducing local_used_maps_dev]
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~
+// If find_unused_parameters_ is set to false, there is no need to allreduce
+// local_used_maps_dev_, because all parameters will be reduced anyway.
+// Therefore, we can avoid allocating memory for local_used_maps and
+// local_used_maps_dev_ if find_unused_parameters_ is false.
 Reducer::Reducer(
-    std::vector<std::vector<at::Tensor>> replicas,
-    std::vector<std::vector<size_t>> bucket_indices,
+    std::vector<std::vector<at::Tensor>> replicas, // 张量
+    std::vector<std::vector<size_t>> bucket_indices, // 桶信息
     c10::intrusive_ptr<c10d::ProcessGroup> process_group,
     std::vector<std::vector<bool>> expect_sparse_gradients,
     int64_t bucket_bytes_cap,
@@ -61,13 +106,14 @@ Reducer::Reducer(
   TORCH_CHECK(replicas_[0].size() >= 1, "Expected at least one parameter.");
 
   // Check whether the module is multi_device_module
+  // 看看本模块是不是多设备模块
   {
     std::set<int> unique_devices;
-    for (const auto& v : replicas_[0]) {
-      auto device_idx = int(v.device().index());
+    for (const auto& v : replicas_[0]) { // 遍历张量
+      auto device_idx = int(v.device().index()); // 得到张量的设备
       if (unique_devices.find(device_idx) == unique_devices.end()) {
-        unique_devices.insert(device_idx);
-        if (unique_devices.size() > 1) {
+        unique_devices.insert(device_idx); // 把设备插入到一个set结构之中
+        if (unique_devices.size() > 1) { // 如果set内的设备多于一个，是多设备
           is_multi_device_module_ = true;
           break;
         }
@@ -87,7 +133,7 @@ Reducer::Reducer(
   // This can be reinitialized later after capturing runtime information.
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    initialize_buckets(std::move(bucket_indices));
+    initialize_buckets(std::move(bucket_indices)); //初始化桶
   }
 
   // All variables are expected to have their `grad_fn` set to the gradient
@@ -100,24 +146,25 @@ Reducer::Reducer(
     grad_accumulators_.resize(replica_count);
 
     // 以下两个for循环会遍历所有的张量
-    for (size_t replica_index = 0; replica_index < replica_count;
+    for (size_t replica_index = 0; replica_index < replica_count; // 只有replicas_[0]有意义
          replica_index++) {
-      const auto variable_count = replicas_[replica_index].size();
-      grad_accumulators_[replica_index].resize(variable_count);
+      const auto variable_count = replicas_[replica_index].size(); //张量数目
+      grad_accumulators_[replica_index].resize(variable_count); // 给grad_accumulators_分配内存
       for (size_t variable_index = 0; variable_index < variable_count;
-           variable_index++) {
+           variable_index++) { // 遍历张量，variable_index 就是张量的index
            /*
 在 Reducer 的构造函数中，有如下代码用于autogrid_hook的设定，这是给每个 replica 上的每个张量设置了一个 hook。
 如果autograd hook 不知道此梯度对应哪个 bucket，就无法告诉 DDP，这个 bucket 整体ready了。
 
 如何找到桶？需要使用下面的 VariableLocator。
            */
-        auto& variable = replicas_[replica_index][variable_index];  // 生成了 VariableIndex
-        const auto index = VariableIndex(replica_index, variable_index);
+        auto& variable = replicas_[replica_index][variable_index];  // 生成了 VariableIndex  //得到具体的张量
+        const auto index = VariableIndex(replica_index, variable_index); //每个张量生成一个VariableIndex
 
         // The gradient accumulator function is lazily initialized once.
         // Therefore we can use its presence in the autograd graph as
         // evidence that the parameter has participated in an iteration.
+        // 得到Variable::AutogradMeta的grad_accumulator_，即，用于累加叶子 Variable 的梯度累加器
         auto grad_accumulator = // 得到一个张量的grad_accumulator
             torch::autograd::impl::grad_accumulator(variable);
 
@@ -126,6 +173,8 @@ Reducer::Reducer(
 #endif
         // Hook to execute after the gradient accumulator has executed.
         hooks_.emplace_back(
+            // 累加器添加hook,这个 hook 挂在 autograd graph 之上，在 backward 时负责梯度同步。
+            // grad_accumulator 执行完后，autograd_hook 就会运行
             grad_accumulator->add_post_hook(
                 torch::make_unique<torch::autograd::utils::LambdaPostHook>(
                     [=](const torch::autograd::variable_list& outputs,
@@ -141,7 +190,9 @@ Reducer::Reducer(
                         autograd_hook 最终调用到 mark_variable_ready_dense，
                         这里进而通过 variable_locators_ 来确定桶，然后进行后续操作。
                         */
-                      this->autograd_hook(index); // Hook的参数是 VariableIndex，目的是为了让 hook 可以顺利找到张量
+                      // 把reducer的autograd_hook函数添加进去
+                      // Hook的参数是 VariableIndex，目的是为了让 hook 可以顺利找到张量
+                      this->autograd_hook(index);
                       return outputs;
                     })),
             grad_accumulator);
@@ -153,6 +204,9 @@ Reducer::Reducer(
         // Note that the mapping of gradient accumulator to variable should be
         // one to one as we deduplicate shared parameters before constructing
         // Reducer.
+// gradAccToVariableMap_ 存了grad_accumulator & index 的对应关系（函数指针和参数张量的对应关系），
+// 这样以后在 autograd graph 遍历寻找 unused parameters 就方便了
+
 //        5.2.1 初始化
 //如何初始化？在 Reducer 构造函数中有如下，就是给每个需要求导的 Varaible 一个VariableIndex。
         if (find_unused_parameters_) {
@@ -193,13 +247,6 @@ Reducer::Reducer(
     initialize_local_used_map();
   }
 }
-
-// Note [Skip allreducing local_used_maps_dev]
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~
-// If find_unused_parameters_ is set to false, there is no need to allreduce
-// local_used_maps_dev_, because all parameters will be reduced anyway.
-// Therefore, we can avoid allocating memory for local_used_maps and
-// local_used_maps_dev_ if find_unused_parameters_ is false.
 
 /*
 5.7.3 comm_hook_
@@ -756,7 +803,7 @@ void Reducer::mark_variable_ready(VariableIndex index) {
   // will be broadcasted and initialized. Also we only need to dump tensors
   // and parameter indices of one replica.
   if (should_rebuild_buckets()) {
-    push_rebuilt_params(index);
+    push_rebuilt_params(index); // 插入列表
   }
 
   const auto replica_index = index.replica_index;
@@ -950,7 +997,82 @@ bucket_indices    +-------------------------------------------------------------
 
 4.2.2.1 初始化
 如何初始化？
+
+
+
+....
+
+
+2.2 初始化桶
+initialize_buckets方法用来初始化桶，具体逻辑是对于每一个桶，添加其模型副本，对于每一个模型副本，添加张量列表：
+
+    用分布式上下文设置 rpc_context_。
+
+        如果在DDP构造函数内调用initialize_bucket，则 rpc上下文指针（rpc context ptr）是否为null 无关紧要，因为grad不会发生变化。
+
+        如果在训练循环期间调用initialize_bucket，
+        例如在rebuild_bucket 内部，因为grad可能会发生改变并指向bucket_view，那么它需要检查rpc context ptr是否为null。
+
+        如果rpc context ptr是null，则改变 variable.grad()，否则，在rpc上下文中改变梯度。
+
+    清空buckets_ 和 variable_locators_。
+
+    重置variable_locators_的尺寸，这样每个variable都有一个bucket index。
+
+    利用如下得到所有桶的个数和每个桶中副本个数：
+    bucket_count = bucket_indices.size(); replica_count = replicas_.size();
+
+    从0开始递增到 bucket_count，逐一初始化 Bucket。
+
+        生成一个 Bucket bucket
+
+        如果bucket_indices[bucket_index].size() == 1，
+        说明这个桶期待一个single sparse gradient，则设置 bucket.expect_sparse_gradient = true。
+
+        从0开始递增到replica_count，逐一初始化 BucketReplica。
+
+            生成一个 BucketReplica replica
+
+            如果这个桶期待一个single sparse gradient，则
+
+                利用bucket_indices[bucket_index].front()取出向量第一个元素，设置为 variable_index。
+
+                利用 variable_index 得到副本之中对应的variable。
+
+                设置副本replica的变量列表，代码为replica.variables = {variable}，这个副本只包括一个variable。
+
+            否则说明是dense gradient，则
+
+                遍历桶的variable，即利用 replicas_[replica_index][variable_index] 得到variable。
+
+                设置variable的设备和数据类型
+
+                给副本设置其variables，代码为：replica.variables.push_back(variable)。
+
+                设置replica 的一些关于variable的元信息，这些元信息是flat contents相关的，
+                比如offsets存储了各个张量在flat bucket contents中的offset。
+
+                给relica.contents分配内存
+
+                利用 initialize_bucket_views(replica, replica.contents) 初始化 cotnents 和 views。
+
+                利用 bucket.replicas.push_back(std::move(replica)) 把这个 replica 加入到 bucket。
+
+        遍历桶中的variable，代码为 bucket_indices[bucket_index]。
+
+            设置 Reducer.variable_locators_，这样 Reducer 就知道如何在 bucket 之中确定一个varaible。
+            bucket_index 是buckets_列表的位置，表示 buckets_ 之上的一个bucket。
+            intra_bucket_index 是在 bucket replica 之中 vector 域的 variable index。
+
+        设置桶的变量，bucket.variable_indices = std::move(bucket_indices[bucket_index]);
+
+        利用 buckets_.push_back(std::move(bucket)) 把bucket这个桶加入到 Reducer之中。
+
+具体代码是：
+
+    void Reducer::initialize_buckets(.....
 */
+
 void Reducer::initialize_buckets(
     std::vector<std::vector<size_t>> bucket_indices) {
   // If initialize_buckets is called inside DDP constructor, then
@@ -982,8 +1104,9 @@ void Reducer::initialize_buckets(
   const auto bucket_count = bucket_indices.size();
   const auto replica_count = replicas_.size();
   buckets_.reserve(bucket_count);
-  for (size_t bucket_index = 0; bucket_index < bucket_count; bucket_index++) { // 遍历桶
-    Bucket bucket;
+  // 从0开始递增到bucket_count
+  for (size_t bucket_index = 0; bucket_index < bucket_count; bucket_index++) {
+    Bucket bucket; // 生成一个桶
 
     // TODO(@pietern): Validate indices.
     // Must be non-empty, unique, and unique across buckets.
@@ -992,6 +1115,7 @@ void Reducer::initialize_buckets(
 
     // Variables that expect sparse gradients must have their own bucket.
     if (bucket_indices[bucket_index].size() == 1) {
+      // 说明这个桶期待一个single sparse gradient
       const auto variable_index = bucket_indices[bucket_index].front();
       bucket.expect_sparse_gradient =  // 设置 bucket
           expect_sparse_gradients_[0][variable_index];
@@ -1004,17 +1128,18 @@ void Reducer::initialize_buckets(
       }
     }
 
-    // Iterate over model replicas.
+    // Iterate over model replicas. 从0开始递增到replica_count，遍历模型副本数目，为每一个模型副本都要做同样设置
     for (size_t replica_index = 0; replica_index < replica_count;
          replica_index++) {
-      BucketReplica replica;  // 设置replica
+      BucketReplica replica;  // 设置replica  // 生成一个副本
 
       if (bucket.expect_sparse_gradient) {
-        const auto variable_index = bucket_indices[bucket_index].front();
+        // 说明这个桶期待一个single sparse gradient
+        const auto variable_index = bucket_indices[bucket_index].front(); // 得到张量的index
         // 找到index对应的tensor
-        const auto& variable = replicas_[replica_index][variable_index];
+        const auto& variable = replicas_[replica_index][variable_index]; // 得到张量
         TORCH_INTERNAL_ASSERT(bucket_indices[bucket_index].size() == 1);
-        replica.variables = {variable};
+        replica.variables = {variable}; // 这个副本只包括一个variable
       } else {
         at::TensorOptions options;
         // The start index of the variable in the flattened tensor.
@@ -1029,7 +1154,7 @@ void Reducer::initialize_buckets(
         replica.sizes_vec.reserve(num_variables);
 
         // Iterate over bucket variables.
-        for (const auto variable_index : bucket_indices[bucket_index]) {
+        for (const auto variable_index : bucket_indices[bucket_index]) { //遍历桶中的variable
           TORCH_CHECK(
               variable_index < replicas_[replica_index].size(),
               "Out of range variable index specified.");
@@ -1051,7 +1176,9 @@ void Reducer::initialize_buckets(
                 "All parameters in a bucket must have the same dtype.");
           }
           const auto length = variable.numel();
-          replica.variables.push_back(variable);  // 插入张量
+	  // 插入张量
+	  replica.variables.push_back(variable); // 这里添加了一个新变量，所以最终能知道该桶中的变量数目
+          // 设置replica 的一些关于variable的元信息
           replica.offsets.push_back(offset);
           replica.lengths.push_back(length);
           replica.sizes_vec.push_back(variable.sizes());
@@ -1100,26 +1227,26 @@ void Reducer::initialize_buckets(
         // metadata.  Checking just once won't catch if someone messes with
         // param layouts over time, but not messing with params after DDP
         // construction is already a documented constraint.
-        initialize_bucket_views(replica, replica.contents);
+        initialize_bucket_views(replica, replica.contents); // 初始化cotents和views
       }
 
       // Add bucket replica to enclosing bucket.
-      bucket.replicas.push_back(std::move(replica));  //插入桶列表
+      bucket.replicas.push_back(std::move(replica));  //插入桶列表  // 桶的副本列表中添加一个新副本
     }
 
     // Map participating variables to this bucket.
     // This is identical across replicas so we only need to do this once.
     size_t intra_bucket_index = 0;
-    for (const auto variable_index : bucket_indices[bucket_index]) { // 遍历桶里面的张量，所有桶里每个张量index 都是唯一的
+    for (const auto variable_index : bucket_indices[bucket_index]) { // 遍历桶中的variable // 遍历桶里面的张量，所有桶里每个张量index 都是唯一的
       TORCH_CHECK(
           variable_index < variable_locators_.size(),
           "Out of range variable index specified.");
-      variable_locators_[variable_index] =
+      variable_locators_[variable_index] =  // 这样 Reducer 就知道如何在 bucket 之中确定一个varaible
           VariableLocator(bucket_index, intra_bucket_index++);  // intra_bucket_index 就是递加
     }
     bucket.variable_indices = std::move(bucket_indices[bucket_index]);
 
-    buckets_.push_back(std::move(bucket));//插入桶列表
+    buckets_.push_back(std::move(bucket));//插入桶列表  // 把桶插入Reducer
   }
 }
 /*
@@ -1216,6 +1343,12 @@ initialize_bucket_views 主要逻辑是：
 +------------------------------------------+
 
 另外，mark_variable_ready_sparse, mark_variable_ready_dense， finalize_backward 都有对 contents 赋值。
+
+.................
+
+2.3 初始化视图
+initialize_bucket_views 这里是设置 Replica 的contents 和 views。
+
 */
 // (see Note:  "Gradient Layout Contract" in initialize_buckets).
 void Reducer::initialize_bucket_views(
@@ -1225,22 +1358,22 @@ void Reducer::initialize_bucket_views(
     auto& v = replica.variables[i];
     const auto offset = replica.offsets[i];
     const auto length = replica.lengths[i];
-    if (v.is_non_overlapping_and_dense()) {
+    if (v.is_non_overlapping_and_dense()) { // Dense类型的张量
       // If the param's memory is dense, match its layout, anticipating
       // the autograd engine (AccumulateGrad) will also create gradients
       // matching its layout.
-      replica.bucket_views_in.push_back(  // dense类型
+      replica.bucket_views_in.push_back(  // dense类型  // replica.bucket_views_in里面都是视图
           contents.as_strided(v.sizes(), v.strides(), offset));
-    } else {
+    } else { // Sparse类型的张量
       // Fall back to a C-style contiguous view, again anticipating
       // AccumulateGrad will do the same when stashing grads for non-dense
       // params.
-      replica.bucket_views_in.push_back(  // sparse类型
+      replica.bucket_views_in.push_back(  // sparse类型 // replica.bucket_views_in里面都是视图
           contents.narrow(0, offset, length).view(v.sizes()));
     }
     // By default `bucket_views_out` and `bucket_views_in` are
     // essentially the same thing.
-    replica.bucket_views_out = replica.bucket_views_in;
+    replica.bucket_views_out = replica.bucket_views_in; // out也是视图
 
     // If gradient_as_bucket_view_ is set as true, then there are two cases to
     // handle: initialize_bucket_views could be called inside initialize_buckets
@@ -1263,7 +1396,7 @@ void Reducer::initialize_bucket_views(
         }
         // 梯度没有被修改，不需要回写
         // The grad is not modified and does not need to be written back.
-        return false;
+        return false; // 不需要回写，因为没有被修改
       });
     }
   }
@@ -1810,7 +1943,7 @@ bool Reducer::rebuild_buckets() {
   // After syncing up rebuilt bucket indices, initialize buckets for reducer.
   sync_bucket_indices(rebuilt_bucket_indices);
 
-  has_rebuilt_bucket_ = true;
+  has_rebuilt_bucket_ = true;  // 只重建一次
   rebuilt_params_.clear();
   rebuilt_param_indices_.clear();
 

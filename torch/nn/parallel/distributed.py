@@ -619,7 +619,9 @@ _sync_params_and_buffers 是依据 module的state_dict 来收集可以训练的�
         
         bucket_indices 举例如下：
         
-        关于 tensor indices，就是给所有的tensor一个index，从0开始递增，一直到 tensors.size()。假如模型的 parameters 一共有20个张量，则 tensor index 从 0 到 19，分成 6 个buckets，则在这6个buckets之中，每个 tensor index 都是唯一不重复的。
+        关于 tensor indices，就是给所有的tensor一个index，从0开始递增，一直到 tensors.size()。
+        假如模型的 parameters 一共有20个张量，则 tensor index 从 0 到 19，分成 6 个buckets，
+        则在这6个buckets之中，每个 tensor index 都是唯一不重复的。
         
         +-----------------------------------------------------------------------+
         |                                                                       |
@@ -640,7 +642,10 @@ _sync_params_and_buffers 是依据 module的state_dict 来收集可以训练的�
             
             class Reducer(__pybind11_builtins.pybind11_object):
                 def __init__(self, replicas, *args, **kwargs): 
-                    """ __init__(self: torch._C._distributed_c10d.Reducer, replicas: List[List[at::Tensor]], bucket_indices: List[List[int]], process_group: c10d::ProcessGroup, expect_sparse_gradients: List[List[bool]] = [], bucket_bytes_cap: int = 26214400, find_unused_parameters: bool = False, gradient_as_bucket_view: bool = False, param_to_name_mapping: Dict[int, str] = {}) -> None """
+                    """ __init__(self: torch._C._distributed_c10d.Reducer, replicas: List[List[at::Tensor]], 
+                    bucket_indices: List[List[int]], process_group: c10d::ProcessGroup, expect_sparse_gradients: List[List[bool]] = [], 
+                    bucket_bytes_cap: int = 26214400, find_unused_parameters: bool = False, gradient_as_bucket_view: 
+                    bool = False, param_to_name_mapping: Dict[int, str] = {}) -> None """
                     pass
         于是我们来到了 torch/lib/c10d/reducer.h 和 torch/lib/c10d/reducer.cpp。        
         '''
@@ -932,7 +937,9 @@ yknote以上信息是什么工具看到的？？
             # call _rebuild_buckets before the peak memory usage increases
             # during forward computation.
             # This should be called only once during whole training period.
-            if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+
+            # 在这里进行直接调用
+            if torch.is_grad_enabled() and self.reducer._rebuild_buckets(): # 设定
                 logging.info("Reducer buckets have been rebuilt in this iteration.")
 
             if self.require_forward_param_sync:
@@ -1278,6 +1285,7 @@ yknote以上信息是什么工具看到的？？
                         if is_last_joiner:
                             is_last_joiner = False
                         # It will rebuild buckets only once during training period
+                        # 这里进行调用。
                         self.reducer._rebuild_buckets()
                         # Schedule a corresponding broadcast if we are syncing module
                         # buffers in the forward pass.
@@ -1603,7 +1611,7 @@ yknote以上信息是什么工具看到的？？
                 .....
         """
         self.static_graph = True
-        self.reducer._set_static_graph()
+        self.reducer._set_static_graph()  # 调用 Reducer 进行配置
         self.logger._set_static_graph()
         if self.find_unused_parameters:
             warnings.warn(

@@ -77,6 +77,7 @@ inline bool operator==(const VariableIndex& lhs, const VariableIndex& rhs) {
 
 //0x02 Reducer 定义
 //Reducer提供了反向传播中梯度同步的核心实现，其定义相当复杂，我们甚至需要去掉一些不重要的成员变量以便展示：
+
 class Reducer {
  public:
   // The constructor takes a list of variables for every model replica.

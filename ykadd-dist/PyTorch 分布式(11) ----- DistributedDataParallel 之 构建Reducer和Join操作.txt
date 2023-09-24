@@ -1,0 +1,743 @@
+PyTorch 分布式(11) ----- DistributedDataParallel 之 构建Reducer和Join操作
+
+https://www.cnblogs.com/rossiXYZ/p/15584560.html
+
+0x01 引论
+yknote==重复！！
+
+....
+
+
+2.3.1 BucketReplica成员变量
+我们先回忆一下BucketReplica的几个成员变量。
+
+    at::Tensor contents ：
+        把桶的内容展平的结果，即Flattened (1 dimensional) 之后的结果。
+
+    std::vector<at::Tensor> bucket_views_in ：
+        提供了从输入角度在 contents 之中查看具体梯度的方法。
+
+    std::vector<at::Tensor> bucket_views_out ：
+        提供了从输入角度在 contents 之中查看具体梯度的方法。
+
+关于 std::vector<at::Tensor> bucket_views_in 和 std::vector<at::Tensor> bucket_views_out 的进一步说明：
+
+    这两个变量提供在 contents 之中操作具体梯度的方法，或者说，它们提供了视图（views），该视图可以操作contents 之中每个张量的梯度。
+    用户把这两个变量作为入口点来把每个梯度的数据从 content 之中移入和移出。
+
+    在 PyTorch 之中，视图是指创建一个方便查看的东西，
+    视图与原数据共享内存，它只是将原有的数据进行整理，直接显示其中部分内容或者进行重排序后再显示出来。
+
+也需要对几个 PyTorch 函数进行说明。
+
+    as_strided ：
+    依据现有tensor以及给定的步长来创建一个视图（类型仍然为tensor），
+    需要注意，这里的结果是视图，所以这个张量依然和原始张量共享内存。
+
+    narrow ：
+    返回一个新的张量，其是原来张量的缩小版，但是这个张量依然和原始张量共享内存。
+
+BucketReplica 逻辑具体如下图：
+
++------------------------------------------+
+| BucketReplica                            |
+|                                          |
+|       vector<Tensor> bucket_views_in +--------------------+
+|                                          |                |
+|                                          |                |
+|       vector<Tensor> bucket_views_out +--------------+    |
+|                                          |           |    |
+|                                          |           |    |
+|                                          |           v    v
+|                                          |     +-----+----+--------------------------+
+|       Tensor contents  +---------------------> |Flattened (Tensor1, Tensor2, Tensor3)|
+|                                          |     +-------------------------------------+
+|                                          |
+|                                          |
+|       vector<Tensor> variables  +------------>  [Tensor1,Tensor2,Tensor3]
+|                                          |
+|                                          |
+|                                          |
++------------------------------------------+
+
+2.3.2 调用
+如何调用？如果gradient_as_bucket_view_设置为true，则有两种情况需要处理：
+
+    rebuild_buckets 之中可以在initialize_bucket内调用initialize_bucket_view，
+    如果grad在上一次迭代中已经定义/计算过，则需要将旧的grad复制到新的bucket_view中，并让grad指向新的bucket_view，
+
+    在构造过程中，也可以在initialize_bucket中调用initialize_bucket_views。
+    在构造期间不会定义梯度，在这种情况下，不要让梯度指向bucket_view，因为对于全局未使用的参数，梯度应保持为未定义。
+
+2.4 初始化本地使用变量
+initialize_local_used_map此处是初始化 local_used_maps_，
+我们回忆一下论文内容，local_used_maps_ 就是用来查找全局未使用参数（Globally Unused Parameters）：
+
+全局未使用参数（Globally Unused Parameters）的梯度在向前和向后过程中应保持不变。
+检测未使用的参数需要全局信息，因为在一个DDP过程中，一个参数可能在一次操作中不存在，但可能在另一个过程的同一次迭代中参与训练。
+因此DDP在位图中维护本地未使用的参数信息，并启动额外的AllReduce以收集全局位图。
+由于位图比张量尺寸小得多，因此模型中的所有参数共享同一位图，而不是创建每桶位图（per-bucket bitmaps）。
+位图位于CPU上，以避免为每次更新启动专用CUDA内核。但是，某些ProcessGroup后端可能无法在CPU 张量上运行AllReduce。
+例如，ProcessGroupNCCL仅支持CUDA张量。此外，由于DDP应该与任何定制的ProcessGroup后端一起工作，它不能假设所有后端都支持CPU张量。
+为了解决这个问题，DDP在同一设备上维护另一个位图作为第一个模型参数，
+并调用非阻塞拷贝操作（non-blocking copy）将CPU位图移动到设备位图以进行集合通信。
+
+具体代码如下：
+
+void Reducer::initialize_local_used_map() {
+  const auto replica_count = replicas_.size();
+....
+
+初始化流程大致如下：
+
+                                    +
+                                    |
+                                    |
+                                    v
+                  rpc_context_ = ThreadLocalDistAutogradContext
+                                    +
+                                    |
+                                    |
+                                    v
+                  buckets_ & variable_locators_ (clear & resize)
+                                    +
+                                    |
+                                    |
+                                    v
++----------------------->  from 0 ~ bucket_count :  +--------------------------->
+|                                                                                +
+|                                                                                |
+|      +-------------------------------------------------------------------+     |
+|      | init Bucket          set bucket_indices                           |     |
+|      |                            +                                      |     |
+|      |                            |                                      |     |
+|      |                            |                                      |     |
+|      |                            v                                      |     |
+|      |   ^ +------------> from 0 ~ replica_count : +----------------->   |     |
+|      |   |                                                           |   |     |
+|      |   |  +---------------------------------------------------+    |   |     |
+|      |   |  | init BucketReplica                                |    |   |     |
+|      |   |  |                                                   |    |   |     |
+<----+ |   +--+                                                   | <--+   | <---+
+       |      |    bucket.replicas.push_back(std::move(replica))  |        |
+       |      |                                                   |        |
+       |      +----------------------+----------------------------+        |
+       |                             |                                     |
+       |                             |                                     |
+       |                             v                                     |
+       |             buckets_.push_back(std::move(bucket))                 |
+       |                             +                                     |
+       +-------------------------------------------------------------------+
+                                     |
+                                     v
+
+得到的 Reducer 大致如下，这里需要注意的是 ，BucketReplica 每个桶只有一个：
+
+            +----------------------------------------+                 +------------------+
+            |tensor index 4, tensor index 5, tensor 6| <------+        | index 2, index 3 |
+            +----------------------------------------+        |        +--------------+---+
+                                                              |                       ^
+                                                              |                       |
++---------------------------+   +---------------------------------------------------------+
+| Reducer                   |   | +----------------------------------+     +------------+ |
+|                           |   | |Bucket                     |      |     |Bucket    | | |
+|                           |   | |                           +      |     |          | | |
+| vector<Bucket> buckets_ +---> | | vector<size_t> variable_indices  |     | indices ++ | |
+|                           |   | |                                  |     |            | |
+|                           |   | |  vector<BucketReplica> replicas  | ... | replicas   | |
+|                           |   | |                         +        |     |   +        | |
+|                           |   | |                         |        |     |   |        | |
+|                           |   | +----------------------------------+     +------------+ |
+|                           |   |                           |                  |          |
++---------------------------+   +---------------------------------------------------------+
+                                                            |                  |
+                                                            |                  |
+                                                            v                  v
+                          +---------------------------------------+   +-------------------+
+                          |  +----------------------------------+ |   | +---------------+ |
+                          |  | BucketReplica                    | |   | | BucketReplica | |
+                          |  |                                  | |   | |               | |
+                          |  |                                  | |   | |               | |
+                          |  |  vector<Tensor> bucket_views_in  | |   | |   views_in    | |
+                          |  |                                  | |   | |               | |
+                          |  |  vector<Tensor> bucket_views_out | |   | |   views_out   | |
+                          |  |                                  | |   | |               | |
+                          |  |  Tensor contents                 | |   | |   contents    | |
+                          |  |                                  | |   | |               | |
+                          |  |  vector<Tensor> variables        | |   | |   variables   | |
+                          |  |                     +            | |   | |      +        | |
+                          |  +----------------------------------+ |   | +---------------+ |
+                          +---------------------------------------+   +-------------------+
+                                                   |                           |
+                                                   |                           |
+                                                   v                           v
+                                   +---------------+------------+    +---------+----------+
+                                   |Tensor 4, Tensor 5, Tensor 6|    | Tensor 2, Tensor 3 |
+                                   +----------------------------+    +--------------------+
+0x03 静态图
+3.1 缘由
+虽然 PyTorch 是动态图，但是用户可以明确地让DDP知道训练图是静态的，有如下情况时候可以设定：
+
+    1 已使用和未使用的参数集在整个训练循环中不变，在这种情况下，用户是否将find_unsued_parameters设置为true并不重要。
+
+    2 图形的训练方式在整个训练循环过程中不会改变（意味着不存在依赖于迭代的控制流）。当图被设置为静态时，DDP将支持以前不支持的case，比如：
+
+        1 可重入的反向传播。
+        2 多次activation checkpointing。
+        3 activation checkpointing 并且find_unused_parameters = true。
+        4 并不是所有的输出张量都用于损失计算。。
+        5在前向函数之外有一个模型参数。
+        6 当find_unsued_parameters=true时或者存在未使用的参数，可能会提高性能，因为DDP在每个迭代之内不会搜索网络来检查未使用的参数。
+
+3.2 使用
+_set_static_graph 可以配置静态图，此API应在DistributedDataParallel构造之后，并且在训练循环开始之前调用。并且，也应该以同样的方式对所有的rank 进行调用。例如：
+
+    ddp_model = DistributedDataParallel(model)
+    ddp_model._set_static_graph()
+    for i in range(n):
+
+_set_static_graph 代码为：
+
+    def _set_static_graph(self):
+        """
+        Users can explicitly let DDP know the trained graph is static,
+    ...
+
+3.2 Reducer
+Reducer 只有在第一次迭代之后才能生成静态图，因为毕竟PyTorch还是动态的，无论如何也得走一步动态生成。
+
+    void Reducer::set_static_graph() {
+      std::lock_guard<std::mutex> lock(mutex_);
+    ...
+
+
+0x04 重建桶
+4.1 为何要重建
+因为 PyTorch 是动态生成计算图，所以需要相应重建桶。
+但是只有设置了静态图 并且 第一次迭代之后才会重建，如果设置 find_unused_parameters_，就不重建。
+
+      // Returns true if we should rebuild buckets, else false. We only rebuild
+      // buckets once after the first iteration and never rebuild them if
+      // find_unused_parameters_.
+      inline bool should_rebuild_buckets() const {
+        return (static_graph_ || !find_unused_parameters_) && !has_rebuilt_bucket_;
+      }
+4.2 准备重建
+我们首先看看重建之前的一些准备。
+
+push_rebuilt_params 就是插入一个重建参数列表。
+
+    void Reducer::push_rebuilt_params(const VariableIndex& index) {
+      rebuilt_params_.push_back(
+          replicas_[index.replica_index][index.variable_index]);
+      rebuilt_param_indices_.push_back(index.variable_index);
+    }
+
+其次，push_rebuilt_params_for_all_indices 会遍历每个 replica，针对 replica 之中的每个 variable 进行设置。
+
+    void Reducer::push_rebuilt_params_for_all_indices() {
+      std::lock_guard<std::mutex> lock(mutex_);
+...
+
+4.3 重建
+我们接下来看看重建机制。
+
+DDP 根据张量在后向传播中接收梯度的时间，使用 rebuilt_params_ 和 rebuilt_param_indices_ 来重建存储桶。
+
+rebuild_buckets 函数进行广播通信调用，并且可以与下一个forward()调用重叠，因此它可以是异步的。
+
+    在find_unused_parameters=true情况下重建bucket 就是异步操作，
+    因为我们可以多次重建bucket，其中子图经过训练，参数索引顺序可能会更频繁地更改。
+
+    对于find_unused_parameters=false的情况，bucket只重建一次，性能成本可以忽略不计。
+    如果已重建存储桶， rebuild_buckets 则返回true。
+
+    bool Reducer::rebuild_buckets() {
+      // Ensure reduction for previous backwards pass is finished. If user's model
+    ....
+
+4.4 何时设定重建
+重建仅在以下情况进行设定：
+
+    1第一次重建存储桶
+
+    2static_graph_ is true 或 find_unused_parameters_ is false
+
+    3此反向传播过程需要运行allreduce。
+
+在这里，我们只需基于梯度到达顺序将张量及其参数索引转储到rebuilt_params_和 rebuilt_param_indices_。
+然后在finalize_backward() 结束时，将基于rebuilt_params_和 rebuilt_param_indices_重建存储桶，然后广播和初始化存储桶。
+
+此外，我们只需要转储一个副本的张量和参数索引。
+
+以 mark_variable_ready 为例，其中就会调用 push_rebuilt_params(index) 来插入列表。
+
+void Reducer::mark_variable_ready(VariableIndex index) {
+  ...
+
+4.5 直接调用
+    _rebuild_buckets 函数也可以直接调用，比如如下情况，就是在整个训练期间内在 forward 调用了一次。
+
+    def forward(self, *inputs, **kwargs):
+    ...
+
+再比如 Join 方法也可以直接调用进行重建。
+
+    @contextmanager
+    def join(
+    ...
+
+既然提到了 Join，我们接下来就看看这个概念。
+
+0x05 Join
+Join 是为了解决训练数据不均匀的问题，
+就是允许某些输入较少的worker（其已经完成Join操作）可以继续和那些尚未结束的worker继续执行集合通信，就是一个欺骗操作(Shadow)。
+
+5.1 缘起
+支撑DDP背后的是几个集合通信库的all-reduce操作，其完成了各个worker之间的梯度同步。
+而当训练数据在 ranks 之间的输入是不均匀（uneven）的，就会导致DDP会挂起。因为集合通信要求在进程组中的所有rank都参与，因此如果一个rank的输入少，其他ranks会hang或者报错（取决于后端），而且任何类在执行同步集合通信时，在每次迭代都会遇到这个问题。
+
+因此，DDP 给出了一个 "Join" API，Join是一个上下文管理器，在每个rank的训练循环之中使用。数据量少的 rank 会提前耗尽输入，这时它将给集合通信一个假象，从而会构建一个虚拟（dummy）的 all-reduce，以便在数据不足时候与其他 ranks 匹配。具体如何制造这个假象是由注册hook指定。
+
+其大致思路如下：
+
+                +----------------------------+
+                |             Data           |
+                |   +--------+   +--------+  |
+                |   |        |   | Empty  |  |
+                |   |        |   |        |  |
+                |   +-----+--+   +--------+  |
+                |         |                  |
+                |         |                  |
+                +----------------------------+
+                          |
+                          |
+        +------------+    |               +------------+
+        |            |    |               |            |
++---->  |    Model   |    |               |   Model    | <-----+
+|       |            |    |               |            |       |
+|       +------+-----+    |               +------+-----+       |
+|              |          |                      |             |
+|              |          |                      |             |
+|              v          |                      v             |
+|       +------+-----+    |             +--------+----------+  |
+|       |  Forward   +<---+             | _JoinHook         |  |
+|       |  (local)   |                  |                   |  |
+|       +------+-----+                  |                   |  |
+|              |                        |                   |  |
+|              |                        |                   |  |
+|              v                        | +---------------+ |  |
+|       +------+-----+                  | | main_hook     | |  |
+|       |  Backward  |                  | |               | |  |
+|       |  (local)   |                  | |               | |  |
+|       +------+-----+                  | |               | |  |
+|              |                        | |               | |  |
+|              |                        | |               | |  |
+|              v                        | |               | |  |
+|       +------+-----+                  | |               | |  |
+|       | All-Reduce |     Sync grads   | |   All-Reduce  | |  |
+|       |            | <--------------> | |   (Dummy)     | |  |
+|       +------+-----+                  | |               | |  |
+|              |                        | +---------------+ |  |
+|              |                        +-------------------+  |
+|              v                                 |             |
+|     +--------+-------+                         |             |
+|     | Update Weights |                         |             |
+|     |                |                         |             |
+|     +--------+-------+                         |             |
+|              |                                 |             |
+|              |                                 |             |
++--------------+                                 +-------------+
+5.2 使用
+5.2.1 DistributedDataParallel
+Join 可以和 DistributedDataParallel 一起使用，
+比如下面的例子之中，会启动两个worker，分别是 rank 0 和 rank 1，rank 0 会得到5个输入，rank 1会得到6个输入，这就是输入不均衡。
+
+如果没有使用 Join，则 rank 1 会在处理第6个输入时候死掉挂起，因为rank 0没有相关输入，所以rank 1只能等待。
+如果使用了 Join，则不会出现这种问题，可以顺利结束。
+...demo11-1.py
+
+5.2.2 ZeroRedundancyOptimizer
+该Join上下文不仅是和一个类合作，也可以和多个类一起，比如PyTorch 的ZeroRedundancyOptimizer。
+...demo11-2.py
+后续会对ZeroRedundancyOptimizer等机制也进行分析。
+
+5.3 原理
+在最新文档 https://pytorch.org/tutorials/advanced/generic_join.html 之中，PyTorch 给出了一定解释，我们翻译如下。
+
+为了更好的使用，我们将介绍Join类以及支持类Joinable和JoinHook。
+
+备注：这部分在 v1.10.0 版本代码之中。
+
+5.3.1 Joinable
+首先，与Join上下文管理器兼容的类必须继承抽象基类Joinable。特别的，Joinable必须实现：
+    join_hook(self, **kwargs) -> JoinHook
+这将返回 的JoinHook实例Joinable，用来确定加入的进程应如何影响由Joinable 执行的每次迭代集体通信。
+    join_device(self) -> torch.device
+这将返回Join上下文管理器用来执行集体通信的设备，例如torch.device("cuda:0")或 torch.device("cpu")。
+    join_process_group(self) -> ProcessGroup
+这将返回Join上下文管理器用于执行集体通信的进程组。
+概括一下，JoinHook负责具体行为，join_device 和 join_process_group 负责具体集合通信。
+
+需要注意的是，join_device和join_process_group是必需的属性，他们可以确保上下文管理器能够安排"加入"和"未加入"进程之间的集体通信。
+一种用法是使用 all-reduce 计算每次迭代中"未加入"进程的数量。
+另一种用法是实现 throw_on_early_termination=True所需的机制，我们将在下面解释。
+
+DistributedDataParallel和ZeroRedundancyOptimizer已经继承Joinable并实现了上面的方法，这就是为什么我们可以在前面的例子中直接使用它们。
+    class DistributedDataParallel(Module, Joinable):
+    class ZeroRedundancyOptimizer(Optimizer, Joinable):
+DDP 涉及到提供数据，所以继承Joinable可以理解，ZeroRedundancyOptimizer 为何也需要继承？
+这是因为 ZeroRedundancyOptimizer 可以和 DDP 一起合作，并且 ZeroRedundancyOptimizer 内部也有集合操作，所以需要被 Join 一起管理。
+
+Joinable类应该确保调用Joinable构造函数，因为它初始化了一个JoinConfig实例，上下文管理器在内部使用JoinConfig来确保正确性。
+JoinConfig将在每个Joinable的_join_config字段中保存。
+
+5.3.2JoinHook
+接下来，让我们分解一下JoinHook类。JoinHook提供了两个进入上下文管理器的入口点：
+    main_hook(self) -> None
+当存在尚未加入（Join）的 rank 时，每个加入（Join）的 rank 都会重复调用此钩子。
+它目的是在每次训练迭代（例如，在一次前向传递，反向传递和优化器步骤）之中，隐藏由Joinable所执行的集体通信，
+即已经Join的rank 如何与未Join的rank执行集合通信。
+    post_hook(self, is_last_joiner: bool) -> None
+一旦所有 ranks 都加入，这个钩子就会被调用。
+它传递了一个额外的 bool参数is_last_joiner，其表明此 rank 是否是最后加入的 rank 之一。
+该参数可能对同步有用。
+
+5.3.2.1 ZeroRedundancyOptimizer
+我们以 内置的 ZeroRedundancyOptimizer main hook 来给出一个钩子的具体例子：
+因为加入的 rank 仍然负责更新和同步其参数分片，所以 main hook 依然执行优化器步骤。
+
+    class _ZeROJoinHook(_JoinHook):
+        def __init__(self, zero):
+            assert isinstance(zero, ZeroRedundancyOptimizer), \
+                "ZeRO join hook requires passing in a ZeroRedundancyOptimizer " \
+                "instance as the state"
+            self.zero = zero
+            super().__init__()
+
+        def main_hook(self):
+            """
+            Performs an optimizer step, which updates the joined process's shard of
+            the parameters and broadcasts those parameters.
+            """
+            self.zero.step()
+
+step函数简略如下：
+
+    def step(
+        self,
+        closure: Optional[Callable[[], float]] = None,
+        **kwargs: Any,
+    ) -> Optional[float]:
+        _Join.notify_join_context(self) # 这里会通知
+        # Check if the model trainability has changed
+        is_trainable_mask = self._get_is_trainable_mask()
+        if is_trainable_mask != self._is_trainable_mask:
+            self._build_param_buckets()
+            self._is_trainable_mask = is_trainable_mask
+
+        # Sync the exposed `param_groups` attributes to the local optimizer in
+        # case they have been updated
+        self._sync_param_groups(self.param_groups, self.optim.param_groups)
+
+        # Run the optimizer step on this shard only
+        if closure is not None:
+            loss = self.optim.step(closure=closure, **kwargs)  # type: ignore[call-arg]
+        else:
+            loss = self.optim.step(**kwargs)
+
+        # Sync all of the updated parameter shards across the ranks
+        self._sync_parameters()
+
+        # Sync any updated attributes in the local optimizer to the exposed
+        # `param_groups`
+        self._sync_param_groups(self.optim.param_groups, self.param_groups)
+
+        return loss
+
+再来看看DistributedDataParallel：
+
+    main_hook 依然会做相关的一系列操作来欺骗其他rank。
+    post-hook 会从最后加入的rank之一来广播最终更新的模型，以确保模型在所有rank中都是相同的。
+
+class _DDPJoinHook(_JoinHook):
+    def __init__(self, ddp, divide_by_initial_world_size):
+        """
+        Sets config variables for internal usage.
+        """
+        ddp.logger._set_uneven_input_join()
+        self.ddp = ddp
+        self.ddp._divide_by_initial_world_size = divide_by_initial_world_size
+        super().__init__()
+
+    def main_hook(self):
+        """
+        Shadows the DDP collective communication operations in the forward and
+        backward passes.
+        """
+        ddp = self.ddp
+        # Buckets are rebuilt only once during a training period
+        ddp.reducer._rebuild_buckets()
+
+        # Schedule a broadcast if we are syncing module buffers in the
+        # forward pass
+        ddp._check_and_sync_module_buffers()
+
+        # Check if need to sync in the backward pass
+        work = ddp._check_global_requires_backward_grad_sync(is_joined_rank=True)
+        work.wait()
+        should_sync_backwards = work.result()[0].item() != 0
+        # Forward parameter sync is disabled in the next iteration if we
+        # are skipping gradient sync this iteration, so set
+        # `require_forward_param_sync` accordingly
+        ddp.require_forward_param_sync = should_sync_backwards
+        if not should_sync_backwards:
+            return
+
+        # Schedule one allreduce per gradient bucket to match the backward
+        # pass allreduce
+        ddp._match_all_reduce_for_bwd_pass()
+
+        # Check if we need to allreduce locally unused parameters
+        if ddp.find_unused_parameters:
+            ddp._match_unused_params_allreduce()
+
+        # Rebuilt parameters are pushed only once during a training period
+        ddp.reducer._push_all_rebuilt_params()
+
+    def post_hook(self, is_last_joiner: bool):
+        """
+        Syncs the final model to ensure that the model is the same across all
+        processes.
+        """
+        self.ddp._sync_final_model(is_last_joiner)
+
+_sync_final_model 这里会广播最新的模型。
+
+    # When running in join model, agrees upon a common rank and broadcast model
+    # parameters to all other ranks.
+    def _sync_final_model(self, is_last_joiner):
+        # Agree upon the process that will be the authoritative model copy.
+        # The current rank is a candidate for being the authoritative copy if
+        # is_last_joiner=True. We break ties via picking the larger rank.
+        self._authoritative_rank = self._find_common_rank(
+            self._distributed_rank, is_last_joiner
+        )
+        self._sync_params_and_buffers(authoritative_rank=self._authoritative_rank)
+
+5.3.3 Join
+最后，让我们看看这些基础类是如何适应Join类本身的。
+    __init__(self, joinables: List[Joinable], enable: bool = True, throw_on_early_termination: bool = False)
+正如我们在前面的例子中看到的，构造函数接收一个参与训练循环的Joinable列表 。这些应该是在每次迭代中执行集体通信的类。
+
+enable是bool类型，如果您知道不会有不均匀的输入，则可以设置为 False，
+在这种情况下，上下文管理器变得类似于contextlib.nullcontext().
+这也可能会在参与Joinable列表之中禁用join-related计算。
+
+throw_on_early_termination是bool类型，其可以设置为True，以便让每个等级在检测到不均匀输入时引发异常。
+这对于不符合上下文管理器要求的情况很有用，这通常是当来自不同类的集体通信可以任意交错（interleaved）时，
+例如DistributedDataParallel与具有SyncBatchNorm层的模型一起使用时 。
+在这种情况下，应将此参数设置为 True以便应用程序逻辑可以捕获异常并确定如何继续。
+
+    核心逻辑出现在该__exit__()方法中，该方法在存在未加入的 rank 时会进行循环调用每个 Joinable的主钩子，
+    然后一旦所有rank加入，就调用它们的 post 钩子。主钩子和后钩子都按照Joinables 传入的顺序进行迭代。
+
+    上下文管理器需要来自未加入进程的心跳。因此，每个Joinable类都应该在每次迭代的集体通信之前调用Join.notify_join_context() 。
+    上下文管理器将确保只有第一个传入的Joinable实际发送心跳。
+
+5.4 例子
+我们通过一个例子来具体看看。
+下面代码之中，每个rank会打印（1）在Join之前看到的所有rank的输入数量，以及（2）所有rank的输入总数。
+
+    import os
+    import torch
+    import torch.distributed as dist
+    import torch.multiprocessing as mp
+    from torch.distributed.algorithms.join import Join, Joinable, JoinHook
+
+    BACKEND = "nccl"
+    WORLD_SIZE = 2
+    NUM_INPUTS = 5
+
+    class CounterJoinHook(JoinHook):
+        r"""
+        Join hook for :class:`Counter`.
+
+        Arguments:
+            counter (Counter): the :class:`Counter` object using this hook.
+            sync_max_count (bool): whether to sync the max count once all ranks
+                join.
+        """
+        def __init__(
+            self,
+            counter,
+            sync_max_count
+        ):
+            self.counter = counter
+            self.sync_max_count = sync_max_count
+
+        def main_hook(self):
+            r"""
+            Shadows the counter's all-reduce by all-reducing a dim-1 zero tensor.
+            """
+            t = torch.zeros(1, device=self.counter.device)
+            dist.all_reduce(t)
+
+        def post_hook(self, is_last_joiner: bool):
+            r"""
+            Synchronizes the max count across all :class:`Counter` s if
+            ``sync_max_count=True``.
+            """
+            if not self.sync_max_count:
+                return
+            rank = dist.get_rank(self.counter.process_group)
+            common_rank = self.counter.find_common_rank(rank, is_last_joiner)
+            if rank == common_rank:
+                self.counter.max_count = self.counter.count.detach().clone()
+            dist.broadcast(self.counter.max_count, src=common_rank)
+
+    class Counter(Joinable):
+        r"""
+        Example :class:`Joinable` that counts the number of training iterations
+        that it participates in.
+        """
+        def __init__(self, device, process_group):
+            super(Counter, self).__init__()
+            self.device = device
+            self.process_group = process_group
+            self.count = torch.tensor([0], device=device).float()
+            self.max_count = torch.tensor([0], device=device).float()
+
+        def __call__(self):
+            r"""
+            Counts the number of inputs processed on this iteration by all ranks
+            by all-reducing a dim-1 one tensor; increments its own internal count.
+            """
+            Join.notify_join_context(self)
+            t = torch.ones(1, device=self.device).float()
+            dist.all_reduce(t)
+            self.count += t
+
+        def join_hook(self, **kwargs) -> JoinHook:
+            r"""
+            Return a join hook that shadows the all-reduce in :meth:`__call__`.
+
+            This join hook supports the following keyword arguments:
+                sync_max_count (bool, optional): whether to synchronize the maximum
+                    count across all ranks once all ranks join; default is ``False``.
+            """
+            sync_max_count = kwargs.get("sync_max_count", False)
+            return CounterJoinHook(self, sync_max_count)
+
+        @property
+        def join_device(self) -> torch.device:
+            return self.device
+
+        @property
+        def join_process_group(self):
+            return self.process_group
+
+        # 确定最后join的rank，由于后加入的rank可能不止一个，所以选择rank最大的rank来同步
+        def find_common_rank(self, rank, to_consider):
+            r"""
+            Returns the max rank of the ones to consider over the process group.
+            """
+            common_rank = torch.tensor([rank if to_consider else -1], device=self.device)
+            dist.all_reduce(common_rank, op=dist.ReduceOp.MAX, group=self.process_group)
+            common_rank = common_rank.item()
+            return common_rank
+
+    def worker(rank):
+        assert torch.cuda.device_count() >= WORLD_SIZE
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = '29500'
+        dist.init_process_group(BACKEND, rank=rank, world_size=WORLD_SIZE)
+
+        counter = Counter(torch.device(f"cuda:{rank}"), dist.group.WORLD)
+        inputs = [torch.tensor([1]).float() for _ in range(NUM_INPUTS + rank)]
+
+        with Join([counter], sync_max_count=True):
+            for _ in inputs:
+                counter()
+
+        print(f"{int(counter.count.item())} inputs processed before rank {rank} joined!")
+        print(f"{int(counter.max_count.item())} inputs processed across all ranks!")
+
+    def main():
+        mp.spawn(worker, nprocs=WORLD_SIZE, join=True)
+
+    if __name__ == "__main__":
+        main()
+
+由于rank 0看到5个输入，rank 1看到6个，因此产生输出：
+
+    10 inputs processed before rank 0 joined!
+    11 inputs processed across all ranks!
+    11 inputs processed before rank 1 joined!
+    11 inputs processed across all ranks!
+需要强调的一些要点：
+
+    Counter实例在每次迭代中执行一个all reduce操作，因此：
+
+        对于已经Join的rank，其 main hook 也执行单个all reduce来对整体通信进行蒙骗操作（ shadow it），
+        注意这个 all-reduce是调用一个为0的tensor，所以对整体结果不影响。
+
+        其他未 Join 的 rank 会以为这依然是一个正确的满员的集合操作。
+
+        这样就处理了不均匀输入。
+
+    Counter类在其 __call__()方法的开头调用 Join.notify_join_context() ，
+    因为这是每次集合操作（all-reduce）的地方，
+    需要在这里通知上下文管理器，本示例还没有Join（已经结束的rank不会调用到这里）。
+
+    'is_last_joiner'参数用于确定post-hooks中的广播源。
+
+    我们将 sync_max_count 关键字参数传递给上下文管理器，上下文管理器会将其转发给'Counter'的join hook。
+    
+    post-hooks之中，会对 self.counter.max_count 进行广播。
+
+0xFF 参考
+pytorch分布式系列3——分布式训练时，torch.utils.data.distributed.DistributedSampler做了什么？
+
+pytorch分布式系列1——搞清torch.distributed.launch相关的环境变量
+
+pytorch分布式系列2——DistributedDataParallel是如何做同步的？
+
+pytorch(分布式)数据并行个人实践总结——DataParallel/DistributedDataParallel
+
+Pytorch的nn.DataParallel
+
+https://discuss.pytorch.org/t/dataparallel-imbalanced-memory-usage/22551/20
+
+https://pytorch.org/docs/stable/distributed.html
+
+PyTorch 源码解读之分布式训练了解一下？
+
+实操教程｜PyTorch AutoGrad C++层实现
+
+PYTORCH 自动微分（一）
+
+PyTorch如何加速数据并行训练？分布式秘籍大揭秘
+
+pytorch分布式训练（二init_process_group）
+
+https://pytorch.org/tutorials/intermediate/ddp_tutorial.html
+
+https://pytorch.org/docs/master/notes/ddp.html
+
+https://pytorch.org/tutorials/intermediate/dist_tuto.html
+
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+
+Pytorch模型中的parameter与buffer
+
+【PyTorch开发者日 2020】PyTorch分布式数据并行（DDP）
+
+[中文字幕] 深入理解 PyTorch 中的 Hook 机制
+
+[中文字幕] 深入解读 Pytorch AutoGrad
+
+DISTRIBUTED TRAINING WITH UNEVEN INPUTS USING THE JOIN CONTEXT MANAGER
+
+谈谈torch1.10中的ZeroRedundancyOptimizer和Join
+
