@@ -145,25 +145,30 @@ Reducer::Reducer(
     const auto replica_count = replicas_.size();
     grad_accumulators_.resize(replica_count);
 
-    // 以下两个for循环会遍历所有的张量
+    // 以下两个for循环会遍历所有的张量  // 遍历replica
     for (size_t replica_index = 0; replica_index < replica_count; // 只有replicas_[0]有意义
          replica_index++) {
       const auto variable_count = replicas_[replica_index].size(); //张量数目
       grad_accumulators_[replica_index].resize(variable_count); // 给grad_accumulators_分配内存
+      // 遍历张量
       for (size_t variable_index = 0; variable_index < variable_count;
            variable_index++) { // 遍历张量，variable_index 就是张量的index
            /*
-在 Reducer 的构造函数中，有如下代码用于autogrid_hook的设定，这是给每个 replica 上的每个张量设置了一个 hook。
-如果autograd hook 不知道此梯度对应哪个 bucket，就无法告诉 DDP，这个 bucket 整体ready了。
+            在 Reducer 的构造函数中，有如下代码用于autogrid_hook的设定，
+            这是给每个 replica 上的每个张量设置了一个 hook。
+            如果autograd hook 不知道此梯度对应哪个 bucket，就无法告诉 DDP，这个 bucket 整体ready了。
 
-如何找到桶？需要使用下面的 VariableLocator。
+            如何找到桶？需要使用下面的 VariableLocator。
            */
+        //得到具体的张量
         auto& variable = replicas_[replica_index][variable_index];  // 生成了 VariableIndex  //得到具体的张量
+        //每个张量一个index
         const auto index = VariableIndex(replica_index, variable_index); //每个张量生成一个VariableIndex
 
         // The gradient accumulator function is lazily initialized once.
         // Therefore we can use its presence in the autograd graph as
         // evidence that the parameter has participated in an iteration.
+
         // 得到Variable::AutogradMeta的grad_accumulator_，即，用于累加叶子 Variable 的梯度累加器
         auto grad_accumulator = // 得到一个张量的grad_accumulator
             torch::autograd::impl::grad_accumulator(variable);
@@ -190,7 +195,9 @@ Reducer::Reducer(
                         autograd_hook 最终调用到 mark_variable_ready_dense，
                         这里进而通过 variable_locators_ 来确定桶，然后进行后续操作。
                         */
+
                       // 把reducer的autograd_hook函数添加进去
+
                       // Hook的参数是 VariableIndex，目的是为了让 hook 可以顺利找到张量
                       this->autograd_hook(index);
                       return outputs;
@@ -385,7 +392,7 @@ void Reducer::copy_grad_to_bucket(
     // Divides while copying into the bucket view.
     at::mul_out(bucket_view, grad, wrapped);
   } else {
-    bucket_view.copy_(grad);
+    bucket_view.copy_(grad); // 通过bucket_view把梯度拷贝到 桶副本的contents
   }
 }
 
@@ -393,12 +400,12 @@ void Reducer::mark_variable_ready_dense(VariableIndex index) {
   const auto replica_index = index.replica_index;
   const auto variable_index = index.variable_index;
   const auto& bucket_index = variable_locators_[variable_index];  // 找到张量对应的桶index
-  auto& bucket = buckets_[bucket_index.bucket_index];  // 找到桶
-  auto& replica = bucket.replicas[replica_index];  // 再通过桶找到对应的 replica
-  auto& variable = replica.variables[bucket_index.intra_bucket_index];   // 找到了张量
-  const auto offset = replica.offsets[bucket_index.intra_bucket_index];  // 找到了张量信息
-  const auto length = replica.lengths[bucket_index.intra_bucket_index];
-  auto& bucket_view = replica.bucket_views_in[bucket_index.intra_bucket_index];
+  auto& bucket = buckets_[bucket_index.bucket_index];  // 找到桶  // 哪个桶
+  auto& replica = bucket.replicas[replica_index];  // 再通过桶找到对应的 replica  // 桶的哪个副本
+  auto& variable = replica.variables[bucket_index.intra_bucket_index];   // 找到了张量  // 得到副本中的variable
+  const auto offset = replica.offsets[bucket_index.intra_bucket_index];  // 找到了张量信息  // variable的offset
+  const auto length = replica.lengths[bucket_index.intra_bucket_index];  // variable的size
+  auto& bucket_view = replica.bucket_views_in[bucket_index.intra_bucket_index]; //插入view
 
 // 接下来就可以继续处理了
 
@@ -407,6 +414,7 @@ void Reducer::mark_variable_ready_dense(VariableIndex index) {
   // as part of the current backwards pass, and zero the part
   // of the bucket it would otherwise hold.
   runGradCallbackForVariable(variable, [&](auto& grad) {
+    // 拿到张量对应的梯度 grad
     if (grad.defined()) {
       this->check_grad_layout(grad, bucket_view);
       // When gradient_as_bucket_view_ is false, or even when
@@ -417,10 +425,10 @@ void Reducer::mark_variable_ready_dense(VariableIndex index) {
       // to bucket_view. If grad has already been set as views of buckets in
       // previous iterations, no copy is needed.
       if (!grad.is_alias_of(bucket_view)) {
-        this->copy_grad_to_bucket(grad, bucket_view);
+        this->copy_grad_to_bucket(grad, bucket_view);  // 把梯度拷贝进入contents
         if (gradient_as_bucket_view_) {
           // Let grad point to bucket_view buffer.
-          grad = bucket_view;
+          grad = bucket_view; // 为了省内存，grad指向了bucket_view
           // The grad is modified and need to be written back.
           return true;
         }
@@ -431,7 +439,7 @@ void Reducer::mark_variable_ready_dense(VariableIndex index) {
         }
       }
     } else {
-      bucket_view.zero_();
+      bucket_view.zero_();  // 设置为0
     }
     // The grad is not modified and doesn't need to be written back.
     return false;
@@ -442,10 +450,9 @@ void Reducer::mark_variable_ready_sparse(VariableIndex index) {
   const auto replica_index = index.replica_index;
   const auto variable_index = index.variable_index;
   const auto& bucket_index = variable_locators_[variable_index];
-  auto& bucket = buckets_[bucket_index.bucket_index];
-  auto& replica = bucket.replicas[replica_index];
-  auto& variable = replica.variables[bucket_index.intra_bucket_index];
-
+  auto& bucket = buckets_[bucket_index.bucket_index]; // 哪个桶
+  auto& replica = bucket.replicas[replica_index]; // 桶的哪个副本
+  auto& variable = replica.variables[bucket_index.intra_bucket_index]; // 副本之中哪个variable
   runGradCallbackForVariable(variable, [&](auto& grad) {
     TORCH_CHECK(grad.defined(), "Expected sparse gradient to be defined.");
     TORCH_CHECK(
@@ -457,7 +464,7 @@ void Reducer::mark_variable_ready_sparse(VariableIndex index) {
     // Therefore, the `offsets` and `lengths` vectors in the bucket replica
     // struct are empty, and there is no pre-existing accumulation tensor.
     // Directly assign the sparse tensor to the `contents` field.
-    replica.contents = grad;
+    replica.contents = grad; //直接拷贝
     // See Note [DDP Communication Hook]
     if (comm_hook_ == nullptr) {
       replica.contents.div_(divFactor_);
@@ -622,15 +629,20 @@ void Reducer::autograd_hook(VariableIndex index) {
 
 // 在这里会记录，已经使用了。
   // See Note [Skip allreducing local_used_maps_dev]
+  // // 动态图&找到未用张量 或者 静态图第一次迭代
   if (dynamic_graph_find_unused() || static_graph_first_iteration()) {
     // Since it gets here, this param has been used for this iteration. We want
     // to mark it in local_used_maps_. During no_sync session, the same var can
     // be set multiple times, which is OK as does not affect correctness. As
     // long as it is used once during no_sync session, it is marked as used.
+    // 在 no_sync 的session之中，只要参数被用过一次，就会被标记为用过
+    // local_used_maps_ 记录本地使用过的CPU张量
+    // 动态图每次迭代都可能不一致，桶和变量可能每次都不一样，所以local_used_maps_需要每次迭代都更新
+    // 静态图每次迭代都一样，只要第一次迭代时候，在回调之中设定即可
     local_used_maps_[index.replica_index][index.variable_index] = 1;
   }
 
-  if (static_graph_first_iteration()) {
+  if (static_graph_first_iteration()) { // 静态图第一次迭代
     numGradHooksTriggeredMap_[index] += 1; // 静态图第一次迭代时候，这里会增加1
     return; // 然后直接返回，注意！
   }
@@ -642,27 +654,29 @@ void Reducer::autograd_hook(VariableIndex index) {
   // in the `unused_parameters_` vector.
   if (!has_marked_unused_parameters_) {
     has_marked_unused_parameters_ = true;
-    for (const auto& unused_index : unused_parameters_) {
-      mark_variable_ready(unused_index);
+    for (const auto& unused_index : unused_parameters_) { // 遍历没有用到的variable
+      mark_variable_ready(unused_index); //未用到的当然就标示为ready了
     }
   }
 
   // If it is static graph, after 1st iteration, check a avariable
   // is ready for communication based on numGradHooksTriggeredMap_.
-  if (static_graph_after_first_iteration()) {
+  if (static_graph_after_first_iteration()) { // 第二次迭代之后确实用到了
     TORCH_CHECK(
         numGradHooksTriggeredMapPerIteration_[index] > 0,
         "Your training graph has changed in this iteration, ",
         "e.g., one parameter is unused in first iteration, but ",
         "then got used in the second iteration. this is not ",
         "compatible with static_graph set to True.");
+    // 为何从第二次迭代开始处理？因为第一次迭代，当进入到这里时候，梯度还没有准备好（就是没有经过Reducer处理过，只有经过Reducer处理过之后，才算处理好）
+    // 静态图时，numGradHooksTriggeredMapPerIteration_ = numGradHooksTriggeredMap_;
     if (--numGradHooksTriggeredMapPerIteration_[index] == 0) {
       // Finally mark variable for which this function was originally called.
-      mark_variable_ready(index);
+      mark_variable_ready(index); // 从1变成0，就是就绪了，所以设定variable为就绪
     }
   } else {
     // Finally mark variable for which this function was originally called.
-    mark_variable_ready(index);
+    mark_variable_ready(index);   // 动态图每次都要设定variable为就绪
   }
 }
 
@@ -803,11 +817,12 @@ void Reducer::mark_variable_ready(VariableIndex index) {
   // will be broadcasted and initialized. Also we only need to dump tensors
   // and parameter indices of one replica.
   if (should_rebuild_buckets()) {
-    push_rebuilt_params(index); // 插入列表
+    push_rebuilt_params(index); // 插入列表  // 如果需要重建，就把index插入到需重建列表之中
   }
 
-  const auto replica_index = index.replica_index;
-  const auto variable_index = index.variable_index;
+  const auto replica_index = index.replica_index; // 找到副本index
+  const auto variable_index = index.variable_index; // 找到在副本中哪个位置
+
   TORCH_CHECK(replica_index < replicas_.size(), "Out of range replica index.");
   TORCH_CHECK(
       variable_index < variable_locators_.size(),
@@ -815,7 +830,7 @@ void Reducer::mark_variable_ready(VariableIndex index) {
 
   if (replica_index == 0) {
     checkAndRaiseMarkedTwiceError(variable_index);
-    perIterationReadyParams_.insert(variable_index);
+    perIterationReadyParams_.insert(variable_index); // 这个variable是被使用过的，记录下来
   }
   backward_stats_[replica_index][variable_index] =
       current_time_in_nanos() - cpu_timer_.backward_compute_start_time;
@@ -824,12 +839,11 @@ void Reducer::mark_variable_ready(VariableIndex index) {
   // or via an autograd hook), we require a call to the finalize function. If
   // this doesn't happen before the next iteration (or call to
   // `prepare_for_backwards`), we know something is wrong.
-  require_finalize_ = true;
+  require_finalize_ = true;   // 每当某个变量被标记成 ready，都要调用一下 finalize
 
-  const auto& bucket_index = variable_locators_[variable_index];
-  auto& bucket = buckets_[bucket_index.bucket_index];
-  auto& replica = bucket.replicas[replica_index];
-
+  const auto& bucket_index = variable_locators_[variable_index]; // 找到variable的index信息
+  auto& bucket = buckets_[bucket_index.bucket_index]; // 找到variable位于哪个桶
+  auto& replica = bucket.replicas[replica_index]; // 找到副本
 
   set_divide_factor();
 
@@ -846,24 +860,27 @@ void Reducer::mark_variable_ready(VariableIndex index) {
   // event.record();
 
   // Check if this was the final gradient for this bucket.
-  if (--replica.pending == 0) {
+  // 检查桶里的梯度是不是都ready，如果有没有pending，就是桶也ready了
+  if (--replica.pending == 0) { // 减去本模型副本pending数目，因为又一个张量ready了
     // Kick off reduction if all replicas for this bucket are ready.
-    if (--bucket.pending == 0) {
-      mark_bucket_ready(bucket_index.bucket_index);
+    if (--bucket.pending == 0) { // 如果本模型副本的pending为0，则说明桶对应的模型副本pending数目应该减一
+      mark_bucket_ready(bucket_index.bucket_index); // 那么就设置桶就绪
     }
   }
 
   // Run finalizer function and kick off reduction for local_used_maps once the
   // final bucket was marked ready.
-  if (next_bucket_ == buckets_.size()) {
+  if (next_bucket_ == buckets_.size()) { // 如果所有桶都ready
 
     if (dynamic_graph_find_unused()) {
-      all_reduce_local_used_map();
+      all_reduce_local_used_map();  // 对使用过的variable进行规约
     }
 
     // The autograd engine uses the default stream when running callbacks, so we
     // pass in the current CUDA stream in case it is not the default.
     const c10::Stream currentStream = get_current_stream();
+
+    // 这里会注册 finalize_backward 到 engine
     torch::autograd::Engine::get_default_engine().queue_callback([=] {
       std::lock_guard<std::mutex> lock(this->mutex_);
       // Run callback with the current stream
@@ -893,14 +910,18 @@ void Reducer::all_reduce_bucket(Bucket& bucket) {
     // these operations are implicitly sequenced, and we don't need to
     // do any extra synchronization here.
     //
+    // CUDA default stream 都按时序排好了
     tensors.push_back(replica.contents);
   }
   // See Note [DDP Communication Hook]
   // TODO(@sinannasir): merge `work` and `future_work`. Related to GH Issue
   // #41266.
   if (comm_hook_ == nullptr) {
+    // 如果没注册 comm_hook，直接 allreduce
     bucket.work = process_group_->allreduce(tensors);  // 这里会进行调用
   } else {
+    // 注册了 comm_hook 那就使用 hook 进行allreduce
+    // 需要注意的是，这个comm_hook 只是处理通信的底层hook，如果想在 reduce 前分别进行梯度裁剪，还是需要在 autograph 挂 hook
     GradBucket grad_bucket(
         next_bucket_,
          // 这里的注释指明了不支持 SPMD
@@ -927,14 +948,17 @@ void Reducer::mark_bucket_ready(size_t bucket_index) {
   // Keep going, until we either:
   // - have kicked off reduction for all buckets, or
   // - found a bucket that's not yet ready for reduction.
+  // 遍历桶，直到遇到下面两种情况：
+	// - 已经发起了对所有桶的规约
+	// - 发现一个桶其实没有就绪
   for (; next_bucket_ < buckets_.size() && buckets_[next_bucket_].pending == 0;
        next_bucket_++) {
-    num_buckets_ready_++;
+    num_buckets_ready_++; // 增加
     if (num_buckets_ready_ == 1 && should_collect_runtime_stats()) {
       record_backward_comm_start_time();
     }
     auto& bucket = buckets_[next_bucket_];
-    all_reduce_bucket(bucket);
+    all_reduce_bucket(bucket);  // 对于就绪的桶，进行规约
   }
 }
 /*
@@ -1405,23 +1429,23 @@ void Reducer::initialize_bucket_views(
 // (see Note:  "Gradient Layout Contract" in initialize_buckets).
 void Reducer::populate_bucket_views_out(
     Reducer::BucketReplica& replica,
-    at::Tensor& tensor) {
-  replica.bucket_views_out.clear();
-  for (size_t i = 0; i < replica.variables.size(); i++) {
-    const auto& v = replica.variables[i];
+    at::Tensor& tensor) { // 把tensor解析到 bucket_views_out 之中
+  replica.bucket_views_out.clear(); // 清空
+  for (size_t i = 0; i < replica.variables.size(); i++) { // 重新初始化 bucket_views_out
+    const auto& v = replica.variables[i]; // 遍历副本的张量
     const auto offset = replica.offsets[i];
     const auto length = replica.lengths[i];
     if (v.is_non_overlapping_and_dense()) {
       // If the param's memory is dense, match its layout, anticipating
       // the autograd engine (AccumulateGrad) will also create gradients
       // matching its layout.
-      replica.bucket_views_out.push_back(
+      replica.bucket_views_out.push_back( // 把tensor解析到 bucket_views_out 之中
           tensor.as_strided(v.sizes(), v.strides(), offset));
     } else {
       // Fall back to a C-style contiguous view, again anticipating
       // AccumulateGrad will do the same when stashing grads for non-dense
       // params.
-      replica.bucket_views_out.push_back(
+      replica.bucket_views_out.push_back( // 把tensor解析到 bucket_views_out 之中
           tensor.narrow(0, offset, length).view(v.sizes()));
     }
   }
@@ -1572,7 +1596,7 @@ void Reducer::copy_bucket_to_grad(
     Reducer::BucketReplica& replica,
     size_t intra_bucket_index,
     bool global_unused) {
-  const auto& bucket_view = replica.bucket_views_out[intra_bucket_index];
+  const auto& bucket_view = replica.bucket_views_out[intra_bucket_index];  // 拿到输出view
   runGradCallbackForVariable(variable, [&](auto& grad) {
     // If a parameter is globally unused, we keep its grad untouched.
     if (!global_unused) {
@@ -1582,7 +1606,7 @@ void Reducer::copy_bucket_to_grad(
         grad =
             torch::autograd::utils::clone_obey_contract(bucket_view, variable);
       } else {
-        grad.copy_(bucket_view);
+        grad.copy_(bucket_view);  // 从桶拷贝回梯度
       }
       // The grad is modified and needs to be written back.
       return true;
@@ -1671,7 +1695,7 @@ void Reducer::finalize_bucket_dense(Bucket& bucket) {
       }
 
       if (!gradient_as_bucket_view_) {
-        copy_bucket_to_grad(
+        copy_bucket_to_grad(  // 拷贝回 dist.context 去
             variable, replica, intra_bucket_index, global_unused);
       } else {
         const auto& bucket_view_out =
@@ -1682,7 +1706,7 @@ void Reducer::finalize_bucket_dense(Bucket& bucket) {
         // back to bucket_view_in that referring to replica.content tensor and
         // grad.
         if (!bucket_view_in.is_alias_of(bucket_view_out)) {
-          bucket_view_in.copy_(bucket_view_out);
+          bucket_view_in.copy_(bucket_view_out); // 从out拷贝回in view
         }
         runGradCallbackForVariable(variable, [&](auto& grad) {
           // If a parameter is globally unused, we keep its grad untouched.
@@ -1735,20 +1759,20 @@ void Reducer::finalize_backward() {
   divFactor_ = kUnsetDivFactor;
 
   // Wait for asynchronous reduction to complete and unflatten contents.
-  for (auto& bucket : buckets_) {
+  for (auto& bucket : buckets_) {  // 遍历桶
     // See Note [DDP Communication Hook]
     if (comm_hook_ == nullptr) {
       TORCH_INTERNAL_ASSERT(
           bucket.work,
           "Expected bucket.work not to be null. "
           "This may indicate that allreduce hooks were not properly installed.");
-      bucket.work->wait();
+      bucket.work->wait();  // 等待同步完成
     } else {
       TORCH_INTERNAL_ASSERT(
           bucket.future_work,
           "Expected bucket.future_work not to be null. "
           "This may indicate that communication hook was not properly installed.");
-      bucket.future_work->wait();
+      bucket.future_work->wait();  // 等待同步完成
 
       auto future_result =
           comm_hook_->parseHookResult(bucket.future_work->value());
@@ -1756,10 +1780,11 @@ void Reducer::finalize_backward() {
       for (size_t i = 0; i < future_result.size(); i++) {
         auto& replica = bucket.replicas[i];
         if (bucket.expect_sparse_gradient) {
-          replica.contents.copy_(future_result[i]);
+          replica.contents.copy_(future_result[i]);  // 从future结果拷贝回contents
         } else {
           // Reinitialize only `bucket_views_out` with the future_result by
           // following the same logic in `initialize_buckets`.
+          // 把 future_result[i] 解析到 bucket_views_out 之中
           populate_bucket_views_out(replica, future_result[i]);
         }
       }
@@ -1781,7 +1806,7 @@ void Reducer::finalize_backward() {
     // interfere, write to the device-side memory and clobber the content of
     // local_unused_maps_dev_.
     if (!local_used_maps_reduced_) {
-      local_used_work_->wait();
+      local_used_work_->wait();  // 等待 local_used_maps_dev 同步完成
     }
   }
 

@@ -202,7 +202,7 @@ namespace impl {
 //5.1.2 使用
 //grad_accumulator 返回的是 Node，也就是 AccumulateGrad，是一个Node类型，我们取出了检查校验代码。
   std::shared_ptr<Node> grad_accumulator(const Variable& self) {
-    auto autograd_meta = get_autograd_meta(self);
+    auto autograd_meta = get_autograd_meta(self); // 获取 autograd_meta
     if (!autograd_meta) {
       return nullptr;
     }
@@ -216,6 +216,7 @@ namespace impl {
 
     std::lock_guard<std::mutex> lock(autograd_meta->mutex_);
 
+// 获取autograd_meta->grad_accumulator_
     auto result = autograd_meta->grad_accumulator_.lock();
     if (result)
       return result;
@@ -223,7 +224,7 @@ namespace impl {
     c10::raw::intrusive_ptr::incref(self.unsafeGetTensorImpl());
     auto intrusive_from_this = c10::intrusive_ptr<at::TensorImpl>::reclaim(self.unsafeGetTensorImpl());
     result = std::make_shared<AccumulateGrad>(Variable(std::move(intrusive_from_this)));
-    autograd_meta->grad_accumulator_ = result;
+    autograd_meta->grad_accumulator_ = result; // 获取 autograd_meta->grad_accumulator_
     return result;
   }
 

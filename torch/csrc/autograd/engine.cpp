@@ -534,7 +534,7 @@ void GraphTask::exec_post_processing() {
   // NOLINTNEXTLINE(modernize-loop-convert)
   for (size_t i = 0; i < final_callbacks_.size(); ++i) {
     cb_lock.unlock();
-    final_callbacks_[i]();
+    final_callbacks_[i](); // 调用了callback
     cb_lock.lock();
   }
 

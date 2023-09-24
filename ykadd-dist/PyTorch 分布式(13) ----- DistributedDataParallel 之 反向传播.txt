@@ -1,0 +1,861 @@
+PyTorch 分布式(13) ----- DistributedDataParallel 之 反向传播
+https://www.cnblogs.com/rossiXYZ/p/15605597.html
+
+目录
+[源码解析] PyTorch 分布式(13) ----- DistributedDataParallel 之 反向传播
+0x00 摘要
+0x01 回顾
+1.1 前文回顾
+1.2 总体逻辑
+0x02 从Hook开始
+2.1 如何注册hook
+2.1.1 AutogradMeta
+2.1.2 Node
+2.1.3 AccumulateGrad
+2.2 构造函数
+2.2.1 grad_accumulator
+2.2.2 图示
+2.3 Hook 函数
+0x03 就绪
+3.1 变量ready
+3.1.1 设定就绪
+3.1.2 注册callback
+3.1.3 mark_variable_ready_sparse
+3.1.4 mark_variable_ready_dense
+3.2 桶ready
+3.2.1 all_reduce_bucket
+3.2.2 PythonCommHook
+3.2.3 GradBucket
+3.3 all_reduce_local_used_map
+3.3.1 定义
+3.3.2 同步
+3.4 finalize_backward
+4.6.1 populate_bucket_views_out
+4.6.1 finalize_bucket_dense
+4.6.3 copy_bucket_to_grad
+0xFF 参考
+
+0x00 摘要
+上文我们已经对Reduer的前向传播进行了分析，本文就接着来看看如何进行反向传播。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+
+[源码解析] PyTorch 分布式(4)------分布式应用基础概念
+
+[源码解析] PyTorch分布式(5) ------ DistributedDataParallel 总述&如何使用
+
+[源码解析] PyTorch分布式(6) ---DistributedDataParallel -- 初始化&store
+
+[源码解析] PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+
+[源码解析] PyTorch 分布式(8) -------- DistributedDataParallel之论文篇
+
+[源码解析] PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+
+[源码解析] PyTorch 分布式(10)------DistributedDataParallel 之 Reducer静态架构
+
+[源码解析] PyTorch 分布式(11) ----- DistributedDataParallel 之 构建Reducer和Join操作
+
+[源码解析] PyTorch 分布式(12) ----- DistributedDataParallel 之 前向传播
+
+0x01 回顾
+1.1 前文回顾
+前文我们已经给出了前向传播的逻辑，前向传播结束之后，我们得到了如下：
+
+    需要计算梯度的参数已经分桶。
+
+    桶已经重建完毕。
+
+    前向传播已经完成。
+
+    从指定的输出进行回溯，遍历autograd计算图来找到所有没有使用过的参数，并且一一标记为就绪 ready。
+
+这样，DDP做梯度归并的基础就有了，它知道哪些参数不需要autograd引擎操作就能直接归并（ready状态），哪些参数可以一起通信归并（分桶），
+后续的事情主动权就在 PyTorch autograd 引擎了，是引擎在一边做反向计算，一边进行跨进程梯度规约。
+
+1.2 总体逻辑
+我们再给出一个后向传播的总体策略如下：
+
+Backward Pass:
+
+    backward() 是在 loss 上直接调用，这是autograd engine 的工作，是 DDP 无法控制的，所以DDP采用了Hook来达到目的。
+
+        DDP 在构造时注册了 autograd hooks。
+
+        Autograd 引擎进行梯度计算。
+
+        当一个梯度准备好时，它在该梯度累加器上的相应 DDP 钩子将被触发。
+
+    在 autograd_hook 之中进行all-reduce。假设参数index是param_index，
+    则利用param_index获取到参数，标示为ready，如果某个桶里面梯度都ready，则该桶是ready。
+
+    当一个桶中的梯度都准备好时，会 在该桶上Reducer启动异步allreduce以计算所有进程的梯度平均值。
+
+    如果所有桶都ready，则等待所有 all-reduce 完成。
+    当所有桶都准备好时，Reducer将阻塞等待所有allreduce操作完成。
+    完成此操作后，将平均梯度写入param.grad所有参数的字段。
+
+    所有进程的梯度都会reduce，更新之后，大家的模型权重都相同。
+    所以在向后传播完成之后，跨不同DDP进程的对应的相同参数上的 grad 字段应该是相等的。
+
+    梯度被归并之后，会再传输回autograd引擎。
+
+    不需要像 DP 那样每次迭代之后还要广播参数。
+    但是 Buffers 还是需要在每次迭代由 rank 0 进程广播到其他进程之上。
+
+接下来我们就看看如何进行后向传播。
+
+0x02 从Hook开始
+下图来自快手的一篇论文（请参见参考1，后续应该也会对该论文项目进行分析）。
+图上半部分是原生autograd引擎处理方式，下面是 Horovod 和 Torch-DDP 的处理方式。
+从中可以看到，对于梯度归并是在后向传播过程中就会开始。
+
+    03-37.png
+
+具体来说就是，除了分桶，Reducer还在构造期间注册 autograd 钩子，每个参数一个钩子。
+当梯度准备好时，将在向后传递期间触发这些钩子，进行梯度规约。
+如果某个桶里面梯度都ready，则该桶是ready。
+当一个桶中的梯度都准备好时，会 在该桶上Reducer启动异步allreduce以计算所有进程的梯度平均值。
+所以，我们就从反向传播的入口点 Hook 开始分析。
+
+2.1 如何注册hook
+我们首先看看如何注册hook，这涉及到 AutogradMeta 和 Node。
+
+2.1.1 AutogradMeta
+AutoGradMeta : 记录 Variable 的autograd历史信息，主要成员变量是。
+
+    grad_ ：存储当前Variable实例的梯度，本身也是一个Variable。
+
+    grad_fn ：是个Node实例，非叶子节点才有。
+    通过 grad_fn() 方法来访问，实际上，PyTorch中就是通过 grad_fn是否为空 来判断一个Variable是否是leaf variable。
+
+    grad_accumulator_ ：也是Node的实例，只有叶子节点才有。
+
+        通过Variable的grad_accumulator()来访问。
+
+        叶子节点负责对梯度进行累加，grad_accumulator_ 就是梯度累加处理函数。
+
+        其对应梯度就被保存在 grad_ 变量之中。
+
+    output_nr_：是个数字。
+    output_nr_表明是 Node 的第几个输出，比如为 0 就 表明这个Variable是Node 的第 1 个输出。
+
+    我们总结一下：
+
+        对于非叶子节点，grad_fn是计算梯度操作，梯度不会累积在 grad_ 之上，而是传递给计算图反向传播下一站。
+        grad_fn 就是一个 Node。
+
+        对于叶子节点，PyTorch 虚拟出了一个特殊计算操作，输出这个叶子节点，
+        同时此虚拟计算操作也作为叶子节点的grad_accumulator_来累加其梯度，梯度会累积在 grad_ 之上，
+        因此叶子节点的 output_nr_ 必定为 0。grad_accumulator_ 也是一个 Node，就是 AccumulateGrad。
+
+其定义如下：
+
+struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
+,,,
+
+2.1.2 Node
+在计算图中，一个计算操作用一个节点（Node）表示，不同的 Node子类实现了不同操作。
+AutogradMeta 的 grad_fn_ 和 grad_accumulator_ 都是 Node。
+这里针对的主要成员变量是 post_hooks_，就是在 运行梯度计算之后，会执行的 hook。
+add_post_hook 会往 post_hooks_ 之中添加一个 hook。
+
+    struct TORCH_API Node : std::enable_shared_from_this<Node> {
+
+...
+
+2.1.3 AccumulateGrad
+AccumulateGrad 是 Node 的派生类。
+
+2.2 构造函数
+我们回顾一下 Reducer 构造函数，其中会：
+
+    每个张量都得到其 Variable::AutogradMeta的 grad_accumulator_，即用于累加叶子 Variable 的梯度累加器。
+
+    针对每个梯度累加器都配置一个autograd_hook，这个 hook 挂在 autograd graph 之上，在 backward 时负责梯度同步。
+
+    设定 gradAccToVariableMap_ 存了grad_accumulator & index 的对应关系（函数指针和参数张量的对应关系），
+    这样以后在 autograd graph 遍历寻找 unused parameters 就方便了。
+
+    这些 梯度累加器 都存储于 grad_accumulators_ 之中。
+
+具体代码如下：
+
+    Reducer::Reducer(
+
+....
+
+
+2.2.1 grad_accumulator
+这里 grad_accumulator 代码如下，可以看到，就是获取张量的 autograd_meta->grad_accumulator_，然后返回，对于叶子节点，grad_accumulator_ 就是 AccumulateGrad。
+
+std::shared_ptr<Node> grad_accumulator(const Variable& self) {
+,,,
+
+2.2.2 图示
+一个张量为 variable1，张量对应的 VariableIndex 是 index1，
+具体配置如下，AccumulateGrad 在使用 apply 计算完梯度之后，会调用 post_hooks 之中的 hook。
+
++-----------------------------------------+
+| Reducer                                 |
+|                                         |
+|                                         |
+|  +------------------------------------+ |   +------------------+    +----------------+
+|  | grad_accumulators_                 | |   |  variable1       |    | AccumulateGrad |
+|  |                                    | |   |                  |    |                |
+|  |                                    | |   |                  |    |                |
+|  |  [replica_index][variable_index]+------> |   autograd_meta_+---> |    post_hooks  |
+|  |                                    | |   |                  |    |        +       |
+|  |                                    | |   |                  |    |        |       |
+|  +------------------------------------+ |   +------------------+    +----------------+
+|                                         |                                    |
+|  +-------------------------------+      |                                    |
+|  | gradAccToVariableMap_         |      |                                    v
+|  |                               |      |
+|  |                               |      |                    +-----------------------+
+|  |        [variable1 : index1]   |      |                    |  autograd_hook(index1)|
+|  |                               |      |                    +-----------------------+
+|  +-------------------------------+      |
+|                                         |
++-----------------------------------------+
+
+
+                                               +---------------------------------------+
+                                  index1 +-->  |VariableIndex                          |
+                                               |                                       |
+                                               |          replica_index of Variable1   |
+                                               |                                       |
+                                               |          variable_index of Variable1  |
+                                               |                                       |
+                                               +---------------------------------------+
+2.3 Hook 函数
+当梯度准备好时，引擎会回调 Hook 函数，Hook 就是如下的 autograd_hook 方法，其就是依据相关条件来设定本变量是否就绪。
+逻辑如下：
+
+    如果是动态图&找到未用张量 或者 静态图第一次迭代，则把 local_used_maps_ 之中变量对应位置置为1。
+
+        local_used_maps_ 记录本地使用过的CPU张量。
+
+        动态图每次迭代都可能不一致，桶和变量可能每次都不一样，所以local_used_maps_需要每次迭代都更新。
+
+        静态图每次迭代都一样，只要第一次迭代时候，在回调之中设定即可。
+
+    如果是静态图第一次迭代，则把 numGradHooksTriggeredMap_ 之中该变量对应之处变成1
+
+    如果没有标示未使用变量，则遍历没有用到的variable，未用到的标示为ready，调用 mark_variable_ready。
+
+    如果是静态图&第二次迭代之后，则 如果numGradHooksTriggeredMapPerIteration_对应递减后为0，
+    则设定变量为就绪，调用 mark_variable_ready。
+
+    否则就是动态图，动态图每次都要设定variable为就绪，调用 mark_variable_ready。
+
+void Reducer::autograd_hook(VariableIndex index) {
+...
+
+0x03 就绪
+如果在反向传播过程之中，某一个参数的 hook之中发现该变量是就绪的，
+则会开始调用mark_variable_ready(index)，我们继续看如何处理。
+
+大致顺序就是：处理就绪的变量，处理就绪的桶，处理使用情况，从DDP拷贝回autograd之中对应的梯度。
+
+3.1 变量ready
+3.1.1 设定就绪
+mark_variable_ready 是把一个变量标示为就绪，逻辑如下。
+
+    如果需要重建桶，则把index插入到需重建列表之中。
+
+        重建桶会发生在如下情况：
+        1）第一次重建存储桶。
+        2）静态图为真或查找未使用的参数为假时。
+        3）此反向过程需要运行allreduce。
+
+        在这里，我们只需将张量及其参数索引转储到基于梯度到达顺序的重建参数和重建参数索引中，
+        然后在finalize_backward()结束时，将基于重建参数和重建参数索引重建存储桶，然后广播和初始化存储桶。
+        此外，我们只需要转储一个副本的张量和参数索引。
+
+    找到本变量对应的副本index，找到本变量在副本中哪个位置。
+
+    这个variable是被使用过的，记录下来，插入到perIterationReadyParams_。
+
+    每当某个变量被标记成 ready，都要设置调用一下finalize。
+
+    检查桶里的梯度是不是都ready，如果有没有pending，就是桶也ready了
+
+    本模型副本pending数目减1，因为又一个张量ready了。
+
+    如果本副本pending数目为0，则本桶pending数目减1。
+
+        因为如果本模型副本的pending为0，则说明桶对应的模型副本pending数目应该减一。
+
+        如果本桶pending为0，则使用 mark_bucket_ready 设置桶就绪。
+
+    如果所有桶都ready，则会：
+
+        调用all_reduce_local_used_map。
+
+        调用Engine::get_default_engine().queue_callback 注册 一个callback，
+        这个callback将在engine完成全部 backward 之后调用，后续将对使用过的variable进行规约，里面调用了finalize_backward。
+
+void Reducer::mark_variable_ready(VariableIndex index) {
+
+....
+
+逻辑如下：
+
+    1 Reduer 会注册autograd_hook到AccumulateGrad的post_hooks之上。
+    2 Autograd Engine 在反向传播过程中，如果发现某个参数ready，就调用autograd_hook。
+    3 autograd_hook 之中继续处理。
+    4 会注册一个 finalize_backward到 engine。
+
+Engine        AccumulateGrad                Reducer
+
+  +                  +                         +
+  |                  |                         |
+  |                  |           1             |
+  |                  | <-----------------------v
+  |                  |
+  |                  |
+  |                  |
+  |                  v           2
+  |             post_hooks  +-------->  autograd_hook
+  |                                            +
+  |                                            |
+  |                                            | 3
+  |                                            v
+  |                         +------------------+---------------------------+
+  |                         |    mark_variable_ready                       |
+  |                         |                                              |
+  |                         |                                              |
+  |                         |     All variable in replica are ready?       |
+  |                         |                   +                          |
+  |                         |                   | YES                      |
+  |                         |                   v                          |
+  |                         |     All replica in bucket are ready?         |
+  |                         |                   +                          |
+  |                         |                   | YES                      |
+  |                         |                   v                          |
+  |                         |            mark_bucket_ready                 |
+  |                         |                                              |
+  |                         |                                              |
+  |                         |                                              |
+  |                         |                   +                          |
+  |                         |                   |                          |
+  |                         |                   |                          |
+  |                         |                   v                          |
+  |                         |          All buckets are ready?              |
+  |                         |                   +                          |
+  |                         |                   | YES                      |
+  |                         |                   v                          |
+  |   queue_back   4        |          all_reduce_local_used_map           |
+  | <----------------------------+  queue_callback(finalize_backward)      |
+  |                         |                                              |
+  |                         |                                              |
+  v                         +----------------------------------------------+
+
+
+3.1.2 注册callback
+上面代码之中，使用了 torch::autograd::Engine::get_default_engine().queue_callback 来注册了一个回调函数。
+我们就来分析一下。
+
+在engine之中有定义，就是往 final_callbacks_ 插入callback：
+
+    void Engine::queue_callback(std::function<void()> callback) {
+      std::lock_guard<std::mutex> lock(current_graph_task->final_callbacks_lock_);
+      current_graph_task->final_callbacks_.emplace_back(std::move(callback));
+    }
+对于 final_callbacks_ 处理，在 exec_post_processing 之中，就是当 engine 全部完成 backward 的时候会调用 callback。
+
+void GraphTask::exec_post_processing() {
+
+于是逻辑拓展如下：
+
+Reduer 会注册autograd_hook到AccumulateGrad的post_hooks之上。
+Autograd Engine 在反向传播过程中，如果发现某个参数ready，就调用autograd_hook。
+autograd_hook 之中继续处理。
+会注册一个 finalize_backward到 engine。
+在 GraphTask::exec_post_processing 之中会调用 finalize_backward。
+          Engine        AccumulateGrad                Reducer
+
+            +                  +                         +
+            |                  |                         |
+            |                  |           1             |
+            |                  | <-----------------------+
+            |                  |
+            |                  |
+            |                  |
+            |                  v
+            |                              2
+            |             post_hooks  +-------->  autograd_hook
+            |                                            +
+            |                                            |
+            |                                            |  3
+            |                                            v
+            |                         +------------------+---------------------------+
+            |                         | mark_variable_ready                          |
+            |                         |                                              |
+            |                         |                                              |
+            |                         |     All variable in replica are ready?       |
+            |                         |                   +                          |
+            |                         |                   | YES                      |
+            |                         |                   v                          |
+            |                         |     All replica in bucket are ready?         |
+            |                         |                   +                          |
+            |                         |                   | YES                      |
+            |                         |                   v                          |
+            |                         |            mark_bucket_ready                 |
+            |                         |                                              |
+            |                         |                                              |
+            |                         |                                              |
+            |                         |                   +                          |
+            |                         |                   |                          |
+            |                         |                   |                          |
+            |                         |                   v                          |
+            |                         |          All buckets are ready?              |
+            |                         |                   +                          |
+            |                         |                   | YES                      |
+            |                         |                   v                          |
+            |   queue_back    4       |          all_reduce_local_used_map           |
+            | <----------------------------+  queue_callback(finalize_backward)      |
+            |                         |                                              |
+            |                         |                                              |
+            |                         +-------------------+--------------------------+
+            v                                             |
+                                                          |
+GraphTask::exec_post_processing                           |
+            +                                             |
+            |                                             |
+            |                 5                           v
+            +--------------------------------->   finalize_backward
+            |                                             +
+            |                                             |
+            |                                             |
+            v                                             v
+3.1.3 mark_variable_ready_sparse
+mark_variable_ready_sparse 函数用来处理sparse类型的variable，其实就是拷贝梯度到Reducer。
+
+    void Reducer::mark_variable_ready_sparse(VariableIndex index) {
+...
+
+3.1.4 mark_variable_ready_dense
+mark_variable_ready_dense 会处理 dense tensors，其实就是拷贝梯度到Reducer。
+
+我们首先看一个成员变量：gradient_as_bucket_view_，其：
+
+    如果为false，在 allreduce 桶之后，需要把桶拷贝回grads。
+
+    当设置为“True”时，梯度将是指向“allreduce”的不同偏移的视图。这可以减少峰值内存使用，其中保存的内存大小将等于梯度总大小。
+    此外，它还避免了在梯度和“allreduce”通信桶之间进行复制的开销。当梯度为视图时，不能对梯度调用detach_()。
+
+mark_variable_ready_dense 逻辑为：
+
+    依据index找到本变量属于哪个桶，哪个副本，然后得到副本中的张量variable，进而得到variable的offset和size。
+    最终得到张量对应的 bucket_view。
+
+    使用 runGradCallbackForVariable 对张量进行处理。
+    runGradCallbackForVariable 其实是使用 DistAutogradContext 处理callback，最后传回 DistAutogradContext。
+
+    callback 内部执行逻辑是：
+        当 gradient_as_bucket_view_ 为false时，或者即使gradient_as_bucket_view_为true时，
+        在极少数情况下，用户可以在每次迭代后将grad设置为None。
+
+        在这些情况下，grad和bucket_view指向不同的存储，因此需要将grad复制到bucket_view。
+
+        如果 gradient_as_bucket_view_ 设置为true，则让 grad 指向 bucket_view。
+
+        如果 grad 在以前的迭代中已经被设置为bucket_view，则不需要复制。
+
+void Reducer::mark_variable_ready_dense(VariableIndex index) {
+  const auto replica_index = index.replica_index;
+...
+
+copy_grad_to_bucket的作用是把梯度拷贝到 contents
+
+    void Reducer::copy_grad_to_bucket(
+    ,,,,
+
+3.2 桶ready
+前面代码中有，检查桶里的梯度是不是都ready，如果有没有pending，就是桶也ready了，这时候就调用 mark_bucket_ready。
+
+mark_bucket_ready 之中会遍历桶，对于就绪的桶进行规约。
+
+    // Called when the bucket at the specified index is ready to be reduced.
+    void Reducer::mark_bucket_ready(size_t bucket_index) {
+...
+
+3.2.1 all_reduce_bucket
+all_reduce_bucket 是对于 contents 进行同步。
+
+    遍历桶的副本，把副本张量插入到 tensors。
+
+    如果没注册 comm_hook，直接 allreduce 这些tensors。
+
+    注册了 comm_hook 那就使用 hook 进行allreduce，
+    需要注意的是，这个comm_hook 只是处理通信的底层hook，如果想在 reduce 前分别进行梯度裁剪，还是需要在 autograph 挂 hook。
+
+    void Reducer::all_reduce_bucket(Bucket& bucket) {
+....
+
+逻辑拓展如下：
+
+Reduer 会注册autograd_hook到AccumulateGrad的post_hooks之上。
+Autograd Engine 在反向传播过程中，如果发现某个参数ready，就调用autograd_hook。
+autograd_hook 之中继续处理。
+调用all_reduce_bucket进行同步梯度。
+会注册一个 finalize_backward到 engine。
+在 GraphTask::exec_post_processing 之中会调用 finalize_backward。
+                                                                             +
+                                                                  Worker 1   |   Worker 2
+                                                                             |
+  Engine    AccumulateGrad                Reducer                            |    Reducer
+                                                                             |
+    +              +                         +                               |        +
+    |              |                         |                               |        |
+    |              |          1              |                               |        |
+    |              | <-----------------------+                               |        |
+    |              |                                                         |        |
+    |              |                                                         |        |
+    |              v                                                         |        |
+    |                         2                                              |        |
+    |         post_hooks  +-------->  autograd_hook                          |        |
+    |                                        +                               |        |
+    |                                        |                               |        |
+    |                                        |  3                            |        |
+    |                                        v                               |        |
+    |                     +------------------+---------------------------+   |        |
+    |                     | mark_variable_ready                          |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |     All variable in replica are ready?       |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   | YES                      |   |        |
+    |                     |                   v                          |   |        |
+    |                     |     All replica in bucket are ready?         |   |        |
+    |                     |                   +                          +   +        |
+    |                     |                   | YES                                   |
+    |                     |                   v               4   all_reduce_bucket   |
+    |                     |            mark_bucket_ready  <--------------+---+----->  |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   |                          |   |        |
+    |                     |                   |                          |   |        |
+    |                     |                   v                          |   |        |
+    |                     |          All buckets are ready?              |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   | YES                      |   |        |
+    |                     |                   v                          |   |        |
+    |      queue_back 5   |          all_reduce_local_used_map           |   |        |
+    | <------------------------+  queue_callback(finalize_backward)      |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     +-------------------+--------------------------+   |        |
+    v                                         |                              |        |
+                                              |                              |        |
+GraphTask::exec_post_processing               |                              |        |
+    +                                         |                              |        |
+    |                                         |                              |        |
+    |                                         v                              |        |
+    +----------------------------->   finalize_backward                      |        |
+    |                 6                       +                              |        |
+    |                                         |                              |        |
+    |                                         |                              |        |
+    v                                         v                              +        v
+3.2.2 PythonCommHook
+PythonCommHook 用来实现用户的特殊需求，我们前文提到过，这里再给出两个例子。
+
+PythonCommHook 举例
+
+c10::intrusive_ptr<c10::ivalue::Future> PythonCommHook::runHook(
+...
+或者
+
+c10::intrusive_ptr<c10::ivalue::Future> AllReduceCommHook::runHook(
+    GradBucket& bucket) {
+....
+
+
+3.2.3 GradBucket
+GradBucket 是用来拷贝信息的类。
+
+// This class passes bucket contents tensor to DDP communication hook.
+class GradBucket {
+....
+
+3.3 all_reduce_local_used_map
+注意，这里是对张量使用情况这个local_used_maps_变量进行规约，不是张量的梯度进行规约。
+
+3.3.1 定义
+我们回忆下定义。
+
+以下两个变量用来记录本地使用过的参数，其标示在未启用同步的情况下（no_sync is on），
+在当前迭代或者 no_sync session 之中，这些参数是否在本地被使用过。
+
+每个模型副本对应map中的一个张量，每个张量是参数数量的一维int32（one-dim int32）张量。
+
+这些张量在autograd_hook中标记，以指示已使用了相应的参数。
+这些张量会在当前迭代或无同步会话（no_sync session）的后向传播结束时进行allreduce，以计算出全局未使用的参数。
+
+// Locally used parameter maps indicating if parameters are used locally
+// during the current iteration or no_sync session if no_sync is on. One
+// tensor for each model replica and each tensor is one-dim int32 tensor of
+// number of parameters. These tensors are marked in autograd_hook to indicate
+// the corresponding param has been used, and get allreduced in the end of
+// backward of current iteration or no_sync session for figuring out the
+// globally unused parameters.
+//
+// local_used_maps_:     CPU tensors for bookkeeping locally used params
+// local_used_maps_dev_: dev tensors for reducing globally unused params
+std::vector<at::Tensor> local_used_maps_; // autograd_hook中会设置，对应论文中的
+std::vector<at::Tensor> local_used_maps_dev_; // GPU
+
+3.3.2 同步
+all_reduce_local_used_map 这里使用了异步 H2D 来避免阻塞开销。
+即把 local_used_maps_ 拷贝到 local_used_maps_dev_，然后对 local_used_maps_dev_ 进行规约。
+
+void Reducer::all_reduce_local_used_map() {
+  // See Note [Skip allreducing local_used_maps_dev]
+ ....
+
+拓展如下：
+
+    Reduer 会注册autograd_hook到AccumulateGrad的post_hooks之上。
+    Autograd Engine 在反向传播过程中，如果发现某个参数ready，就调用autograd_hook。
+    autograd_hook 之中继续处理。
+    调用all_reduce_bucket进行同步梯度。
+    调用 allreduce 对 local_used_maps_变量进行规约。
+    会注册一个 finalize_backward到 engine。
+    在 GraphTask::exec_post_processing 之中会调用 finalize_backward。
+                                                                             +
+                                                                  Worker 1   |   Worker 2
+                                                                             |
+  Engine    AccumulateGrad                Reducer                            |    Reducer
+                                                                             |
+    +              +                         +                               |        +
+    |              |                         |                               |        |
+    |              |          1              |                               |        |
+    |              | <-----------------------+                               |        |
+    |              |                                                         |        |
+    |              |                                                         |        |
+    |              |                                                         |        |
+    |              |                                                         |        |
+    |              v                                                         |        |
+    |                         2                                              |        |
+    |         post_hooks  +-------->  autograd_hook                          |        |
+    |                                        +                               |        |
+    |                                        |                               |        |
+    |                                        |  3                            |        |
+    |                                        v                               |        |
+    |                     +------------------+---------------------------+   |        |
+    |                     | mark_variable_ready                          |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |     All variable in replica are ready?       |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   | YES                      |   |        |
+    |                     |                   v                          |   |        |
+    |                     |     All replica in bucket are ready?         |   |        |
+    |                     |                   +                          +   +        |
+    |                     |                   | YES            4  all_reduce_bucket   |
+    |                     |                   v                                       |
+    |                     |            mark_bucket_ready  <--------------+---+----->  |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   |                          |   |        |
+    |                     |                   |                          |   |        |
+    |                     |                   v                          |   |        |
+    |                     |          All buckets are ready?              |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   | YES                      +   +        |
+    |                     |                   v                     5  allreduce      |
+    |   6  queue_back     |          all_reduce_local_used_map  <--------+---+----->  |
+    | <------------------------+  queue_callback(finalize_backward)      |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     +-------------------+--------------------------+   |        |
+    v                                         |                              |        |
+                                              |                              |        |
+GraphTask::exec_post_processing               |                              |        |
+    +                                         |                              |        |
+    |                                         |                              |        |
+    |                                         v                              |        |
+    +----------------------------->   finalize_backward                      |        |
+    |             7                           +                              |        |
+    |                                         |                              |        |
+    |                                         |                              |        |
+    v                                         v                              +        v
+3.4 finalize_backward
+finalize_backward 完成了收尾工作，逻辑为：
+
+    遍历桶，对于每个桶：
+        等待同步张量完成。
+        从future结果拷贝回contents。
+    等待 local_used_maps_dev 同步完成。
+
+void Reducer::finalize_backward() {
+  // No longer expect autograd hooks to fire after this function returns.
+  expect_autograd_hooks_ = false;
+...
+
+这个过程会用到如下函数。
+
+4.6.1 populate_bucket_views_out
+populate_bucket_views_out 从contents构建输出view
+    // (see Note:  "Gradient Layout Contract" in initialize_buckets).
+    void Reducer::populate_bucket_views_out(
+...
+
+4.6.1 finalize_bucket_dense
+finalize_bucket_dense 作用是调用 runGradCallbackForVariable 或者 copy_bucket_to_grad 把规约好的梯度拷贝会引擎。
+
+// A bucket with one or more dense tensors needs to be unflattened.
+void Reducer::finalize_bucket_dense(Bucket& bucket) {
+....
+
+
+4.6.3 copy_bucket_to_grad
+这里是从桶拷贝回autograd engine之中对应的梯度。
+
+void Reducer::copy_bucket_to_grad(
+
+...
+
+
+至此，我们拓展如下：
+
+    Reduer 会注册autograd_hook到AccumulateGrad的post_hooks之上。
+    Autograd Engine 在反向传播过程中，如果发现某个参数ready，就调用autograd_hook。
+    autograd_hook 之中继续处理。
+    调用all_reduce_bucket进行同步梯度。
+    调用 allreduce 对 local_used_maps_变量进行规约。
+    会注册一个 finalize_backward到 engine。
+    在 GraphTask::exec_post_processing 之中会调用 finalize_backward。
+    调用 wait 于其他 worker 同步。
+    调用 copy_bucket_to_grad 从桶拷贝回autograd引擎对应的梯度。
+    
+因此，我们就知道了一个在反向传播过程之中，autograd 引擎如何与DDP交互，如何一边做反向计算，一边利用DDP归并梯度的完整过程。
+
+                                                                             +
+                                                                  Worker 1   |   Worker 2
+                                                                             |
+  Engine    AccumulateGrad                Reducer                            |    Reducer
+                                                                             |
+    +              +                         +                               |        +
+    |              |                         |                               |        |
+    |              |          1              |                               |        |
+    |              |  <----------------------+                               |        |
+    |              |                                                         |        |
+    |              |                                                         |        |
+    |              v                                                         |        |
+    |                         2                                              |        |
+    |         post_hooks  +-------->  autograd_hook                          |        |
+    |                                        +                               |        |
+    |                                        |                               |        |
+    |                                        |  3                            |        |
+    |                                        v                               |        |
+    |                     +------------------+---------------------------+   |        |
+    |                     | mark_variable_ready                          |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |     All variable in replica are ready?       |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   | YES                      |   |        |
+    |                     |                   v                          |   |        |
+    |                     |     All replica in bucket are ready?         |   |        |
+    |                     |                   +                          +   +        |
+    |                     |                   | YES           4   all_reduce_bucket   |
+    |                     |                   v                                       |
+    |                     |            mark_bucket_ready  <--------------+---+----->  |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   |                          |   |        |
+    |                     |                   |                          |   |        |
+    |                     |                   v                          |   |        |
+    |                     |          All buckets are ready?              |   |        |
+    |                     |                   +                          |   |        |
+    |                     |                   | YES                      +   +        |
+    |                     |                   v                    5   allreduce      |
+    |   6  queue_back     |          all_reduce_local_used_map  <--------+---+----->  |
+    | <------------------------+  queue_callback(finalize_backward)      |   |        |
+    |                     |                                              |   |        |
+    |                     |                                              |   |        |
+    |                     +-------------------+--------------------------+   |        |
+    v                                         |                              |        |
+                                              |                              |        |
+GraphTask::exec_post_processing               |                              |        |
+    +                                         |                              |        |
+    |                                         |                              |        |
+    |              7                          v                              |        |
+    +----------------------------->   finalize_backward                      |        |
+    |                                         +                 8       wait |        |
+    |                                         |  <--------------------------------->  |
+    | <-------------------------------------+ |                              |        |
+    v         copy_bucket_to_grad     9       v                              +        v
+至此，反向传播分析完毕，DDP 的全部分析也结束，我们接下来对分布式autograd进行分析。
+
+0xFF 参考
+BAGUA: Scaling up Distributed Learning with System Relaxations
+
+pytorch分布式系列3——分布式训练时，torch.utils.data.distributed.DistributedSampler做了什么？
+
+pytorch分布式系列1——搞清torch.distributed.launch相关的环境变量
+
+pytorch分布式系列2——DistributedDataParallel是如何做同步的？
+
+pytorch(分布式)数据并行个人实践总结——DataParallel/DistributedDataParallel
+
+Pytorch的nn.DataParallel
+
+https://discuss.pytorch.org/t/dataparallel-imbalanced-memory-usage/22551/20
+
+https://pytorch.org/docs/stable/distributed.html
+
+PyTorch 源码解读之分布式训练了解一下？
+
+实操教程｜PyTorch AutoGrad C++层实现
+
+PYTORCH 自动微分（一）
+
+PyTorch如何加速数据并行训练？分布式秘籍大揭秘
+
+pytorch分布式训练（二init_process_group）
+
+https://pytorch.org/tutorials/intermediate/ddp_tutorial.html
+
+https://pytorch.org/docs/master/notes/ddp.html
+
+https://pytorch.org/tutorials/intermediate/dist_tuto.html
+
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+
+Pytorch模型中的parameter与buffer
