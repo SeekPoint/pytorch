@@ -693,7 +693,7 @@ throw_on_early_termination是bool类型，其可以设置为True，以便让每�
     'is_last_joiner'参数用于确定post-hooks中的广播源。
 
     我们将 sync_max_count 关键字参数传递给上下文管理器，上下文管理器会将其转发给'Counter'的join hook。
-    
+
     post-hooks之中，会对 self.counter.max_count 进行广播。
 
 0xFF 参考

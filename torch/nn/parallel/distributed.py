@@ -903,87 +903,105 @@ yknote以上信息是什么工具看到的？？
         finally:
             self.require_backward_grad_sync = old_require_backward_grad_sync
 
-    def forward(self, *inputs, **kwargs):
-        with torch.autograd.profiler.record_function("DistributedDataParallel.forward"):
-            self.reducer.save_thread_local_state()
-            if torch.is_grad_enabled() and self.require_backward_grad_sync:
-                self.logger.set_runtime_stats_and_log()
-                self.num_iterations += 1
-                self.reducer.prepare_for_forward()
-            if self.ddp_uneven_inputs_config.ddp_join_enabled:
-                ones = torch.ones(1, device=self.device)
-                work = dist.all_reduce(ones, group=self.process_group, async_op=True)
-                if self.ddp_uneven_inputs_config.ddp_join_throw_on_early_termination:
-                    # Active ranks schedule an allreduce with zeros, inactive
-                    # ranks schedule them with 1. If the result != 0 it
-                    # indicates at least one rank has terminated and we should
-                    # throw.
-                    zeros = torch.zeros(1, device=self.device)
-                    dist.all_reduce(zeros, group=self.process_group)
-                    should_throw_stop_iteration = zeros.item()
-                    if should_throw_stop_iteration:
-                        raise RuntimeError(
-                            "Detected at least one rank that exhausted inputs. Throwing across all ranks."
-                        )
-                else:
-                    self.reducer._set_forward_pass_work_handle(
-                        work,
-                        self.ddp_uneven_inputs_config.ddp_join_divide_by_initial_world_size,
+
+def forward(self, *inputs, **kwargs):
+    with torch.autograd.profiler.record_function("DistributedDataParallel.forward"):
+
+        # 保存线程本地状态
+        self.reducer.save_thread_local_state()
+
+        # 如果做配置，则调用 reducer 为forward做准备
+        if torch.is_grad_enabled() and self.require_backward_grad_sync:
+            self.logger.set_runtime_stats_and_log()
+            self.num_iterations += 1
+            self.reducer.prepare_for_forward()
+
+        # 如果配置ddp_join_enabled，做相应处理
+        if self.ddp_uneven_inputs_config.ddp_join_enabled:
+            ones = torch.ones(1, device=self.device)
+            work = dist.all_reduce(ones, group=self.process_group, async_op=True)
+            if self.ddp_uneven_inputs_config.ddp_join_throw_on_early_termination:
+                # Active ranks schedule an allreduce with zeros, inactive
+                # ranks schedule them with 1. If the result != 0 it
+                # indicates at least one rank has terminated and we should
+                # throw.
+                zeros = torch.zeros(1, device=self.device)
+                dist.all_reduce(zeros, group=self.process_group)
+                should_throw_stop_iteration = zeros.item()
+                if should_throw_stop_iteration:
+                    raise RuntimeError(
+                        "Detected at least one rank that exhausted inputs. Throwing across all ranks."
                     )
-
-            # Calling _rebuild_buckets before forward compuation,
-            # It may allocate new buckets before deallocating old buckets
-            # inside _rebuild_buckets. To save peak memory usage,
-            # call _rebuild_buckets before the peak memory usage increases
-            # during forward computation.
-            # This should be called only once during whole training period.
-
-            # 在这里进行直接调用
-            if torch.is_grad_enabled() and self.reducer._rebuild_buckets(): # 设定
-                logging.info("Reducer buckets have been rebuilt in this iteration.")
-
-            if self.require_forward_param_sync:
-                self._sync_params()
-
-            if self.ddp_uneven_inputs_config.ddp_join_enabled:
-                # Notify joined ranks whether they should sync in backwards pass or not.
-                self._check_global_requires_backward_grad_sync(is_joined_rank=False)
-
-            if self.device_ids:
-                inputs, kwargs = self.to_kwargs(inputs, kwargs, self.device_ids[0])
-                output = self.module(*inputs[0], **kwargs[0])
             else:
-                output = self.module(*inputs, **kwargs)
+                self.reducer._set_forward_pass_work_handle(  # 是join这里用到
+                    work,
+                    self.ddp_uneven_inputs_config.ddp_join_divide_by_initial_world_size,
+                )
 
-            if torch.is_grad_enabled() and self.require_backward_grad_sync:
-                self.require_forward_param_sync = True
-                # We'll return the output object verbatim since it is a freeform
-                # object. We need to find any tensors in this object, though,
-                # because we need to figure out which parameters were used during
-                # this forward pass, to ensure we short circuit reduction for any
-                # unused parameters. Only if `find_unused_parameters` is set.
-                if self.find_unused_parameters and not self.static_graph:
-                    # Do not need to populate this for static graph.
-                    self.reducer.prepare_for_backward(list(_find_tensors(output)))
-                else:
-                    self.reducer.prepare_for_backward([])
+        # Calling _rebuild_buckets before forward compuation,
+        # It may allocate new buckets before deallocating old buckets
+        # inside _rebuild_buckets. To save peak memory usage,
+        # call _rebuild_buckets before the peak memory usage increases
+        # during forward computation.
+        # This should be called only once during whole training period.
+
+        # 在这里进行直接调用
+
+        # 在前向传播之前使用 _rebuild_buckets 来重置桶
+        # 在此函数内，也许在释放旧bucket之前分配新bucket。
+        # 如果要节省峰值内存使用量，请在正向计算期间峰值内存使用量增加之前调用_rebuild_bucket。
+        # 在整个训练期间，这只能调用一次。
+        if torch.is_grad_enabled() and self.reducer._rebuild_buckets():  # 设定
+            logging.info("Reducer buckets have been rebuilt in this iteration.")
+
+        # 如果需要同步前向传播参数，则进行同步
+        if self.require_forward_param_sync:
+            self._sync_params()
+
+        if self.ddp_uneven_inputs_config.ddp_join_enabled:
+            # Notify joined ranks whether they should sync in backwards pass or not.
+            self._check_global_requires_backward_grad_sync(is_joined_rank=False)
+
+        # 进行前向传播
+        if self.device_ids:
+            # 多卡情况
+            inputs, kwargs = self.to_kwargs(inputs, kwargs, self.device_ids[0])
+            output = self.module(*inputs[0], **kwargs[0])
+        else:
+            output = self.module(*inputs, **kwargs)
+
+        # 如果需要同步后向传播梯度，则调用prepare_for_backward
+        if torch.is_grad_enabled() and self.require_backward_grad_sync:
+            # 当DDP参数 find_unused_parameter 为 true 时，其会在 forward 结束时，启动一个回溯，标记出所有没被用到的 parameter，提前把这些设定为 ready，这样 backward 就可以在一个 subgraph 进行，但这样会牺牲一部分时间。
+
+            self.require_forward_param_sync = True
+            # We'll return the output object verbatim since it is a freeform
+            # object. We need to find any tensors in this object, though,
+            # because we need to figure out which parameters were used during
+            # this forward pass, to ensure we short circuit reduction for any
+            # unused parameters. Only if `find_unused_parameters` is set.
+            if self.find_unused_parameters and not self.static_graph:
+                # Do not need to populate this for static graph.
+                self.reducer.prepare_for_backward(list(_find_tensors(output)))
             else:
-                self.require_forward_param_sync = False
+                self.reducer.prepare_for_backward([])
+        else:
+            self.require_forward_param_sync = False
 
-        # TODO. Right now we add this sink for static_graph training only. once
-        # this feature is stable, we will add this sink for all cases. E.g.
-        # This sink can help capture more accuracte backward start time as well.
-        if self.static_graph and self.num_iterations == 1:
-            # Need to grab list of tensors from user output in order to pass
-            # to custom autograd function.
-            output_tensor_list, treespec = tree_flatten(output)
-            passthrough_tensor_list = _DDPSink.apply(
-                self.reducer,
-                *output_tensor_list
-            )
-            # Reconstruct output data structure.
-            output = tree_unflatten(passthrough_tensor_list, treespec)
-        return output
+    # TODO. Right now we add this sink for static_graph training only. once
+    # this feature is stable, we will add this sink for all cases. E.g.
+    # This sink can help capture more accuracte backward start time as well.
+    if self.static_graph and self.num_iterations == 1:
+        # Need to grab list of tensors from user output in order to pass
+        # to custom autograd function.
+        output_tensor_list, treespec = tree_flatten(output)
+        passthrough_tensor_list = _DDPSink.apply(
+            self.reducer,
+            *output_tensor_list
+        )
+        # Reconstruct output data structure.
+        output = tree_unflatten(passthrough_tensor_list, treespec)
+    return output
 
     def scatter(self, inputs, kwargs, device_ids):
         return scatter_kwargs(inputs, kwargs, device_ids, dim=self.dim)
@@ -1474,6 +1492,7 @@ yknote以上信息是什么工具看到的？？
             )
         return rank_to_use.item() # 返回全部ranks
 
+    #其中，使用 _sync_params 来同步模型参数，具体是使用 _distributed_broadcast_coalesced 进行完成。
     def _sync_params(self):
         with torch.no_grad():
             # module buffer sync

@@ -1429,7 +1429,7 @@ void Reducer::populate_bucket_views_out(
 
 void Reducer::prepare_for_forward() {
   std::lock_guard<std::mutex> lock(mutex_);
-  num_iterations_++;
+  num_iterations_++;  // 这里会递增
   if (should_collect_runtime_stats()) {
     record_forward_compute_start_time();
   }
@@ -1446,14 +1446,16 @@ void Reducer::reset_bucket_counting() {
   // in each iteration.
   num_buckets_ready_ = 0;
 
-  for (auto& bucket : buckets_) {
+  for (auto& bucket : buckets_) { // 遍历桶
     for (auto& replica : bucket.replicas) {
+    ////对于每个桶，重置其副本的pending状态，某一个模型副本pending，是由这个模型副本中，本桶的变量数目决定
       replica.pending = replica.variables.size();
     }
-    bucket.pending = bucket.replicas.size();
+    bucket.pending = bucket.replicas.size(); // 重置桶的pending状态，桶pending是由多少个模型副本决定
   }
 
   if (static_graph_) {
+    // 重置numGradHooksTriggeredMapPerIteration_
     numGradHooksTriggeredMapPerIteration_ = numGradHooksTriggeredMap_;
   }
 }
@@ -1482,11 +1484,13 @@ void Reducer::search_unused_parameters(
   for (const auto& output : outputs) {
     const auto& grad_fn = output.grad_fn();
     if (grad_fn) {
-      queue.push_back(grad_fn.get());
+      queue.push_back(grad_fn.get());  // 把所有输出节点的梯度函数插入到queue
     }
   }
 
   // Traverse the autograd graph starting at the specified output.
+    // 遍历这个queue中的元素，对于每一个函数，找到其后向图之中的后续边，然后把后续边指向的节点再插入queue，
+    //然后继续循环，最终 seen 里面是所有从output出发，所有节点的梯度函数
   while (!queue.empty()) {
     auto fn = queue.back();
     queue.pop_back();
@@ -1502,6 +1506,8 @@ void Reducer::search_unused_parameters(
 
   // 遍历查找，如果某一个accumulator 函数没有在这图里面，就说明不用计算梯度
   // Find accumulator functions that don't show up in this graph.
+  // gradAccToVariableMap_ 里面是所有需要被规约的variable
+  // 遍历gradAccToVariableMap_，如果 seen 之中没有，就说明这个参数没有被使用，插入到unused_parameters_
   for (const auto& it : gradAccToVariableMap_) {
     // If the accumulator function is present in the graph, we know
     // a gradient will be computed for the corresponding parameter.
@@ -1533,6 +1539,7 @@ void Reducer::prepare_for_backward(
     const std::vector<torch::autograd::Variable>& outputs) {
   std::lock_guard<std::mutex> lock(mutex_);
 
+// 记录开始时间
   cpu_timer_.backward_compute_start_time = current_time_in_nanos();
   if (should_collect_runtime_stats()) {
     record_backward_compute_start_time();
@@ -1546,7 +1553,7 @@ void Reducer::prepare_for_backward(
   // Reset unused parameter accounting.
   has_marked_unused_parameters_ = false;
   // Reset per iteration marked ready parameters.
-  perIterationReadyParams_.clear();
+  perIterationReadyParams_.clear(); // 重置每次迭代的marked ready parameters
 
   // If static graph is not set, search graph to detect unused parameters.
   // When static graph is set, unused_parameters_ will be detected and will
@@ -1556,7 +1563,7 @@ void Reducer::prepare_for_backward(
   // and we don't have to search the autograd graph for presence of these hooks.
   if (dynamic_graph_find_unused()) {
     unused_parameters_.clear();
-    search_unused_parameters(outputs);
+    search_unused_parameters(outputs);  // 查找没有使用的参数
   }
 }
 
@@ -1831,22 +1838,28 @@ void Reducer::RpcContext::set(ContextPtr&& new_context_ptr) {
 
 void Reducer::sync_bucket_indices(
     std::vector<std::vector<size_t>>& bucket_indices) {
+
   auto num_buckets = bucket_indices.size();
   std::vector<size_t> bucket_sizes;
   bucket_sizes.reserve(num_buckets);
   int64_t total_size = 0;
+
+  //遍历桶，把桶的大小都记录到bucket_sizes
   for (size_t i = 0; i < num_buckets; i++) {
     auto bucket_size = bucket_indices.at(i).size();
     bucket_sizes.push_back(bucket_size);
     total_size += bucket_size;
   }
 
+  // 配置TensorOptions
   at::TensorOptions options;
   options = options.dtype(at::kInt);
   options = options.device(replicas_[0][0].device());
 
   // Group indices and num_bucket together into indices_tensor
   // Broadcast this tensor first, as its size is equal among all processes
+  // 把桶对应的indices和桶数目放入indices_tensor，这里是通过 PyTorch accessor来对张量进行读写，accessor就像是一个张量，
+  // 但它将张量的维度和 dtype 硬编码为了模板参数，可以高效的访问元素
   auto indices_tensor = at::empty({total_size + 1}, at::kInt);
   auto indices_accessor = indices_tensor.accessor<int, 1>();
   auto indices_accessor_Index = 0;
@@ -1861,8 +1874,10 @@ void Reducer::sync_bucket_indices(
   // Copy CPU tensor to device tensor, as the process_group_ could be NCCL and
   // it can only broadcast device tensors.
   auto indices_tensor_device = at::empty({total_size + 1}, options);
+  // 因为 NCCL这样的 ProcessGroup 只支持device之间的操作，所以把indices_tensor拷贝到indices_tensor_device
   indices_tensor_device.copy_(indices_tensor, /*non_blocking=*/true);
   std::vector<at::Tensor> indices_tensor_list = {indices_tensor_device};
+  // 对 indices_tensor_device 进行广播
   process_group_->broadcast(indices_tensor_list)->wait();
   indices_tensor.copy_(indices_tensor_list.front(), /*non_blocking=*/false);
 
@@ -1870,6 +1885,7 @@ void Reducer::sync_bucket_indices(
   num_buckets = indices_accessor[indices_accessor_Index];
 
   // Broadcast bucket_sizes
+  // 类似，对桶尺寸进行广播
   auto bucket_sizes_tensor = at::empty({(int64_t)num_buckets}, at::kInt);
   auto bucket_sizes_accessor = bucket_sizes_tensor.accessor<int, 1>();
   for (size_t i = 0; i < num_buckets; i++) {
@@ -1891,6 +1907,7 @@ void Reducer::sync_bucket_indices(
   bucket_indices.clear();
   bucket_indices.reserve(num_buckets);
   indices_accessor_Index = 0;
+  // 遍历桶，使用从rank 0收到的num_buckets, bucket_sizes_tensor 和 indices_tensor 更新传进来的参数bucket_indices
   for (size_t i = 0; i < num_buckets; i++) {
     const auto& bucket_size = bucket_sizes_accessor[i];
     std::vector<size_t> bucket;
@@ -1929,9 +1946,11 @@ bool Reducer::rebuild_buckets() {
           " versus rebuilt params size of: ",
           rebuilt_param_indices_.size()));
   std::vector<std::vector<size_t>> rebuilt_bucket_indices;
+  // 配置各种尺寸限制
   std::vector<size_t> bucket_size_limits;
   bucket_size_limits.push_back(kDefaultFirstBucketBytes);
   bucket_size_limits.push_back(bucket_bytes_cap_);
+  // 计算桶的尺寸
   rebuilt_bucket_indices = compute_bucket_assignment_by_size(
       rebuilt_params_,
       bucket_size_limits,
@@ -1941,12 +1960,14 @@ bool Reducer::rebuild_buckets() {
   // For rebuilt bucket indices, it needs to be synced across all ranks.
   // Broadcast the newly rebuilt bucket indices from rank 0 in default.
   // After syncing up rebuilt bucket indices, initialize buckets for reducer.
+  // 同步桶indices
   sync_bucket_indices(rebuilt_bucket_indices);
 
   has_rebuilt_bucket_ = true;  // 只重建一次
   rebuilt_params_.clear();
   rebuilt_param_indices_.clear();
 
+// 初始化桶
   initialize_buckets(std::move(rebuilt_bucket_indices));
   return true;
 }
@@ -2264,6 +2285,7 @@ inline bool operator==(const BucketKey& lhs, const BucketKey& rhs) {
 
 
 */
+
 std::vector<std::vector<size_t>> compute_bucket_assignment_by_size(
     const std::vector<at::Tensor>& tensors,
     const std::vector<size_t>& bucket_size_limits,  // 桶大小限制

@@ -1,0 +1,343 @@
+PyTorch 分布式(12) ----- DistributedDataParallel 之 前向传播
+
+https://www.cnblogs.com/rossiXYZ/p/15605349.html
+
+目录
+[源码解析] PyTorch 分布式(12) ----- DistributedDataParallel 之 前向传播
+0x00 摘要
+0x01 总体逻辑
+0x02 Python 世界
+0x03 C++世界
+3.1 准备前向传播
+3.2 重建桶
+3.2.1 计算桶尺寸
+3.2.2 同步桶indices
+3.2.3 初始化桶
+3.3 准备后向传播
+3.3.1 重置
+3.3.2 查找未使用的参数
+0xFF 参考
+0x00 摘要
+前文已经对Reducer如何构建和几个重要场景做了介绍，本文就来分析 Reducer 如何实现前向传播。
+
+本系列其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+
+[源码解析] PyTorch 分布式(4)------分布式应用基础概念
+
+[源码解析] PyTorch分布式(5) ------ DistributedDataParallel 总述&如何使用
+
+[源码解析] PyTorch分布式(6) ---DistributedDataParallel -- 初始化&store
+
+[源码解析] PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+
+[源码解析] PyTorch 分布式(8) -------- DistributedDataParallel之论文篇
+
+[源码解析] PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+
+[源码解析] PyTorch 分布式(10)------DistributedDataParallel 之 Reducer静态架构
+
+[源码解析] PyTorch 分布式(11) ----- DistributedDataParallel 之 构建Reducer和Join操作
+
+0x01 总体逻辑
+我们还是需要祭出法宝，看看论文中的DDP总体逻辑：
+03-35.png
+然后给出一个前向传播的总体策略如下：
+    Forward Pass:
+    每个进程读去自己的训练数据，DistributedSampler确保每个进程读到的数据不同。
+
+    DDP 获取输入并将其传递给本地模型。
+
+    模型进行前向计算，结果设置为 out。现在计算都是在每个进程（CUDA设备）上完成。
+
+    如果find_unused_parameters设置为True，DDP 会分析本地模型的输出，
+    从 out 开始遍历计算图，把未使用参数标示为 ready，因为每次计算图都会改变，所以每次都要遍历。
+
+        此模式（Mode）允许在模型的子图上向后运行，并且 DDP 通过从模型输出out遍历 autograd 图，
+        将所有未使用的参数标记为就绪，以减少反向传递中涉及的参数。
+
+        在后向传播期间，Reducer会规约所有桶，在此过程中，Reducer会等待未准备好的参数。
+        将参数梯度标记为就绪并不能帮助 DDP 跳过桶，但它会阻止 DDP 在向后传递期间永远等待不存在的梯度。
+
+        请注意，遍历 autograd 图会引入额外的开销，因此应用程序仅在必要时才设置 find_unused_parameters为True 。
+
+    返回out即可。这点与 DP不同，DDP的模型网络输出不需要被gather到 rank 0进程。
+
+0x02 Python 世界
+我们还是从 Python 代码入手开始分析，代码位于：torch/nn/parallel/distributed.py。
+
+我们这里省略 join 相关，只关注主体部分，forward 方法逻辑如下：
+
+    保存线程本地状态。
+
+    如果做配置，则调用 reducer.prepare_for_forward 为forward做准备。
+
+    如果配置ddp_join_enabled，做相应处理。
+
+    在前向传播之前使用 _rebuild_buckets 来重置桶。
+
+    在 _rebuild_buckets 函数之中，也许会在释放旧bucket之前分配新bucket。
+
+        如果要节省峰值内存使用量，请在正向计算期间峰值内存使用量增加之前调用_rebuild_bucket。
+
+        如果需要同步，则调用_sync_params对前向传播参数进行前向传播参数。
+
+    进行前向传播。
+
+    如果需要同步后向传播梯度，则调用prepare_for_backward。
+
+        当DDP参数 find_unused_parameter 为 true 时，其会在 forward 结束时，
+        启动一个回溯，标记出所有没被用到的 parameter，提前把这些设定为 ready，
+        这样 backward 就可以在一个 subgraph 之上进行，但这样会牺牲一部分时间。
+
+具体代码如下：
+
+    def forward(self, *inputs, **kwargs):
+    .....
+
+其中，使用 _sync_params 来同步模型参数，具体是使用 _distributed_broadcast_coalesced 进行完成。
+
+    def _sync_params(self):
+
+....
+
+0x03 C++世界
+我们接下来进入到 C++ 世界，看看这里如何支持前向传播。具体分为：准备前向传播，重建桶，准备后向传播这几部分。
+
+3.1 准备前向传播
+这里把 num_iterations_ 增加，并且记录时间。
+
+    void Reducer::prepare_for_forward() {
+...
+
+3.2 重建桶
+接下来进行重建桶，具体分为：
+    配置各种尺寸限制。
+    计算桶的尺寸。
+    同步桶indices。
+    初始化桶。
+    bool Reducer::rebuild_buckets() {
+.....
+
+我们接下来具体看看如何重建。
+
+3.2.1 计算桶尺寸
+我们首先要看看compute_bucket_assignment_by_size 之中关键结构如下，BucketAccumulator 可以认为是实际的桶。
+
+    struct BucketAccumulator {
+        std::vector<size_t> indices; // 桶内容，是张量列表
+        size_t size = 0; // 桶大小，比如若干mb
+      }; // 桶的逻辑内容
+
+      // Keep vector of indices and size accumulator by tensor type and device.
+    std::unordered_map<BucketKey, BucketAccumulator, c10::hash<BucketKey>>
+          buckets; // 所有桶的列表，每一个实际桶可以认为是 BucketAccumulator
+
+其次，我们来看看 compute_bucket_assignment_by_size的具体逻辑：
+
+    生成一个计算结果 result，并且使用参数tensors的大小来为result预留出空间。
+
+    生成一个buckets，这是所有桶的列表，每一个实际桶可以认为是 BucketAccumulator
+
+    遍历传入的所有张量，对于每一个张量：
+
+        如果有index，就拿到张量的index。
+
+        如果配置了期待sparse gradient，则把这个张量自己放入一个桶，因为没法和其他张量放在一起。
+
+        使用张量信息构建桶的key。
+
+        使用 key 找到对应的桶, 拿到BucketAccumulator。
+
+        向该桶的张量列表 indices 里面插入新张量的index，indices 是 tensor index list。
+
+        增加对应桶大小。
+
+        如果需要，就设定成大小限制的初始值。
+
+        如果桶的尺寸大于最小值限制，就是说目前桶的尺寸已经达到了桶的最大限制，
+        按说需要转移到新桶了（实际上确实转移到了逻辑的新桶，但是实际还是在现有桶内执行，因为 type, device 还是同样的，
+        还是应该在原有桶内继续累积，不过原有桶的indice已经转移到了result之中，就相当于清空了）。
+
+            把桶内容插入到返回result，就是说，当桶尺寸过大的时候，就先插入到result之中。
+
+            利用 BucketAccumulator() 重新生成桶，bucket是个引用，所以直接赋值，就相当于清空原有的桶，就是原来桶继续用，
+            但是桶内原有的indices已经转移到了result之中。
+
+    把剩余的桶内indices插入到返回值result。之前已经有些直接插入到了result之中。
+
+    对 result 进行排序：
+
+        如果 tensor_indices 非空，说明张量的顺序已经是梯度准备好的顺序，不需要再排序了。
+
+        如果 tensor_indices 是空的，依据最小张量index来排序，这里假定张量的顺序是他们使用的顺序（或者说是他们梯度产生次序的反序）。
+        这种排序可保证桶是按照连续不断的顺序准备好。
+
+        注意，这里就是正序排列，等到创建Reducer的时候，才反序传入：list(reversed(bucket_indices))
+
+另外需要注意的是：因为 tensors就是 Python 代码中的参数 parameters[0]，而 parameters[0] 是按照 parametes() 的返回结果来的，
+所以DDP最终是按model.parameters()的相反顺序启动AllReduce。
+    std::vector<std::vector<size_t>> compute_bucket_assignment_by_size(
+    ....
+result 最终如下，里面每个vector 都对应了一个bucket，里面是都是 tensor 的 index，这里都是从小到大顺序排序。
+模型参数以（大致）Model.parameters()与给定模型相反的顺序分配到桶中 。
+使用相反顺序的原因是因为 DDP 期望梯度在反向传递期间以大约该顺序准备就绪。
+
++-----------------------------------------------------------------------+
+|                                                                       |
+|  <tensor index 1, tensor index 2, tensor index 3, tensor index 4>     |
+|                                                                       |
+|                                                                       |
+|  <tensor index 5, tensor index 6, tensor 7>                           |
+|                                                                       |
+|                                                                       |
+|  ......                                                               |
+|                                                                       |
+|                                                                       |
+|  <tensor index 8, tensor index 9, tensor index 10, tensor index 11>   |
+|                                                                       |
++-----------------------------------------------------------------------+
+
+3.2.2 同步桶indices
+产生尺寸之后，就使用 sync_bucket_indices 同步桶的indices，其逻辑如下：
+
+    遍历桶，把桶的大小都记录到bucket_sizes。
+
+    配置TensorOptions。
+
+    把桶对应的indices和桶数目放入indices_tensor，这里是通过 PyTorch accessor来对张量进行读写，
+    accessor就像是一个张量，但它将张量的维度和 dtype 硬编码为了模板参数，可以高效的访问元素。
+
+    因为 NCCL这样的 ProcessGroup 只支持device之间的操作，所以把indices_tensor拷贝到indices_tensor_device。
+
+    对 indices_tensor_device 进行广播。
+
+    类似，对桶尺寸进行广播。
+
+    广播结束之后，遍历桶，使用从rank 0收到的num_buckets,
+    bucket_sizes_tensor 和 indices_tensor 更新传进来的参数bucket_indices。
+
+    void Reducer::sync_bucket_indices(
+    ....
+
+
+3.2.3 初始化桶
+同步之后就是初始化桶，本部分代码在前文已经分析过，故此省略。
+3.3 准备后向传播
+前向传播完成之后，调用 prepare_for_backward 完成了后向传播的准备。
+具体大致分为两步：重置，查找未使用的参数。
+
+    void Reducer::prepare_for_backward(
+
+3.3.1 重置
+这里会遍历桶，对于每个桶，重置其副本的pending状态，某一个模型副本pending状态是由这个模型副本中对应桶的变量数目决定。
+
+如果是静态图，则重置numGradHooksTriggeredMapPerIteration_。
+
+    void Reducer::reset_bucket_counting() {
+    ....
+
+3.3.2 查找未使用的参数
+search_unused_parameters 完成了 "查找未使用的参数" 功能。
+
+我们首先要看看 Reducer 的 find_unused_parameters_ 成员变量。
+如果 find_unused_parameters_ 被设置为 true，则 DDP 会在前向传播结束时候，
+从指定的输出进行回溯，遍历autograd计算图来找到所有没有使用过的参数，并且一一标记为就绪 ready。
+
+对于所有参数，DDP 都有一个指向它们的梯度累积函数的指针，但对于那些autograd图中不存在的参数，
+它们将在第一次调用autograd钩子时就被标记为准备就绪。
+
+因为模型输出可能会被忽略，所以这个操作不是立即完成的，我们只是像在torch.autograd.backward()这里开始执行规约操作。
+
+大家可以发现，这么做开销会很大，为什么要这么做？这是因为计算动态图会改变。
+
+    训练时候，某次迭代可能只用到模型的一个子图，而且因为PyTorch 是动态计算，所以子图会在迭代期间改变，
+    就是说，某些参数可能在下一次迭代训练时候被跳过。
+
+    同时，因为所有参数在一开始就已经被分好桶，而 hook 又规定了只有整个桶 ready （即，pending == 0）之后才会进行通信，
+    所以如果我们不将未使用参数标记为 ready，整个通信过程就会没法进行。
+
+    void Reducer::search_unused_parameters(
+        const std::vector<torch::autograd::Variable>& outputs) {
+
+至此，前向传播已经结束，我们得到了如下：
+    需要计算梯度的参数已经分桶。
+    桶已经重建完毕。
+    前向传播已经完成。
+    从指定的输出进行回溯，遍历autograd计算图来找到所有没有使用过的参数，并且一一标记为就绪 ready。
+我们在下一篇就分析后向传播。
+
+
+0xFF 参考
+pytorch分布式系列3——分布式训练时，torch.utils.data.distributed.DistributedSampler做了什么？
+
+pytorch分布式系列1——搞清torch.distributed.launch相关的环境变量
+
+pytorch分布式系列2——DistributedDataParallel是如何做同步的？
+
+pytorch(分布式)数据并行个人实践总结——DataParallel/DistributedDataParallel
+
+Pytorch的nn.DataParallel
+
+https://discuss.pytorch.org/t/dataparallel-imbalanced-memory-usage/22551/20
+
+https://pytorch.org/docs/stable/distributed.html
+
+PyTorch 源码解读之分布式训练了解一下？
+
+实操教程｜PyTorch AutoGrad C++层实现
+
+PYTORCH 自动微分（一）
+
+PyTorch如何加速数据并行训练？分布式秘籍大揭秘
+
+pytorch分布式训练（二init_process_group）
+
+https://pytorch.org/tutorials/intermediate/ddp_tutorial.html
+
+https://pytorch.org/docs/master/notes/ddp.html
+
+https://pytorch.org/tutorials/intermediate/dist_tuto.html
+
+PyTorch 源码解读之 DP & DDP：模型并行和分布式训练解析
+
+Pytorch模型中的parameter与buffer
+
+
+   回复 引用#1楼 2022-02-10 22:22 HiIcy
+这个bucket如果是按type+device分配，
+那么一个桶内的数据如何和其他设备的交互起来作reduce
+
+支持(0) 反对(0)
+   回复 引用#2楼 [楼主] 2022-02-19 20:44 罗西的思考
+@HiIcy
+在反向传播时候，调用 all_reduce_bucket 做同步时，会遍历桶的副本，把副本张量插入到 tensors，然后同步这些张量。
+
+
+
+
