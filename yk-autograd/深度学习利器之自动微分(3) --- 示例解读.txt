@@ -1,0 +1,300 @@
+深度学习利器之自动微分(3) --- 示例解读
+
+https://www.cnblogs.com/rossiXYZ/p/15413467.html
+
+
+目录
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+0x00 摘要
+0x01 概述
+1.1 编码历史
+1.2 如何应用
+0x02 示例
+2.2 实例解读 1
+2.2.1 代码
+2.2.2 分析
+2.3 实例解读 2
+2.3.1 示例代码
+2.3.2 张量、函数和计算图
+2.3.3 计算梯度
+2.3.4 禁用梯度跟踪
+0x03 逻辑关系
+0xFF 参考
+
+
+0x00 摘要
+本文从 PyTorch 两篇官方文档开始为大家解读两个示例。本文不会逐句翻译，而是选取重点并且试图加入自己的理解。
+
+我们在前两篇文章学习了自动微分的基本概念，从本文开始，我们继续分析 PyTorch 如何实现自动微分。
+因为涉及内容太多太复杂，所以计划使用 2～3篇来介绍前向传播如何实现，用 3 ～ 4 篇来介绍后向传播如何实现。
+
+系列前两篇连接如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+0x01 概述
+在训练神经网络时，最常用的算法是 反向传播。在该算法中根据损失函数相对于给定参数的梯度来对参数（模型权重）进行调整。
+为了计算这些梯度，PyTorch 实现了一个名为 torch.autograd的内置反向自动微分引擎。它支持任何计算图的梯度自动计算。
+
+1.1 编码历史
+从概念上讲，autograd 记录了一个计算图。在创建张量时，如果设置 requires_grad 为Ture，那么 Pytorch 就知道需要对该张量进行自动求导。
+于是PyTorch会记录对该张量的每一步操作历史，从而生成一个概念上的有向无环图，该无环图的叶子节点是模型的输入张量，其根为模型的输出张量。
+用户不需要对图的所有执行路径进行编码，因为用户运行的就是用户后来想微分的。
+通过从根到叶跟踪此图形，用户可以使用链式求导规则来自动计算梯度。
+
+在内部实现上看，autograd 将此图表示为一个“Function” 或者说是"Node" 对象（真正的表达式）的图，该图可以使用apply方法来进行求值。
+
+1.2 如何应用
+在前向传播计算时，autograd做如下操作：
+
+    运行请求的操作以计算结果张量。
+
+    建立一个计算梯度的DAG图，在DAG图中维护所有已执行操作（包括操作的梯度函数以及由此产生的新张量）的记录 。
+    每个tensor梯度计算的具体方法存放于tensor节点的grad_fn属性中。
+
+当向前传播完成之后，我们通过在在 DAG 根上调用.backward() 来执行后向传播，autograd会做如下操作：
+
+    利用.grad_fn计算每个张量的梯度，并且依据此构建出包含梯度计算方法的反向传播计算图。
+
+    将梯度累积在各自的张量.grad属性中，并且使用链式法则，一直传播到叶张量。
+
+    每次迭代都会重新创建计算图，这使得我们可以使用Python代码在每次迭代中更改计算图的形状和大小。
+
+需要注意是，PyTorch 中 的DAG 是动态的，每次 .backward()调用后，autograd 开始填充新计算图，该图是从头开始重新创建。
+这使得我们可以使用Python代码在每次迭代中更改计算图的形状和大小。
+
+0x02 示例
+下面我们通过两个例子来进行解读，之所以使用两个例子，因为均来自于PyTorch 官方文档。
+
+2.2 实例解读 1
+我们首先使用 https://pytorch.org/tutorials/beginner/blitz/autograd_tutorial.html 来进行演示和解读。
+
+2.2.1 代码
+示例代码如下：
+
+    import torch
+
+    a = torch.tensor(2., requires_grad=True)
+    b = torch.tensor(6., requires_grad=True)
+    O = 3*a**3
+    P = b**2
+    Q = O - P
+    external_grad = torch.tensor(1.)
+    Q.backward(gradient=external_grad)
+    print(a.grad)
+    print(b.grad)
+
+    print("=========== grad")
+
+    a = torch.tensor(2., requires_grad=True)
+    b = torch.tensor(6., requires_grad=True)
+    Q = 3*a**3 - b**2
+    grads = torch.autograd.grad(Q, [a, b])
+    print(grads[0])
+    print(grads[1])
+
+    print(Q.grad_fn.next_functions)
+    print(O.grad_fn.next_functions)
+    print(P.grad_fn.next_functions)
+    print(a.grad_fn)
+    print(b.grad_fn)
+输出为：
+
+    tensor(36.)
+    tensor(-12.)
+    =========== grad
+    tensor(36.)
+    tensor(-12.)
+
+    ((<MulBackward0 object at 0x000001374DE6C308>, 0), (<PowBackward0 object at 0x000001374DE6C288>, 0))
+    ((<PowBackward0 object at 0x000001374DE6C288>, 0), (None, 0))
+    ((<AccumulateGrad object at 0x000001374DE6C6C8>, 0),)
+    None
+    None
+这里的Q运算方式如下：
+
+yknote截图 0437.png
+
+2.2.2 分析
+动态图是在前向传播的时候建立。前向传播时候，Q是最终的输出，但是在反向传播的时候，Q 却是计算的最初输入，就是反向传播图的Root。
+yknote截图 0438.png
+等效地，我们也可以将 Q 聚合为一个标量并隐式地向后调用，例如Q.sum().backward()。
+
+    external_grad = torch.tensor([1., 1.])
+    Q.backward(gradient=external_grad)
+下面是我们示例中 DAG 的可视化表示。在图中，箭头指向前向传递的方向。
+节点代表前向传递中每个操作的后向函数。蓝色的叶子节点代表我们的叶子张量a和b。
+
+0439.png
+
+2.3 实例解读 2
+这次以https://pytorch.org/tutorials/beginner/basics/autogradqs_tutorial.html为例子说明。
+
+2.3.1 示例代码
+考虑最简单的一层神经网络，具有输入x、参数w和b，以及一些损失函数。它可以通过以下方式在 PyTorch 中定义：
+
+    import torch
+
+    x = torch.ones(5)  # input tensor
+    y = torch.zeros(3)  # expected output
+    w = torch.randn(5, 3, requires_grad=True)
+    b = torch.randn(3, requires_grad=True)
+    z = torch.matmul(x, w)+b
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(z, y)
+2.3.2 张量、函数和计算图
+上述代码定义了以下计算图：
+0440.png
+图片来源是：https://pytorch.org/tutorials/_images/comp-graph.png
+
+在这个网络中，w和b是我们需要优化的参数。因此，我们需要计算关于这些变量的损失函数的梯度。
+为了做到这一点，我们设置了这些张量的requires_grad属性。
+
+注意，您可以在创建张量时设置requires_grad的值，也可以稍后使用x.requires_grad_(True)方法设置。
+
+我们应用于张量来构建计算图的函数实际上是一个Function类的对象。该对象知道如何在前向计算函数，以及如何在反向传播步骤中计算其导数。
+对反向传播函数的引用存储在grad_fn张量的属性中。
+
+    print('Gradient function for z =', z.grad_fn)
+    print('Gradient function for loss =', loss.grad_fn)
+输出如下：
+
+Gradient function for z = <AddBackward0 object at 0x7f4dbd4d3080>
+Gradient function for loss = <BinaryCrossEntropyWithLogitsBackward object at 0x7f4dbd4d3080>
+2.3.3 计算梯度
+为了优化神经网络中参数的权重，我们需要计算损失函数关于参数的导数，即我们需要在限定一些 x和y时候得到 ∂loss/∂w 和 ∂loss/∂b 。
+为了计算这些导数，我们调用 loss.backward()，然后从w.grad和 b.grad 之中获得数值：
+
+    loss.backward()
+    print(w.grad)
+    print(b.grad)
+得出：
+
+    tensor([[0.1881, 0.1876, 0.0229],
+            [0.1881, 0.1876, 0.0229],
+            [0.1881, 0.1876, 0.0229],
+            [0.1881, 0.1876, 0.0229],
+            [0.1881, 0.1876, 0.0229]])
+    tensor([0.1881, 0.1876, 0.0229])
+注意
+
+    我们只能获取在计算图叶子节点的requires_grad属性设置为True时候得到该节点的grad属性。
+    我们没法得到们图中的所有其他节点的梯度。
+
+    出于性能原因，我们只能在给定的计算图之上使用backward执行一次梯度计算 。
+    如果我们需要在同一个图上多次调用backward，则需要在backward调用时候设置 retain_graph=True。
+
+2.3.4 禁用梯度跟踪
+默认情况下，所有设置requires_grad=True 的张量都会跟踪其计算历史并支持梯度计算。
+但是，有些情况下我们不需要这样做，例如，当我们已经训练了模型并且只想将其应用于某些输入数据时，
+即我们只想通过网络进行前向计算，这时候我们可以通过用torch.no_grad()块包围我们的计算代码以停止跟踪计算 ：
+
+    z = torch.matmul(x, w)+b
+    print(z.requires_grad)
+
+    with torch.no_grad():
+        z = torch.matmul(x, w)+b
+    print(z.requires_grad)
+输出：
+    True
+    False
+实现相同结果的另一种方法是在张量上使用detach()方法：
+
+    z = torch.matmul(x, w)+b
+    z_det = z.detach()
+    print(z_det.requires_grad)
+输出：
+    False
+您可能想要禁用梯度跟踪的原因有：
+
+将神经网络中的某些参数标记为冻结参数。这是微调预训练网络的一个非常常见的场景。
+在仅进行前向传递时加快计算速度，因为对不跟踪梯度的张量进行计算会更有效。
+
+0x03 逻辑关系
+如果从计算图角度来看前向计算的过程，就是在构建图和执行图。"构建图"描述的是节点运算之间的关系。"执行图"则是在会话中执行这个运算关系，就是张量在计算图之中进行前向传播的过程。
+
+前向计算依赖一些基础类，在具体分析前向传播之前，我们先要看看这些基础类之间的逻辑关系。从DAG角度来分析 PyTorch 这个系统，其具体逻辑如下。
+
+    图表示计算任务。PyTorch把计算都当作是一种有向无环图，或者说是计算图，但这是一种虚拟的图，代码中没有真实的数据结构。
+
+    计算图由节点（Node）和边（Edge）组成。
+
+    节点（Node）代表了运算操作。
+
+        一个节点通过边来获得 0 个或多个 Tensor，节点执行计算之后会产生 0 个或多个 Tensor。
+
+        节点的成员变量 next_functions 是一个 tuple 列表，此列表就代表本节点要输出到哪些其他 Function。
+
+    列表个数就是这个 grad_fn 的 Edge 数目，列表之中每一个 tuple 对应一条 Edge 信息，内容就是 (Edge.function, Edge.input_nr)。
+
+    边（Edge）就是运算操作之间的流向关系。
+
+        Edge.function ：表示此 Edge 需要输出到哪一个其他 Function。
+
+        Edge.input_nr ：指定本 Edge 是 Function 的第几个输入。
+
+    使用张量（ Tensor） 表示数据，就是在节点间流动的数据，如果没有数据，计算图就没有任何意义。
+
+具体可以参见下图：
+
++---------------------+              +----------------------+
+| SubBackward0        |              | PowBackward0         |
+|                     |      Edge    |                      |  Edge
+|   next_functions  +-----+--------> |     next_functions +----------> ...
+|                     |   |          |                      |
++---------------------+   |          +----------------------+
+                          |
+                          |
+                          |          +----------------------+
+                          |  Edge    | MulBackward0         |
+                          +--------> |                      |  Edge
+                                     |     next_functions +----------> ...
+                                     |                      |
+                                     +----------------------+
+至此，示例解析结束，我们下一篇介绍PyTorch 微分引擎相关的一些基础类。
+
+0xFF 参考
+https://github.com/KeithYin/read-pytorch-source-code/
+
+pytorch学习笔记（十三）：backward过程的底层实现解析
+
+PyTorch的初始化
+
+pytorch的自动求导机制 - 计算图的建立
+
+How autograd encodes the history
+
+https://pytorch.org/tutorials/beginner/blitz/autograd_tutorial.html
+
+pytorch笔记(计算图+autograd)-Node(1)
+
+详解Pytorch中的网络构造
+
+PyTorch的优化器
+
+PyTorch的分布式
+
+PyTorch的Tensor（下）
+
+PyTorch的Tensor(中)
+
+PyTorch的Tensor（上）
+
+PyTorch的动态图(下)
+
+PyTorch的动态图(上)
+
+计算图——用Pytorch解释李宏毅老师PPT中的实例
+
+如何使用pytorch自动求梯度
+
+PyTorch自动求导（Autograd）原理解析
+
+pytorch自动求导Autograd系列教程（一）
+
+PyTorch核心开发者亲自揭秘其内部机制
+
+PyTorch自动微分基本原理
+
+https://towardsdatascience.com/pytorch-autograd-understanding-the-heart-of-pytorchs-magic-2686cd94ec95
