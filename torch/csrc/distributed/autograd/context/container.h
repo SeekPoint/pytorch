@@ -109,7 +109,7 @@ class TORCH_API DistAutogradContainer {
     mutable std::mutex lock;
 
     // Map storing autograd contexts for this shard.
-    std::unordered_map<int64_t, ContextPtr> contexts;
+    std::unordered_map<int64_t, ContextPtr> contexts; // 这里存储了上下文指针
   };
 
   // NOLINTNEXTLINE(modernize-use-equals-delete)
@@ -146,7 +146,7 @@ class TORCH_API DistAutogradContainer {
 
   // Auto incrementing context id used to identify unique autograd passes.
   // Initialized with the first 16 bits being the worker_id.
-  std::atomic<int64_t> next_context_id_;
+  std::atomic<int64_t> next_context_id_;  // 新增上下文id
 
   // Unique id to identify a worker in the distributed setting.
   int16_t worker_id_;
@@ -155,7 +155,7 @@ class TORCH_API DistAutogradContainer {
   bool initialized_;
 
   // Sharded autograd context map.
-  std::vector<ContextsShard> autograd_contexts_;
+  std::vector<ContextsShard> autograd_contexts_;  // 存储上下文列表
 
   // Number of shards for the sharded autograd_contexts_ map.
   uint32_t num_shards_;

@@ -104,7 +104,7 @@ PyObject* dist_autograd_init(PyObject* _unused, PyObject* noargs) {
         return DistAutogradContainer::getInstance().currentContext();
       },
       py::return_value_policy::reference);
-
+//我们再推导，看看如何设置 worker id，找到了如下，看来需要看看 python 世界的 _init 方法。
   module.def(
       "_init",
       [](int64_t worker_id) { DistAutogradContainer::init(worker_id); },

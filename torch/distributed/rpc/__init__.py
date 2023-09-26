@@ -196,7 +196,8 @@ if is_available():
         # and others might not have. As a result, a node calling
         # torch.distributed.autograd.backward() would run into errors since
         # other nodes might not have been initialized.
-        dist_autograd._init(rank)
+        dist_autograd._init(rank)  # rank是全局唯一
+        # #来到 python 世界，可以看到，使用了 rank 来作为参数，而 rank 是每个 worker 唯一的，这样就保证了 worker ID 唯一，从而 消息 id 唯一。
 
         _set_profiler_node_id(rank)
         # Initialize RPC.

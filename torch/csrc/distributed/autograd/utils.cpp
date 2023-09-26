@@ -37,7 +37,7 @@ void addSendRpcBackward(
 
   // Attach the appropriate autograd edges.
   auto grad_fn = std::make_shared<SendRpcBackward>();
-  grad_fn->set_next_edges(
+  grad_fn->set_next_edges( // 这里会设置其输出边
       torch::autograd::collect_next_edges(tensors_with_grad));
 
   // Add the appropriate input metadata for the grad_fn.
@@ -55,6 +55,8 @@ ContextPtr addRecvRpcBackward(
     rpc::worker_id_t fromWorkerId,
     const std::unordered_map<c10::Device, c10::Device>& deviceMap) {
   // Initialize autograd context if necessary.
+  // 生成或者得到一个上下文，把发送方的 autogradContextId 传入，
+  // 即利用 autogradContextId 作为key后续可以查找到这个上下文
   auto& autogradContainer = DistAutogradContainer::getInstance();
   auto autogradContext =
       autogradContainer.getOrCreateContext(autogradMetadata.autogradContextId);
@@ -100,12 +102,14 @@ Message getMessageWithProfiling(
   return std::move(wrappedProfilingMsg).toMessage();
 }
 
+//而 getMessageWithAutograd 会与上下文交互，其代码位于 torch/csrc/distributed/autograd/utils.cpp。
 Message getMessageWithAutograd(
     const rpc::worker_id_t dstId,
     torch::distributed::rpc::Message&& wrappedRpcMsg,
     MessageType msgType,
     bool forceGradRecording,
     const std::unordered_map<c10::Device, c10::Device>& deviceMap) {
+// 获取到 DistAutogradContainer
   auto& autogradContainer = DistAutogradContainer::getInstance();
 
   // If there is no valid context and no tensor requires grads, send original
@@ -119,10 +123,11 @@ Message getMessageWithAutograd(
   }
 
   // Retrieve the appropriate context to modify.
-  auto autogradContext = autogradContainer.currentContext();
+  auto autogradContext = autogradContainer.currentContext(); // 获取到上下文，每个worker都有自己的上下文
 
   // Wrap the original rpc with autograd information.
-  AutogradMetadata autogradMetadata(
+  // newAutogradMessageId 会生成一个messageID
+  AutogradMetadata autogradMetadata( // 构建了 AutogradMetadata   //// 使用上下文id和消息id来构建元数据
       autogradContext->contextId(), autogradContainer.newAutogradMessageId());
   auto rpcWithAutograd = std::make_unique<RpcWithAutograd>(
       RpcAgent::getCurrentRpcAgent()->getWorkerInfo().id_,
@@ -133,13 +138,13 @@ Message getMessageWithAutograd(
 
   if (tensorsRequireGrad) {
     // Record autograd information for 'send'.
-    addSendRpcBackward(
+    addSendRpcBackward(  // 这里把本地上下文，autograd 的元信息等一起打包
         autogradContext, autogradMetadata, rpcWithAutograd->tensors());
   }
   // Record the workerID
   autogradContext->addKnownWorkerId(dstId);
 
-  return std::move(*rpcWithAutograd).toMessage();
+  return std::move(*rpcWithAutograd).toMessage();  // 最终构建了一个message
 }
 
 /*
@@ -191,6 +196,13 @@ Message getMessageWithAutograd(
                |                 |
                +-----------------+
 */
+
+/*
+0x01 设计脉络
+1.1 前文回顾
+在前文之中当发送消息时候，
+我们在 sendMessageWithAutograd 通过 getMessageWithAutograd 来获得了 FORWARD_AUTOGRAD_REQ 类型的消息。
+*/
 c10::intrusive_ptr<JitFuture> sendMessageWithAutograd(
     RpcAgent& agent,
     const WorkerInfo& dst,
@@ -218,6 +230,7 @@ c10::intrusive_ptr<JitFuture> sendMessageWithAutograd(
     // 发送消息
     fut = agent.send(dst, std::move(msgWithProfiling), rpcTimeoutSeconds);
   } else {
+    // 发送消息
     fut = agent.send(dst, std::move(msg), rpcTimeoutSeconds);
   }
 

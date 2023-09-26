@@ -368,12 +368,13 @@ void RequestCallbackNoPython::processForwardAutogradReq(
   // Need to reverse the device map for the backward pass of distributed
   // autograd.
   std::unordered_map<c10::Device, c10::Device> reverseDeviceMap;
+  // 对deviceMap进行转置
   for (const auto& mapEntry : rpcWithAutograd.deviceMap()) {
     reverseDeviceMap.insert({mapEntry.second, mapEntry.first});
   }
 
   // Attach 'recv' autograd function.
-  auto autogradContext = addRecvRpcBackward(
+  auto autogradContext = addRecvRpcBackward( // 调用了 addRecvRpcBackward 加入上下文
       rpcWithAutograd.autogradMetadata(),
       rpcWithAutograd.tensors(),
       rpcWithAutograd.fromWorkerId(),
@@ -396,7 +397,7 @@ void RequestCallbackNoPython::processForwardAutogradReq(
       c10::make_intrusive<JitFuture>(at::AnyClassType::get());
   // Kick off processing for the nested RPC command.
   // wrappedRpcResponseFuture will be a Future<T> to the result.
-  processRpc(
+  processRpc( // 可能会有nested命令的可能，所以需要再处理一次
       rpcWithAutograd.wrappedRpc(),
       wrappedMessageType,
       messageId,

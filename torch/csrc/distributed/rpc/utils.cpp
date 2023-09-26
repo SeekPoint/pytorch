@@ -124,6 +124,7 @@ std::unique_ptr<RpcCommandBase> deserializeRequest(const Message& request) {
       return RRefForkRequest::fromMessage(request);
     }
     case MessageType::FORWARD_AUTOGRAD_REQ: {
+    // 会来到这里
       return autograd::RpcWithAutograd::fromMessage(request);
     }
     case MessageType::BACKWARD_AUTOGRAD_REQ: {

@@ -184,7 +184,7 @@ def _run_trainer(emb_rref_list, rank):
                 dist_autograd.backward(context_id, [loss])
 
                 # Run distributed optimizer. Gradients propagated all the way to the parameter servers
-                opt.step(context_id)
+                opt.step(context_id) # 这里生成一个上下文
 
                 # Not necessary to zero grads as each iteration creates a different
                 # distributed autograd context which hosts different grads

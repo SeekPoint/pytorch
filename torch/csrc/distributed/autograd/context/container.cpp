@@ -33,6 +33,10 @@ DistAutogradContainer::DistAutogradContainer(uint32_t num_shards)
   TORCH_INTERNAL_ASSERT((num_shards & (num_shards - 1)) == 0);
 }
 
+/*
+然后看如何初始化 next_autograd_message_id_？从 DistAutogradContainer 的 init 函数中可以知道，
+原来是依据 worker_id 来生成 next_autograd_message_id_。work_id 是 init 函数所得到的参数。
+*/
 DistAutogradContainer& DistAutogradContainer::init(int64_t worker_id) {
   std::lock_guard<std::mutex> guard(dist_container_init_lock_);
 
@@ -104,6 +108,8 @@ DistAutogradContainer& DistAutogradContainer::getInstanceInternal() {
   return *container;
 }
 
+//先看 newAutogradMessageId 是如何生成消息 id，
+//原来是在 DistAutogradContainer 之中的成员变量 next_autograd_message_id_ 递增得到。
 int64_t DistAutogradContainer::newAutogradMessageId() {
   // Check for overflow into workerId_ section.
   TORCH_INTERNAL_ASSERT(next_autograd_message_id_ < max_id_);
@@ -113,12 +119,12 @@ int64_t DistAutogradContainer::newAutogradMessageId() {
 ContextPtr DistAutogradContainer::getOrCreateContext(int64_t context_id) {
   auto& shard = getShard(context_id);
   std::lock_guard<std::mutex> guard(shard.lock);
-  auto it = shard.contexts.find(context_id);
+  auto it = shard.contexts.find(context_id); // 根据这个context id来查找
   if (it != shard.contexts.end()) {
-    return it->second;
+    return it->second; // 找到就返回
   }
 
-  auto& context =
+  auto& context =  // 如果没有，就构建一个 context
       shard.contexts
           .emplace(
               std::piecewise_construct,
@@ -138,8 +144,8 @@ const ContextPtr DistAutogradContainer::newContext() {
       current_context_id_ == kInvalidContextId,
       "Already have an autograd context id for this thread.");
 
-  auto context_id = next_context_id_++;
-  current_context_id_ = context_id;
+  auto context_id = next_context_id_++; // 递增
+  current_context_id_ = context_id;  // 在这里设置了本地线程的 current_context_id_
 
   // Check for overflow into workerId_ section.
   TORCH_INTERNAL_ASSERT(context_id < max_id_);
