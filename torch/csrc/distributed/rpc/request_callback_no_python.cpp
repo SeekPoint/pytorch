@@ -450,17 +450,17 @@ void RequestCallbackNoPython::processBackwardAutogradReq(
 
   // Retrieve the appropriate autograd context.
   auto autogradContext = DistAutogradContainer::getInstance().retrieveContext(
-      autogradMetadata.autogradContextId);
+      autogradMetadata.autogradContextId); // 得到发送者的context id
 
   // Lookup the appropriate 'send' function to enqueue.
-  std::shared_ptr<SendRpcBackward> sendFunction =
+  std::shared_ptr<SendRpcBackward> sendFunction =  // 依据发送者context id和消息id得到sendFunction
       autogradContext->retrieveSendFunction(autogradMetadata.autogradMessageId);
 
   // Attach the gradients to the send function.
-  sendFunction->setGrads(gradientsCall.getGrads());
+  sendFunction->setGrads(gradientsCall.getGrads()); // 设置梯度
 
   // Now execute the autograd graph using the "distributed engine."
-  auto execFuture = DistEngine::getInstance().executeSendFunctionAsync(
+  auto execFuture = DistEngine::getInstance().executeSendFunctionAsync( // 调用引擎
       autogradContext, sendFunction, gradientsCall.retainGraph());
 
   // Our response is satisfied when the rpcs come back.

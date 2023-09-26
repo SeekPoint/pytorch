@@ -21,7 +21,7 @@ RecvRpcBackward::RecvRpcBackward(
       fromWorkerId_(fromWorkerId),
       deviceMap_(std::move(deviceMap)) {}
 
-variable_list RecvRpcBackward::apply(variable_list&& grads) {
+variable_list RecvRpcBackward::apply(variable_list&& grads) {  // 调用Node
   std::vector<Variable> outputGrads;
   for (size_t i = 0; i < grads.size(); i++) {
     const auto& grad = grads[i];
@@ -43,16 +43,16 @@ variable_list RecvRpcBackward::apply(variable_list&& grads) {
 
   // Send the gradients over the wire and record the future in the autograd
   // context.
-  PropagateGradientsReq gradCall(
+  PropagateGradientsReq gradCall(  // 这里构建了 PropagateGradientsReq
       autogradMetadata_,
       outputGrads,
       sharedContext->retrieveGraphTask()->keep_graph_);
 
   // Send the gradients over to the appropriate node.
   auto rpcAgent = rpc::RpcAgent::getCurrentRpcAgent();
-  auto jitFuture = rpcAgent->send(
+  auto jitFuture = rpcAgent->send( // 发送出去，就是给后向传播过程的下一个节点
       rpcAgent->getWorkerInfo(fromWorkerId_),
-      std::move(gradCall).toMessage(),
+      std::move(gradCall).toMessage(),  // 这里调用了PropagateGradientsReq::toMessageImpl
       rpc::kUnsetRpcTimeout,
       deviceMap_);
 
