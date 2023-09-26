@@ -126,6 +126,20 @@ struct TORCH_API RpcRetryInfo {
   RpcRetryOptions options_;
 };
 
+/*
+
+2.2 RPC 代理
+dist.autograd 的相关功能都是基于 RPC 代理完成，所以我们需要仔细看看代理。
+
+2.2.1 RpcAgent
+这是用来传递RPC的代理，是收发 RPC消息的代理基类，其：
+
+    提供了send API用来处理request 和 response。
+    也配置了 cb_ 用来处理接收到的请求。
+
+WorkerInfo 是代理实例所在 worker 的全局唯一标示，包括name_和id_这两个成员变量。name_是全局唯一名字，id_是全局唯一ID。
+
+*/
 // ``RpcAgent`` is the base class for sending and receiving RPC messages. It
 // provides a unified ``send`` API for both request and response messages, and
 // will invoke the given ``RequestCallback`` to process received requests. It
@@ -160,6 +174,7 @@ class TORCH_API RpcAgent {
   // If ``message.isRequest()`` is true, the ``JitFuture`` will be
   // completed when the response arrives. For other message types, the Future
   // should be ignored by the caller.
+  // // 给 to.id 代表的其他 RpcAgengt 发送一个消息，返回一个JitFuture，这个实现是异步的。
   virtual c10::intrusive_ptr<JitFuture> send(
       const WorkerInfo& to,
       Message&& message,
@@ -271,9 +286,9 @@ class TORCH_API RpcAgent {
 
  protected:
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  const WorkerInfo workerInfo_;
+  const WorkerInfo workerInfo_; //// 代理实例的全局唯一标示
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  const std::unique_ptr<RequestCallback> cb_;
+  const std::unique_ptr<RequestCallback> cb_;  // 回调函数
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   std::atomic<std::chrono::milliseconds> rpcTimeout_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
@@ -287,7 +302,7 @@ class TORCH_API RpcAgent {
   std::atomic<bool> rpcAgentRunning_;
 
  private:
-  static std::shared_ptr<RpcAgent> currentRpcAgent_;
+  static std::shared_ptr<RpcAgent> currentRpcAgent_;   // 全局代理
   // Add GIL wait time data point to metrics
   virtual void addGilWaitTime(const std::chrono::microseconds gilWaitTime) = 0;
   friend class PythonRpcHandler;

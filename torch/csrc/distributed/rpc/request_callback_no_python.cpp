@@ -49,7 +49,12 @@ std::unique_ptr<RpcCommandBase> RequestCallbackNoPython::
       "Python calls are not supported!");
   return rpc;
 }
+/*
+随后，会调用到 RequestCallbackNoPython::processMessage 之中。
 
+    先调用 RequestCallbackImpl 中实现的 deserializePythonRpcCommand 来对 PythonUDF 反序列化。
+    然后调用 processRpcWithErrors 来处理消息。
+*/
 c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processMessage(
     Message& request,
     std::shared_ptr<LazyStreamContext> ctx) const {
@@ -62,8 +67,9 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processMessage(
   try {
     rrefContext.recordThreadLocalPendingRRefs();
     // Deserialize PythonUDF here to trigger RRef unpickling
+    // 调用 RequestCallbackImpl 中实现的  deserializePythonRpcCommand 来对 PythonUDF 反序列化
     std::unique_ptr<RpcCommandBase> rpc = deserializePythonRpcCommand(
-        deserializeRequest(request), request.type());
+        deserializeRequest(request), request.type()); // 解析请求
     auto rrefsReadyFuture = rrefContext.waitForThreadLocalPendingRRefs();
 
     rrefsReadyFuture->addCallback(
@@ -91,7 +97,7 @@ c10::intrusive_ptr<JitFuture> RequestCallbackNoPython::processMessage(
                 serverProcessGlobalProfilerStateStackEntryPtr->statePtr()
                     ->config());
           }
-
+            // 在这里  然后调用到 processRpcWithErrors。
           processRpcWithErrors(
               *rpc, messageType, id, retFuture, std::move(ctx));
 
@@ -577,6 +583,7 @@ void RequestCallbackNoPython::processRRefBackward(
   C10_THROW_ERROR(Error, "Python call not supported!");
 }
 
+//接下来是 processRpc。这里能够看到处理 FORWARD_AUTOGRAD_REQ。
 void RequestCallbackNoPython::processRpc(
     RpcCommandBase& rpc,
     const MessageType& messageType,
@@ -633,7 +640,7 @@ void RequestCallbackNoPython::processRpc(
       processRRefForkRequest(rpc, markComplete);
       return;
     }
-    case MessageType::FORWARD_AUTOGRAD_REQ: {
+    case MessageType::FORWARD_AUTOGRAD_REQ: {  // 这里就和之前发送的对应上了
       processForwardAutogradReq(rpc, messageId, responseFuture, std::move(ctx));
       return;
     }

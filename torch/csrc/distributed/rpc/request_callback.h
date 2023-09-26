@@ -7,7 +7,10 @@ namespace distributed {
 namespace rpc {
 
 struct LazyStreamContext;
-
+/*
+2.2.4.1 RequestCallback
+RequestCallback 是处理 RPC 消息的接口，是一个抽象类。
+*/
 // Functor which is invoked to process an RPC message. This is an abstract class
 // with some common functionality across all request handlers. Users need to
 // implement this interface to perform the actual business logic.

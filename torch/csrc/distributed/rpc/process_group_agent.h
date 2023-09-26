@@ -58,6 +58,8 @@ struct RecvWork {
   torch::Tensor payload_;
 };
 
+//2.2.2 ProcessGroupAgent
+//ProcessGroupAgent 是 RpcAgent 的派生类。这是之前使用的，但是 PyTorch 提供了更优秀的 TensorAgent。我们只选取了部分成员变量。
 class TORCH_API ProcessGroupAgent : public RpcAgent {
  public:
   ProcessGroupAgent(

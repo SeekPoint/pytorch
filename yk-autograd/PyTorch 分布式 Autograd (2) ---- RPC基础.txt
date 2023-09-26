@@ -1,0 +1,484 @@
+PyTorch 分布式 Autograd (2) ---- RPC基础
+
+https://www.cnblogs.com/rossiXYZ/p/15625801.html
+
+目录
+[源码解析] PyTorch 分布式 Autograd (2) ---- RPC基础
+0x00 摘要
+0x01 示例
+0x02 RPC 基础
+2.1 初始化
+2.1.1 初始化后端
+2.1.2 生成代理
+2.1.3 设置代理
+2.1.4 静态类变量
+2.2 RPC 代理
+2.2.1 RpcAgent
+2.2.2 ProcessGroupAgent
+2.2.3 TensorPipeAgent
+2.2.4 回调函数
+2.2.4.1 RequestCallback
+2.2.4.2 RequestCallbackNoPython
+0x03 发送逻辑
+3.1 Python
+3.2 C++
+3.2.1 pyRpcBuiltin
+3.2.2 sendMessageWithAutograd
+0x04 接受逻辑
+4.1 回调
+4.2 operator()
+4.3 RequestCallbackImpl
+0xFF 参考
+0x00 摘要
+前文我们给出了分布式autograd的设计思路，本文开始，我们进行具体源码分析。
+因为无论是前向传播还是反向传播，都需要依赖 RPC 来完成，所以我们先看看封装于 RPC 之上的一些基本功能，
+比如初始化，代理（RPC 相关功能都是基于代理完成），消息接受，发送等等。
+
+通过本文，大家可以了解：如何初始化RPC后端，如何生成 RPC 代理，如何使用RPC代理进行发送和接受消息，如何连接远端 dist.autograd 自动微分引擎。
+
+PyTorch分布式其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+
+[源码解析] PyTorch 分布式(4)------分布式应用基础概念
+
+[源码解析] PyTorch分布式(5) ------ DistributedDataParallel 总述&如何使用
+
+[源码解析] PyTorch分布式(6) ---DistributedDataParallel -- 初始化&store
+
+[源码解析] PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+
+[源码解析] PyTorch 分布式(8) -------- DistributedDataParallel之论文篇
+
+[源码解析] PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+
+[源码解析] PyTorch 分布式(10)------DistributedDataParallel 之 Reducer静态架构
+
+[源码解析] PyTorch 分布式(11) ----- DistributedDataParallel 之 构建Reducer和Join操作
+
+[源码解析] PyTorch 分布式(12) ----- DistributedDataParallel 之 前向传播
+
+[源码解析] PyTorch 分布式(13) ----- DistributedDataParallel 之 反向传播
+
+[源码解析] PyTorch 分布式 Autograd (1) ---- 设计
+
+为了更好的说明，本文代码会依据具体情况来进行相应精简。
+
+0x01 示例
+我们从 PyTorch 示例部分之中摘录示例代码并且修改了一些，代码目的是让两个 worker 之间就通过 RPC 进行协作。示例 worker 具体分为两部分：
+
+    RPC操作，构建依赖基础。
+    执行后向传播。
+
+def my_add(t1, t2):
+  return torch.add(t1, t2)
+
+def worker0():
+    # On worker 0:
+
+    # Setup the autograd context. Computations that take
+    # part in the distributed backward pass must be within
+    # the distributed autograd context manager.
+    with dist_autograd.context() as context_id:
+      t1 = torch.rand((3, 3), requires_grad=True)
+      t2 = torch.rand((3, 3), requires_grad=True)
+
+      # 第一阶段：RPC操作，构建依赖基础
+
+      # Perform some computation remotely.
+      t3 = rpc.rpc_sync("worker1", my_add, args=(t1, t2))
+
+      # Perform some computation locally based on remote result.
+      t4 = torch.rand((3, 3), requires_grad=True)
+      t5 = torch.mul(t3, t4)
+
+      # Compute some loss.
+      loss = t5.sum()
+
+      # 第二阶段，执行后向传播
+
+      # Run the backward pass.
+      dist_autograd.backward(context_id, [loss])
+
+      # Retrieve the gradients from the context.
+      dist_autograd.get_gradients(context_id)
+
+      print(loss)
+
+可以用如下办法来启动了两个 worker，其中使用了 rpc.init_rpc 来初始化 rpc。
+worker0 会启动，然后利用 RPC 在 worker 1 之上也进行了一些操作。
+
+def run_worker(rank, world_size):
+    r"""
+    A wrapper function that initializes RPC, calls the function, and shuts down
+    RPC.
+    """
+
+    # We need to use different port numbers in TCP init_method for init_rpc and
+    # init_process_group to avoid port conflicts.
+    rpc_backend_options = TensorPipeRpcBackendOptions()
+    rpc_backend_options.init_method = "tcp://localhost:29501"
+
+    # Rank 0 and 1 are trainers.
+    if rank == 0:
+        rpc.init_rpc(
+            "worker0",
+            rank=rank,
+            world_size=world_size,
+            rpc_backend_options=rpc_backend_options,
+        )
+        worker0()
+
+    elif rank == 1:
+        rpc.init_rpc(
+            "worker1",
+            rank=rank,
+            world_size=world_size,
+            rpc_backend_options=rpc_backend_options,
+        )
+
+    # block until all rpcs finish
+    rpc.shutdown()
+
+0x02 RPC 基础
+2.1 初始化
+我们从头看看示例代码，当脚本启动时候，会调用到 rpc.init_rpc 来初始化 rpc。
+从 RPC 注释中可以看到两个概念，就是大家常见的 rank 和 world_size。
+
+    rank (int): a globally unique id/rank of this node.
+    world_size (int): The number of workers in the group.
+
+具体初始化代码是：
+
+def init_rpc(
+    name,
+    backend=None,
+    rank=-1,
+    world_size=None,
+    rpc_backend_options=None,
+):
+        dist_autograd._init(rank) # 我们后续会讨论分布式自动微分引擎
+        _set_profiler_node_id(rank)
+        # Initialize RPC.
+        _init_rpc_backend(backend, store, name, rank, world_size, rpc_backend_options)
+
+其中我们关心的是：_init_rpc_backend 会设定后端。
+
+2.1.1 初始化后端
+_init_rpc_backend 这里会依据配置来看看最后生成什么 Agent，然后把这个代理设定到当前上下文。
+RPC有两种后端，TENSORPIPE 和 PROCESS_GROUP，其中PROCESS_GROUP已经被废弃，会逐渐迁移到TENSORPIPE。
+
+def _init_rpc_backend(
+    backend=BackendType.TENSORPIPE,  # 默认后端是TENSORPIPE
+    store=None,
+    name=None,
+    rank=-1,
+    world_size=-1,
+    rpc_backend_options=None,
+):
+
+    _validate_rpc_args(backend, store, name, rank, world_size, rpc_backend_options)
+
+    if _is_current_rpc_agent_set():
+        raise RuntimeError("RPC is already initialized")
+
+    # Initialize RPC.
+    rpc_agent = backend_registry.init_backend( # 生成一个agent
+        backend,
+        store=store,
+        name=name,
+        rank=rank,
+        world_size=world_size,
+        rpc_backend_options=rpc_backend_options,
+    )
+
+    api._init_rpc_states(rpc_agent) # 设定代理到当前上下文
+可以看到，默认会生成 TensorPipeAgent。
+
+2.1.2 生成代理
+我们接下来看看如何生成 TensorPipeAgent，具体是在 torch/csrc/distributed/rpc/init.cpp。
+当这里生成 TensorPipeAgent 时候，把 RequestCallbackImpl 配置为回调函数。代理内部就用这个回调函数用来处理接收到的请求。
+
+shared_ptr_class_<TensorPipeAgent>(module, "TensorPipeAgent", rpcAgent)
+    .def(
+...
+具体如下：
+
++-----------------+        +-----------------------+
+| TensorPipeAgent |        | RequestCallbackImpl   |
+|                 |        |                       |
+|         cb_ +----------> |                       |
+|                 |        |                       |
++-----------------+        +-----------------------+
+2.1.3 设置代理
+_init_rpc_states 会把代理设置在PyTorch环境之中，其定义在 torch/distributed/rpc/api.py 之中有。
+
+    def _init_rpc_states(agent):
+        worker_infos = agent.get_worker_infos()
+        global _ALL_WORKER_NAMES
+        _ALL_WORKER_NAMES = {worker_info.name for worker_info in worker_infos}
+
+        # NB: backend implementation might have already set the rpc_agent.
+        if not _is_current_rpc_agent_set():
+            _set_and_start_rpc_agent(agent)
+接下来就要进入了C++世界。在 torch/csrc/distributed/rpc/init.cpp 中有 _set_and_start_rpc_agent，其作用是：
+
+    RpcAgent::setCurrentRpcAgent 设定了代理。
+    调用 rpcAgent->start() 来启动代理。
+
+module.def(
+    "_set_and_start_rpc_agent",
+。。。
+
+setCurrentRpcAgent 定义在 torch/csrc/distributed/rpc/rpc_agent.cpp 之中。
+
+2.1.4 静态类变量
+在 RpcAgent 之中，有一个静态成员变量 currentRpcAgent_。
+
+    class TORCH_API RpcAgent {
+         // 我们省略了其他成员变量和函数
+         private:
+          static std::shared_ptr<RpcAgent> currentRpcAgent_;
+    }
+
+在 C++ 之中，静态成员变量有如下特点：
+
+    其属于整个类所有。
+    其生命期不依赖于任何对象，为程序的生命周期。
+    可以通过类名直接访问公有静态成员变量。
+    可以通过对象名访问一个类的公有静态成员变量。
+    类的所有派生对象共享该类的静态成员变量。
+    静态成员变量需要在该类外单独分配空间。
+    静态成员变量在程序内部位于全局数据区。
+
+所以，我们可知RpcAgent::currentRpcAgent_ 可以认为就是全局变量，rpc 统一使用这个变量进行协调。
+具体通过 RpcAgent 的一些公有成员函数来完成这些功能。
+
+    std::shared_ptr<RpcAgent> RpcAgent::currentRpcAgent_ = nullptr;
+
+    bool RpcAgent::isCurrentRpcAgentSet() {
+      return std::atomic_load(&currentRpcAgent_) != nullptr;
+    }
+
+    std::shared_ptr<RpcAgent> RpcAgent::getCurrentRpcAgent() {
+      std::shared_ptr<RpcAgent> agent = std::atomic_load(&currentRpcAgent_);
+      return agent;
+    }
+
+    void RpcAgent::setCurrentRpcAgent(std::shared_ptr<RpcAgent> rpcAgent) {
+      if (rpcAgent) {
+        std::shared_ptr<RpcAgent> previousAgent;
+        // Use compare_exchange so that we don't actually perform the exchange if
+        // that would trigger the assert just below. See:
+        // https://en.cppreference.com/w/cpp/atomic/atomic_compare_exchange
+        std::atomic_compare_exchange_strong(
+            &currentRpcAgent_, &previousAgent, std::move(rpcAgent));
+      } else {
+        // We can't use compare_exchange (we don't know what value to expect) but we
+        // don't need to, as the only case that would trigger the assert is if we
+        // replaced nullptr with nullptr, which we can just do as it has no effect.
+        std::shared_ptr<RpcAgent> previousAgent =
+            std::atomic_exchange(&currentRpcAgent_, std::move(rpcAgent));
+      }
+    }
+于是目前拓展如下，以后进行 RPC 操作，都会通过 RpcAgent::currentRpcAgent_ 这个全局变量进行。
+
+RpcAgent::currentRpcAgent_
+      +
+      |
+      |
+      |
+      v
++-----+-----------+        +-----------------------+
+| TensorPipeAgent |        | RequestCallbackImpl   |
+|                 |        |                       |
+|         cb_ +----------> |                       |
+|                 |        |                       |
++-----------------+        +-----------------------+
+2.2 RPC 代理
+dist.autograd 的相关功能都是基于 RPC 代理完成，所以我们需要仔细看看代理。
+
+2.2.1 RpcAgent
+这是用来传递RPC的代理，是收发 RPC消息的代理基类，其：
+
+    提供了send API用来处理request 和 response。
+    也配置了 cb_ 用来处理接收到的请求。
+
+WorkerInfo 是代理实例所在 worker 的全局唯一标示，包括name_和id_这两个成员变量。name_是全局唯一名字，id_是全局唯一ID。
+....
+
+
+0x03 发送逻辑
+我们先来看看发送逻辑。也就是 rpc.rpc_sync 的作用：建立 root，添加 send等。
+
+3.1 Python
+我们从 python 部分开始。
+
+    # Perform some computation remotely.
+    t3 = rpc.rpc_sync("worker1", my_add, args=(t1, t2))
+首先来到 rpc_sync，发现其调用了_invoke_rpc。
+
+    @_require_initialized
+    def rpc_sync(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
+        fut = _invoke_rpc(to, func, RPCExecMode.SYNC, args, kwargs, timeout)
+        return fut.wait()
+其次来到_invoke_rpc，可以看到此函数依据调用类型不同（内置操作，script，udf这三种），选择了不同路径。
+
+    def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RPC_TIMEOUT):
+        qualified_name = torch.jit._builtins._find_builtin(func)
+    ...
+
+从这里开始就进入到了C++世界，torch/csrc/distributed/rpc/init.cpp。
+
+3.2 C++
+这里可以看到_invoke_rpc_builtin 对应了 pyRpcBuiltin，_invoke_rpc_python_udf 对应了 pyRpcPythonUdf。
+
+    PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
+      module.def(
+          "_invoke_rpc_builtin",
+    ...
+
+
+
+0x04 接受逻辑
+4.1 回调
+...
+
+4.2 operator()
+operator() 之中会调用 processMessage 处理消息。
+....
+
+4.3 RequestCallbackImpl
+....
+逻辑图修改如下：
+
+
+具体如下：
+
+ TensorPipeAgent      RequestCallback  RequestCallbackNoPython     RequestCallbackImpl
+        +                   +                 +                          +
+        |                   |                 |                          |
+        |                   |                 |                          |
+        v                   |                 |                          |
+    respond                 |                 |                          |
+        +                   |                 |                          |
+        |                   |                 |                          |
+        |                   |                 |                          |
+        v                   v                 v                          |
+cb_->operator()  +-->   operator()  +-->  processMessage                 |
+                                              +                          |
+                                              |                          |
+                                              |                          v
+                                              +--------------->  deserializePythonRpcCommand
+                                              |
+                                              |
+                                              |
+                                              v
+
+                                      processRpcWithErrors
+                                              +
+                                              |
+                                              |
+                                              v
+                                          processRpc
+                                              +
+                                              |
+                                              |
+                                              v
+                                    processForwardAutogradReq
+...
+
+
+如果结合之前的发送，我们拓展图例如下：
+
+    当发送者需要在远端运行自动梯度计算时候，调用 rpc.rpc_sync。
+
+    从 Python 调用到 C++ 世界，函数为 pyRpcBuiltin。
+
+    调用 sendMessageWithAutograd，以此通知Receiver。
+
+    会调用 RpcAgent::getCurrentRpcAgent() 来得到本地的 Agent。
+
+    调用 current Agent 的 send 函数。
+
+    send 函数发送 FORWARD_AUTOGRAD_REQ给 Receiver worker。
+
+    respond 函数会调用 Receiver 之中 Agent 的回调函数 cb_。
+
+    调用到 RequestCallbackImpl 的 processRpcWithErrors。
+
+    然后调用 processRpc。
+
+    最后调用到 processForwardAutogradReq，完成了基于RPC的分布式autograd的启动过程。
+
+                                                             +
+ rpc.rpc_sync                                 Sender         |     Receiver
+        +                                                    |
+        |                                                    |
+        | 1                                                  |
+        v                                                    |
+ _invoke_rpc_builtin                                         |
+        +                                                    |
+        |                                      Python        |
++----------------------------------------------------------+ |
+        |                                      C++           |      +----------------------------+
+        |  2                                                 |      | RequestCallbackImpl        |
+        v                                                    |      |                            |
+                                                             |   +----> processRpcWithErrors     |
+   pyRpcBuiltin                                              |   |  |             +              |
+        +                                                    |   |  |             | 9            |
+        |  3                                                 |   |  |             |              |
+        |                                                    |   |  |             v              |
+        v                                                    |   |  |         processRpc         |
+                                     4                       |   |  |             +              |
+sendMessageWithAutograd(RpcAgent::getCurrentRpcAgent())      |   |  |             | 10           |
+        +                                                    |   |  |             |              |
+        |                                                    |   |  |             v              |
+        |                                                    |   |  |  processForwardAutogradReq |
+        |   RpcAgent::currentRpcAgent_                       |   |  |                            |
+        |           +                                        |   |  +----------------------------+
+        |           |                                        |   |
+        | 5         |                                        |   |8     +-----------------+
+        |           v                                        |   |      | TensorPipeAgent |
+        |    +------+--------+                               |   |      |                 |
+        |    |TensorPipeAgent|   +-------------------+       |   +------------+ cb_       |
+        |    |               |   |RequestCallbackImpl|       |          |        ^        |
+        |    |      cb_ +------->+                   |       |          |      7 |        |
+        |    |               |   +-------------------+       |          |        |        |
+        |    |               |                          6    |          |        +        |
+        +--------> send   +----------------------------------+--------------> respond     |
+             |               |                   FORWARD_AUTOGRAD_REQ   |                 |
+             |               |                               +          |                 |
+             +---------------+                               |          +-----------------+
+                                                             +
+
+
+手机如下： 0445.png
+至此，RPC介绍完毕，我们下一篇介绍上下文相关等管理类，敬请期待。
+
+0xFF 参考
+分类: 001_机器学习 , 006_深度学习 , 011_分布式机器学习

@@ -230,6 +230,9 @@ const WorkerInfo& RpcAgent::getWorkerInfo() const {
   return workerInfo_;
 }
 
+//我们可知RpcAgent::currentRpcAgent_ 可以认为就是全局变量，rpc 统一使用这个变量进行协调。
+//具体通过 RpcAgent 的一些公有成员函数来完成这些功能。
+
 std::shared_ptr<RpcAgent> RpcAgent::currentRpcAgent_ = nullptr;
 
 bool RpcAgent::isCurrentRpcAgentSet() {

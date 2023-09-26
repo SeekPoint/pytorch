@@ -31,6 +31,8 @@ constexpr std::chrono::milliseconds kDeleteAllUsersTimeout(100000);
 template <typename T>
 using shared_ptr_class_ = py::class_<T, std::shared_ptr<T>>;
 
+//3.2 C++
+//这里可以看到_invoke_rpc_builtin 对应了 pyRpcBuiltin，_invoke_rpc_python_udf 对应了 pyRpcPythonUdf。
 PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
   auto rpc_module =
       THPObjectPtr(PyImport_ImportModule("torch.distributed.rpc"));
@@ -646,7 +648,19 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
 
   module.attr("_DEFAULT_NUM_WORKER_THREADS") =
       py::cast(kDefaultNumWorkerThreads);
+/*
+2.1.2 生成代理
+我们接下来看看如何生成 TensorPipeAgent，具体是在 torch/csrc/distributed/rpc/init.cpp。
+当这里生成 TensorPipeAgent 时候，把 RequestCallbackImpl 配置为回调函数。代理内部就用这个回调函数用来处理接收到的请求。
+具体如下：
 
++-----------------+        +-----------------------+
+| TensorPipeAgent |        | RequestCallbackImpl   |
+|                 |        |                       |
+|         cb_ +----------> |                       |
+|                 |        |                       |
++-----------------+        +-----------------------+
+*/
   shared_ptr_class_<TensorPipeAgent>(module, "TensorPipeAgent", rpcAgent)
       .def(
           py::init([](const c10::intrusive_ptr<::c10d::Store>& store,
@@ -717,10 +731,16 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
 
   module.def("_get_current_rpc_agent", &RpcAgent::getCurrentRpcAgent);
 
+/*
+在 torch/csrc/distributed/rpc/init.cpp 中有 _set_and_start_rpc_agent，其作用是：
+
+    RpcAgent::setCurrentRpcAgent 设定了代理。
+    调用 rpcAgent->start() 来启动代理。
+*/
   module.def(
       "_set_and_start_rpc_agent",
       [](const std::shared_ptr<RpcAgent>& rpcAgent) {
-        RpcAgent::setCurrentRpcAgent(rpcAgent);
+        RpcAgent::setCurrentRpcAgent(rpcAgent); // 这里设定了 Agent
         // Initializing typeResolver inside RpcAgent constructor will make
         // RpcAgent have python dependency. To avoid RpcAgent to have python
         // dependency, setTypeResolver() here.
@@ -733,7 +753,7 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
                   std::move(typePtr));
             });
         rpcAgent->setTypeResolver(typeResolver);
-        rpcAgent->start();
+        rpcAgent->start(); // 启动代理
       },
       py::call_guard<py::gil_scoped_release>());
 
@@ -774,7 +794,7 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
          const py::args& args,
          const py::kwargs& kwargs) {
         return std::make_shared<jit::PythonFutureWrapper>(
-            pyRpcBuiltin(dst, opName, args, kwargs, rpcTimeoutSeconds));
+            pyRpcBuiltin(dst, opName, args, kwargs, rpcTimeoutSeconds));  # 内置函数
       },
       py::call_guard<py::gil_scoped_acquire>());
 
@@ -787,7 +807,7 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
          const bool isAsyncExecution) {
         return std::make_shared<jit::PythonFutureWrapper>(pyRpcPythonUdf(
             dst,
-            pickledPythonUDF,
+            pickledPythonUDF,   # 对应了udf
             tensors,
             rpcTimeoutSeconds,
             isAsyncExecution));

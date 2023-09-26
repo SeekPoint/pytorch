@@ -174,6 +174,13 @@ c10::intrusive_ptr<JitFuture> toPyJitFuture(
   }
 }
 
+/*
+
+我们选用 _invoke_rpc_builtin 对应的 pyRpcBuiltin 来看看。
+
+3.2.1 pyRpcBuiltin
+在 torch/csrc/distributed/rpc/python_functions.cpp可以看到，pyRpcBuiltin 会调用到 sendMessageWithAutograd。
+*/
 c10::intrusive_ptr<JitFuture> pyRpcBuiltin(
     const WorkerInfo& dst,
     const std::string& opName,
@@ -186,8 +193,8 @@ c10::intrusive_ptr<JitFuture> pyRpcBuiltin(
   // Release GIL since args and kwargs processing is done.
   py::gil_scoped_release release;
   auto scriptCall = std::make_unique<ScriptCall>(op, std::move(stack));
-  auto agent = RpcAgent::getCurrentRpcAgent();
-  return toPyJitFuture(sendMessageWithAutograd(
+  auto agent = RpcAgent::getCurrentRpcAgent(); // 获取当前agent
+  return toPyJitFuture(sendMessageWithAutograd( // 发送请求
       *agent,
       dst,
       std::move(*scriptCall).toMessage(),

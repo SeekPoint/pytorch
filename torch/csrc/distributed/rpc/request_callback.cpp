@@ -8,7 +8,8 @@ namespace distributed {
 namespace rpc {
 
 using namespace torch::distributed::autograd;
-
+//4.2 operator()
+//operator() 之中会调用 processMessage 处理消息。
 c10::intrusive_ptr<JitFuture> RequestCallback::operator()(
     Message& request,
     std::shared_ptr<LazyStreamContext> ctx) const {

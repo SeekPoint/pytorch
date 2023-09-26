@@ -829,6 +829,13 @@ void TensorPipeAgent::sendCompletedResponseMessage(
   }
 }
 
+/*
+0x04 接受逻辑
+4.1 回调
+当Agent接受到消息之后，会调用到RequestCallback::operator()。就是我们前面所说的回调函数。
+代码位于 torch/csrc/distributed/rpc/tensorpipe_agent.cpp。
+
+*/
 void TensorPipeAgent::respond(std::shared_ptr<tensorpipe::Pipe>& pipe) {
   pipeRead(
       pipe,
@@ -878,6 +885,7 @@ void TensorPipeAgent::respond(std::shared_ptr<tensorpipe::Pipe>& pipe) {
             // `process***Call` methods to synchronize CUDA streams there
             // to make sure that we fetch the correct value from `to_here()`
             // call.
+            // 这里会调用 RequestCallback 来进行回调逻辑处理
             futureResponseMessage = cb_->operator()(requestMessage, ctx);
           } catch (const std::exception& /* unused */) {
             futureResponseMessage =

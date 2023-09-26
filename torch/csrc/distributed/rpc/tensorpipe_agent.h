@@ -156,6 +156,15 @@ struct AggregatedNetworkData {
   uint64_t totalErrors{0};
 };
 
+/*
+2.2.3 TensorPipeAgent
+TensorPipeAgent 定义在 torch/csrc/distributed/rpc/tensorpipe_agent.h，这是目前和未来使用的。
+TensorPipeAgent利用TensorPipe在可用传输或通道之中透明地移动张量和数据。
+它就像一个混合的RPC传输，提供共享内存（linux）和TCP（linux&mac）支持。
+PyTorch 正在开发其支持CUDA版本。
+
+我们只选取了部分成员变量。
+*/
 // TensorPipeAgent leverages TensorPipe (https://github.com/pytorch/tensorpipe)
 // to transparently move tensors and payloads through the fastest available
 // transport or channel. It acts like a hybrid RPC transport, providing shared

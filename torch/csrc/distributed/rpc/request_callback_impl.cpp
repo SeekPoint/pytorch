@@ -462,6 +462,8 @@ void RequestCallbackImpl::handleRRefDelete(
   }
 }
 
+//因为最终生成的是 RequestCallbackImpl，所以实际上，
+//上图中间有一步 processRpcWithErrors 实际调用的是 RequestCallbackImpl 这里的函数 processRpcWithErrors，其就是增加了一些异常处理逻辑。
 void RequestCallbackImpl::processRpcWithErrors(
     RpcCommandBase& rpc,
     const MessageType& messageType,
