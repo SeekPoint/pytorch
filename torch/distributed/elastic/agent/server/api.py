@@ -697,7 +697,7 @@ class SimpleElasticAgent(ElasticAgent):
     def run(self, role: str = DEFAULT_ROLE) -> RunResult:
         start_time = time.monotonic()
         try:
-            result = self._invoke_run(role)
+            result = self._invoke_run(role) # 调用
             self._total_execution_time = int(time.monotonic() - start_time)
             self._record_metrics(result)
             self._record_worker_events(result)
@@ -819,14 +819,16 @@ class SimpleElasticAgent(ElasticAgent):
             f"[{role}] starting workers for entrypoint: {spec.get_entrypoint_name()}"
         )
 
-        self._initialize_workers(self._worker_group)
+        self._initialize_workers(self._worker_group) # 启动worker
         monitor_interval = spec.monitor_interval
         rdzv_handler = spec.rdzv_handler
 
         while True:
             assert self._worker_group.state != WorkerState.INIT
+            # 定期监控
             time.sleep(monitor_interval)
-            run_result = self._monitor_workers(self._worker_group)
+            # 监控客户程序运行情况
+            run_result = self._monitor_workers(self._worker_group)  # 得到进程运行结果
             state = run_result.state
             self._worker_group.state = state
 
@@ -834,6 +836,7 @@ class SimpleElasticAgent(ElasticAgent):
             put_metric(f"workers.{role}.{state.name.lower()}", 1)
 
             if state == WorkerState.SUCCEEDED:
+                # 程序正常结束
                 log.info(
                     f"[{role}] worker group successfully finished."
                     f" Waiting {self._exit_barrier_timeout} seconds for other agents to finish."
@@ -841,7 +844,7 @@ class SimpleElasticAgent(ElasticAgent):
                 self._exit_barrier()
                 return run_result
             elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED}:
-                if self._remaining_restarts > 0:
+                if self._remaining_restarts > 0:  # 重试
                     log.info(
                         f"[{role}] Worker group {state.name}. "
                         f"{self._remaining_restarts}/{spec.max_restarts} attempts left;"
@@ -850,14 +853,16 @@ class SimpleElasticAgent(ElasticAgent):
                     self._remaining_restarts -= 1
                     self._restart_workers(self._worker_group)
                 else:
-                    self._stop_workers(self._worker_group)
+                    self._stop_workers(self._worker_group) # 重试次数达到，结束workers
                     self._worker_group.state = WorkerState.FAILED
                     self._exit_barrier()
                     return run_result
             elif state == WorkerState.HEALTHY:
+                # 节点成员关系有变化，比如scale up，就会有新节点waiting
                 # membership changes do not count as retries
                 num_nodes_waiting = rdzv_handler.num_nodes_waiting()
                 group_rank = self._worker_group.group_rank
+                # 如果有新的节点在waiting，就重启所有workers
                 if num_nodes_waiting > 0:
                     log.info(
                         f"[{role}] Detected {num_nodes_waiting} "

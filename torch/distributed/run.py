@@ -672,7 +672,7 @@ def run_script_path(training_script: str, *training_script_args: str):
 
 
 def run(args):
-    if args.standalone:
+    if args.standalone:  # 有两种模式：Standalone 模式和分布式模式，这里要判断一下
         args.rdzv_backend = "c10d"
         args.rdzv_endpoint = "localhost:29400"
         args.rdzv_id = str(uuid.uuid4())

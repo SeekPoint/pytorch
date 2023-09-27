@@ -242,7 +242,7 @@ elastic_monitor
     TE 发现了新worker 之后，如何处理？
 
     每个代理上有一个 rendezvous，这些 rendezvous 有master，slave 概念吗？有一个master专门记录当前集群状态嘛？
-    
+
     如何支持动态地增加或减少参与训练的 worker 数量？
 
 0x05 PyTorch分布式系列

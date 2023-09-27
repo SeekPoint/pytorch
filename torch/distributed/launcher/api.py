@@ -113,7 +113,7 @@ class elastic_launch:
         self._entrypoint = entrypoint
 
     def __call__(self, *args):
-        return launch_agent(self._config, self._entrypoint, list(args))
+        return launch_agent(self._config, self._entrypoint, list(args)) # 内部会调用用户程序
 
 
 def _construct_event(config: LaunchConfig) -> events.Event:
@@ -213,12 +213,12 @@ def launch_agent(
     rdzv_handler = rdzv_registry.get_rendezvous_handler(rdzv_parameters)
     master_addr, master_port = _get_addr_and_port(rdzv_parameters)
     try:
-        spec = WorkerSpec(
+        spec = WorkerSpec(  # 1. 得到spec
             role=config.role,
             local_world_size=config.nproc_per_node,
             entrypoint=entrypoint,
             args=tuple(args),
-            rdzv_handler=rdzv_handler,
+            rdzv_handler=rdzv_handler, # RendezvousHandler
             max_restarts=config.max_restarts,
             monitor_interval=config.monitor_interval,
             redirects=config.redirects,
@@ -230,11 +230,11 @@ def launch_agent(
         cfg = metrics.MetricsConfig(config.metrics_cfg) if config.metrics_cfg else None
         metrics.initialize_metrics(cfg)
 
-        agent = LocalElasticAgent(
+        agent = LocalElasticAgent( # 2. 构建代理
             spec=spec, start_method=config.start_method, log_dir=config.log_dir
         )
 
-        result = agent.run()
+        result = agent.run() # 3. 启动代理
         events.record(agent.get_agent_status_event(WorkerState.SUCCEEDED))
         if result.is_failed():
             # ChildFailedError is treated specially by @record
