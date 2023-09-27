@@ -153,6 +153,7 @@ class TORCH_API DistEngine {
 
   // Ready queue used by the CPU thread in distributed engine.
   // See Note [GPU to CPU continuations]
+  // 每个 GraphTask都把 global_cpu_ready_queue_ 设置为自己的 cpu_ready_queue_
   std::shared_ptr<torch::autograd::ReadyQueue> global_cpu_ready_queue_;
 
   // See Note [GPU to CPU continuations]

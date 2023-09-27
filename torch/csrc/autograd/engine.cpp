@@ -632,6 +632,8 @@ void validate_outputs(
       // AT_ERROR(format_error(ss.str()));
       continue;
     }
+
+    // 如果梯度尺寸与输入形状不同，则退出
     if (!grad.sizes().equals(metadata.shape())) {
       if (!at::is_expandable_to(metadata.shape(), grad.sizes())) {
         std::stringstream ss;

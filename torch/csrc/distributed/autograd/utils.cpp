@@ -36,16 +36,17 @@ void addSendRpcBackward(
       [](const torch::Tensor& t) { return t.requires_grad(); });
 
   // Attach the appropriate autograd edges.
-  auto grad_fn = std::make_shared<SendRpcBackward>();
+  auto grad_fn = std::make_shared<SendRpcBackward>();  // 构建了 SendRpcBackward
   grad_fn->set_next_edges( // 这里会设置其输出边
       torch::autograd::collect_next_edges(tensors_with_grad));
 
   // Add the appropriate input metadata for the grad_fn.
   for (const auto& tensor : tensors_with_grad) {
-    grad_fn->add_input_metadata(tensor);
+    grad_fn->add_input_metadata(tensor);  // 添加边 SendRpcBackward
   }
 
   // Record the send autograd function in our current context.
+  // 插入到上下文
   autogradContext->addSendFunction(grad_fn, autogradMetadata.autogradMessageId);
 }
 

@@ -235,10 +235,13 @@ namespace impl {
     // nodes get suppressed in some situations, see "suppress gradient
     // accumulation" below. Note that only variables which have `requires_grad =
     // True` can have gradient accumulators.
+
+    // self.grad_fn() 这里触发了一个调用，得到了一个Node实例
     if (const auto& gradient = self.grad_fn()) {
+      //  // self.output_nr() 表示本Edge是function的第n个输入。前向传播时候的第 n 个输出在反向传播时候就是第 n 个输入。
       return Edge(gradient, self.output_nr());
     } else {
-      return Edge(grad_accumulator(self), 0);
+      return Edge(grad_accumulator(self), 0); // 0表示本Edge是function的第一个输入
     }
   }
 
