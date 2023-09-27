@@ -276,7 +276,8 @@ DDP 与优化器实际上没有关联，DDP不对此负责，所以需要用户�
 |                                                                                      |
 +--------------------------------------------------------------------------------------+
 0x04 Horovod 的优化器
-Horovod 并没有对模型 fw/bw 进行修改（可能因为没有Facebook自己修改那么顺手），而是对优化器进行了修改，实现了一个 DistributedOptimizer。
+Horovod 并没有对模型 fw/bw 进行修改（可能因为没有Facebook自己修改那么顺手），
+而是对优化器进行了修改，实现了一个 DistributedOptimizer。
 
 我们以 horovod/torch/optimizer.py 为例。
 
@@ -309,7 +310,8 @@ hook 就是采用了 PyTorch 的 hook 方法，和 DDP 的思路非常类似，
 
 注：代码主要分为两部分，处理 groups 相关 和 普通情况。
 
-groups 是 PyTorch 的相关配置，作用是把梯度 allreduce 操作放在一起进行，因为代码比较复杂并且与本文主体逻辑不相关，所以我们略过这部分，只看普通非分组情况。
+groups 是 PyTorch 的相关配置，作用是把梯度 allreduce 操作放在一起进行，
+因为代码比较复杂并且与本文主体逻辑不相关，所以我们略过这部分，只看普通非分组情况。
 
 groups: The parameter to group the gradient allreduce ops. Accept values is a
         non-negative integer or a list of list of tf.Variable.
@@ -587,7 +589,7 @@ def synchronize(self):
     self._handles.clear()
 
     self._synchronized = True
-    
+
 4.2.4 MPI 同步操作
 代码位于 horovod/torch/mpi_ops.py，直接调用了MPI 库函数，有兴趣同学可以自己深入研究。
 
