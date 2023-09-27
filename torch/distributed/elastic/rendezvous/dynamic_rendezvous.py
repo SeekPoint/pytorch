@@ -356,15 +356,17 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
 
         has_set: Optional[bool]
 
-        if self._dirty:
+        if self._dirty: # 如果本node状态变化了
             has_set = False
 
             state_bits = pickle.dumps(self._state)
             # 这里会对后端进行设置
+            # 把自己的状态设置到backend之中
             set_response = self._backend.set_state(state_bits, self._token)
             if set_response is not None:
                 state_bits, token, has_set = set_response
         else:
+            # 自己没变化，只能从后端获取
             has_set = None
 
             if self._cache_duration > 0:
@@ -373,13 +375,13 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
                 if self._last_sync_time >= max(time.monotonic() - self._cache_duration, 0):
                     return None
 
-            get_response = self._backend.get_state()
+            get_response = self._backend.get_state() # 从backend获取其他节点最新状态
             if get_response is not None:
                 state_bits, token = get_response
 
         if state_bits is not None:
             try:
-                self._state = pickle.loads(state_bits)
+                self._state = pickle.loads(state_bits)  # 用后端状态更新本身的状态
             except pickle.PickleError as exc:
                 raise RendezvousStateError(
                     "The rendezvous state is corrupt. See inner exception for details."
@@ -418,15 +420,15 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
         ]
 
         for dead_node in self._dead_nodes:
-            del self._state.last_heartbeats[dead_node]
+            del self._state.last_heartbeats[dead_node]  # 移除故障节点
 
             try:
-                del self._state.participants[dead_node]
+                del self._state.participants[dead_node] # 移除故障节点
             except KeyError:
                 pass
 
             try:
-                self._state.wait_list.remove(dead_node)
+                self._state.wait_list.remove(dead_node) # 移除故障节点
             except KeyError:
                 pass
 
@@ -539,10 +541,11 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         """See base class."""
         action = None
 
-        while action != _Action.FINISH:
+        while action != _Action.FINISH:  # 循环，一直到获得一个FINISH action 为止
             # Reads or writes the latest rendezvous state shared by all nodes in
             # the rendezvous. Note that our local changes might get overridden
             # by another node if that node synced its changes before us.
+            # 这里很重要，在所有node之间做信息同步
             has_set = self._state_holder.sync() # 这里要同步各种状态，因为最新状态在 rendezvous。
             if has_set is not None:
                 if has_set:
@@ -562,7 +565,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
 
             # Determine the next action to take based on the current state of
             # the rendezvous.
-            action = state_handler(ctx, deadline)
+            action = state_handler(ctx, deadline) # 决定下一个操作，state_handler 就是算子
 
             if action == _Action.FINISH:
                 continue
@@ -715,70 +718,69 @@ class _RendezvousExitOp:
             return _Action.REMOVE_FROM_PARTICIPANTS
         return _Action.FINISH
 
-
 class _RendezvousJoinOp:
     """Represents a rendezvous join operation."""
 
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
-        state = ctx.state
+        state = ctx.state # 从上下文之中提取 _RendezvousState 状态
 
         # A closed rendezvous means that it no longer accepts new nodes.
         if state.closed:
-            return _Action.ERROR_CLOSED
+            return _Action.ERROR_CLOSED # 如果已经结束，就返回 _Action.ERROR_CLOSED
 
-        is_participant = ctx.node in state.participants
+        is_participant = ctx.node in state.participants # 看看是不是参与者
 
         # If we are part of the rendezvous and it is already complete there is
         # no further action to take.
-        if state.complete and is_participant:
+        if state.complete and is_participant: # 如果是参与者且状态是结束，就返回 _Action.FINISH
             return _Action.FINISH
 
         now = time.monotonic()
-        if now > deadline:
+        if now > deadline: # 如果已经超时
             rollback_period = 5  # 5 seconds
 
             # If we still have time to rollback (a short period on top of the
             # operation deadline), try to remove ourself from the rendezvous.
             # It is okay if we can't though as our keep-alive will eventually
             # expire.
-            if now <= deadline + rollback_period:
+            if now <= deadline + rollback_period: # 如果还有时间来 rollback
                 # If we are part of the rendezvous, it means we couldn't find
                 # enough participants to complete it on time.
-                if is_participant:
-                    return _Action.REMOVE_FROM_PARTICIPANTS
+                if is_participant: # 此时尚未达到min，虽然已经是参与者，但是需要移除
+                    return _Action.REMOVE_FROM_PARTICIPANTS # 需要从参与者列表移除
                 # If we are in the wait list, it means we couldn't wait till the
                 # next round of the rendezvous.
-                if ctx.node in state.wait_list:
-                    return _Action.REMOVE_FROM_WAIT_LIST
-            return _Action.ERROR_TIMEOUT
+                if ctx.node in state.wait_list: # 此时已经达到 max，虽然已经在等待列表之中，需要移除
+                    return _Action.REMOVE_FROM_WAIT_LIST # 需要从等待列表移除
+            return _Action.ERROR_TIMEOUT # 返回超时
 
-        if state.complete:
+        if state.complete: # 如果 rendezvous 已经结束
             # If we are here, it means we are not part of the rendezvous. In
             # case the rendezvous has capacity for additional participants add
             # ourself to the wait list for the next round.
-            if len(state.participants) < ctx.settings.max_nodes:
-                if ctx.node not in state.wait_list:
-                    return _Action.ADD_TO_WAIT_LIST
-        elif is_participant:
+            if len(state.participants) < ctx.settings.max_nodes: # 如果还没有达到最大节点数
+                if ctx.node not in state.wait_list: # 如果当前node不在等待列表之中
+                    return _Action.ADD_TO_WAIT_LIST # 就加入到等待列表，发送一个等待action
+        elif is_participant: # 如果已经在参与者列表
             # If the rendezvous has enough number of participants including us,
             # check whether we have passed the rendezvous deadline. If yes,
             # complete it.
-            if len(state.participants) >= ctx.settings.min_nodes:
-                if cast(datetime, state.deadline) < datetime.utcnow():
-                    return _Action.MARK_RENDEZVOUS_COMPLETE
-        else:
+            if len(state.participants) >= ctx.settings.min_nodes: # 如果达到了最小节点数
+                if cast(datetime, state.deadline) < datetime.utcnow(): # 如果达到了超时
+                    return _Action.MARK_RENDEZVOUS_COMPLETE # 标示 rendezvous 已经结束
+        else: # 否则就直接加入到参与者
             # The rendezvous is not complete yet and we are not part of it. Try
             # to join.
             return _Action.ADD_TO_PARTICIPANTS
 
-        if _should_keep_alive(ctx):
+        if _should_keep_alive(ctx): # 如果需要保持心跳，就返回 _Action.KEEP_ALIVE
             return _Action.KEEP_ALIVE
 
         # At this point either the rendezvous is not complete, but we are part
         # of it, which means we have to wait for other participants to join; or
         # the rendezvous is complete, but we are not part of it, which means we
         # have to wait for the next round.
-        return _Action.SYNC
+        return _Action.SYNC # 否则返回同步状态 _Action.SYNC
 
 
 class _RendezvousCloseOp:
@@ -924,13 +926,13 @@ class DynamicRendezvousHandler(RendezvousHandler):
         if self._state_holder.state.round == 0:
             _delay(seconds=(0, 0.3))
 
-        exit_op = _RendezvousExitOp()
-        join_op = _RendezvousJoinOp()
+        exit_op = _RendezvousExitOp()  # 设置算子
+        join_op = _RendezvousJoinOp()  # 设置算子
 
         deadline = self._get_deadline(self._settings.timeout.join)
 
-        self._op_executor.run(exit_op, deadline)
-        self._op_executor.run(join_op, deadline)
+        self._op_executor.run(exit_op, deadline)  # 这里会进行调用
+        self._op_executor.run(join_op, deadline)  # 调用
 
         self._start_heartbeats()
 
@@ -985,11 +987,11 @@ class DynamicRendezvousHandler(RendezvousHandler):
             return False
 
     def _close(self) -> None:
-        op = _RendezvousCloseOp()
+        op = _RendezvousCloseOp() # 设置算子
 
         deadline = self._get_deadline(self._settings.timeout.close)
 
-        self._op_executor.run(op, deadline)
+        self._op_executor.run(op, deadline) # 调用
 
         log.info(
             f"The node '{self._this_node}' has closed the rendezvous '{self._settings.run_id}'."
@@ -1004,12 +1006,12 @@ class DynamicRendezvousHandler(RendezvousHandler):
     def _keep_alive(self) -> None:
         self._heartbeat_lock.acquire()
 
-        op = _RendezvousKeepAliveOp()
+        op = _RendezvousKeepAliveOp()  # 设置算子
 
         deadline = self._get_deadline(self._settings.timeout.heartbeat)
 
         try:
-            self._op_executor.run(op, deadline)
+            self._op_executor.run(op, deadline) # 调用
 
             log.debug(
                 f"The node '{self._this_node}' has sent a keep-alive heartbeat to the rendezvous "
