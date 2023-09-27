@@ -160,6 +160,7 @@ def sgd(params: List[Tensor],
     for i, param in enumerate(params):
 
         d_p = d_p_list[i]
+        # 正则化及动量累积
         if weight_decay != 0:
             d_p = d_p.add(param, alpha=weight_decay)
 
@@ -167,17 +168,19 @@ def sgd(params: List[Tensor],
             buf = momentum_buffer_list[i]
 
             if buf is None:
+                # 历史更新量
                 buf = torch.clone(d_p).detach()
                 momentum_buffer_list[i] = buf
             else:
+                # 通过buf更新了self.state
                 buf.mul_(momentum).add_(d_p, alpha=1 - dampening)
 
             if nesterov:
                 d_p = d_p.add(buf, alpha=momentum)
             else:
                 d_p = buf
-
-        param.add_(d_p, alpha=-lr)
+        # 更新当前组学习参数  w.data -= w.grad*lr
+        param.add_(d_p, alpha=-lr) # add_ 会更改对象数值
 
 
 def adadelta(params: List[Tensor],

@@ -1,0 +1,1265 @@
+PyTorch分布式优化器(1)----基石篇
+
+https://www.cnblogs.com/rossiXYZ/p/15651407.html
+
+目录
+[源码解析] PyTorch分布式优化器(1)----基石篇
+0x00 摘要
+0x01 从问题出发
+1.1 示例
+1.2 问题点
+0x01 模型构造
+1.1 Module
+1.2 成员变量
+1.3 _parameters
+1.3.1 构建
+1.3.2 归类
+1.3.3 获取
+1.4 Linear
+1.4.1 使用
+1.4.2 定义
+1.4.3 解释
+0x02 Optimizer 基类
+2.1 初始化
+2.2 添加待优化变量
+2.3 待优化变量示例
+2.4 优化器状态
+2.4.1 定义
+2.4.2 示例 1
+2.4.3 示例 2
+0x03 SGD
+3.1 定义
+3.2 解析
+3.3 step
+3.4 变量解析
+3.4.1 lr
+3.4.2 dampening
+3.4.3 weight_decay
+3.4.4 nesterov
+3.4.5 Momentum
+0x04 可视化
+4.1 目前问题
+4.2 PyTorchViz可视化网络
+0x05 AccumulateGrad
+5.1 原理
+5.2 AccumulateGrad
+5.2.1 定义
+5.2.2 apply
+5.3 结合优化器
+0x06 总结
+0xFF 参考
+0x00 摘要
+我们接下来通过几篇文章来看看分布式优化器。
+本系列分为三篇文章，分别是基石篇，DP/DDP/Horovod 之中数据并行的优化器，PyTorch 分布式优化器，按照深度递进。
+
+本文是基石篇，通过本文，大家可以了解到模型的构造，优化器的基本原理，两者之间的交互，如何优化更新模型等等，这为后面的逐级分析打下了一个基础。
+
+PyTorch分布式其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+
+[源码解析] PyTorch 分布式(4)------分布式应用基础概念
+
+[源码解析] PyTorch分布式(5) ------ DistributedDataParallel 总述&如何使用
+
+[源码解析] PyTorch分布式(6) ---DistributedDataParallel -- 初始化&store
+
+[源码解析] PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+
+[源码解析] PyTorch 分布式(8) -------- DistributedDataParallel之论文篇
+
+[源码解析] PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+
+[源码解析] PyTorch 分布式(10)------DistributedDataParallel 之 Reducer静态架构
+
+[源码解析] PyTorch 分布式(11) ----- DistributedDataParallel 之 构建Reducer和Join操作
+
+[源码解析] PyTorch 分布式(12) ----- DistributedDataParallel 之 前向传播
+
+[源码解析] PyTorch 分布式(13) ----- DistributedDataParallel 之 反向传播
+
+[源码解析] PyTorch 分布式 Autograd (1) ---- 设计
+
+[源码解析] PyTorch 分布式 Autograd (2) ---- RPC基础
+
+[源码解析] PyTorch 分布式 Autograd (3) ---- 上下文相关
+
+[源码解析] PyTorch 分布式 Autograd (4) ---- 如何切入引擎
+
+[源码解析] PyTorch 分布式 Autograd (5) ---- 引擎(上)
+
+[源码解析] PyTorch 分布式 Autograd (6) ---- 引擎(下)
+
+为了更好的说明，本文代码会依据具体情况来进行相应精简。
+
+0x01 从问题出发
+下图来自快手八卦的论文，图中罗列了原生训练过程与DDP/Horovod的对比，上面的 vanilla 就是原生训练过程，其中 U 部分对应的就是优化器过程。
+常规优化器主要功能就是根据梯度来优化&更新模型当前参数 ： w.data -= w.grad * lr。
+0458.png
+
+1.1 示例
+我们用个例子来看看如何进行训练。
+
+    class ToyModel(nn.Module):
+        def __init__(self):
+            super(ToyModel, self).__init__()
+            self.net1 = nn.Linear(10, 10)
+            self.relu = nn.ReLU()
+            self.net2 = nn.Linear(10, 5)
+
+        def forward(self, x):
+            return self.net2(self.relu(self.net1(x)))
+
+    net = ToyModel()
+    optimizer = optim.SGD(params=net.parameters(), lr = 1)
+    optimizer.zero_grad()
+    input = torch.randn(10,10)
+    outputs = net(input)
+    outputs.backward(outputs)
+    optimizer.step()
+
+给出一个粗略的反向计算图如下 。
+0459.png
+
+1.2 问题点
+因为已经有了之前分析引擎等其他经历，所以我们结合之前得到的知识先整理出几个问题点，用来引导我们分析，我们按照 ：
+根据模型参数构建优化器 ---> 引擎计算梯度 ---> 优化器优化参数 ---> 优化器更新模型
+这个顺序来分析。我们知道是autograd引擎计算了梯度，这样问题就来了：
+
+    根据模型参数构建优化器
+
+        采用 optimizer = optim.SGD(params=net.parameters(), lr = 1) 进行构造，
+        这样看起来 params 被赋值到优化器的内部成员变量之上（我们假定是叫parameters）。
+
+            模型包括两个 Linear，这些层如何更新参数？
+
+    引擎计算梯度
+
+        如何保证 Linear 可以计算梯度？
+        对于模型来说，计算出来的梯度怎么和 Linear 参数对应起来？引擎计算出来的这些梯度累积在哪里？
+
+    优化器优化参数：
+
+        调用 step 进行优化，优化目标是优化器内部成员变量 self.parameters。
+
+    优化器更新模型：
+
+        如何把优化目标（self.parameters）的更新反应到模型参数（比如 Linear）的更新上？
+
+下面图之中的数字和问号就对应了上面4个问题。
+
+      +-------------------------------------------+                    +------------------+
+      |ToyModel                                   |                    | Engine           |
+      |                                           | forward / backward |                  |
+      | Linear(10, 10)+--> ReLU +--> Linear(10, 5)| +----------------> | Compute gradient |
+      |                                           |                    |        +         |
+      +-------------------+-----------------------+                    |        |         |
+                          |                                            |        |         |
+                    1 ??? | parameters()                               +------------------+
+                          |                                                     |
+                          |                                                     | gradient
+                          |   ^                                                 |
+                          |   |                                                 v
+                          |   | 4 ???                                        2 ???
+                          |   |
+      +------------------------------------------+
+      |SGD                |   |                  |
+      |                   |   |                  |
+      |                   v   +                  |
+      |                                          |
+^ +---------------> self.parameters  +---------------->
+|     |                                          |    |
+|     |                                          |    |
+|     +------------------------------------------+    |
+|                                                     |
+<---------------------------------------------------+ v
+                     3 step()
+
+我们需要一步一步来分析。
+
+0x01 模型构造
+因为优化器是优化更新模型的参数，所以我们首先介绍下模型相关信息。
+
+1.1 Module
+在PyTorch如果定义一个模型，一般需要继承 nn.Module。
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ToyModel(nn.Module):
+    def __init__(self):
+        super(ToyModel, self).__init__()
+        self.net1 = nn.Linear(10, 10)
+        self.relu = nn.ReLU()
+        self.net2 = nn.Linear(10, 5)
+
+    def forward(self, x):
+        return self.net2(self.relu(self.net1(x)))
+Module 定义如下：
+
+class Module:
+    r"""Base class for all neural network modules.
+
+    Your models should also subclass this class.
+
+    Modules can also contain other Modules, allowing to nest them in
+    a tree structure. You can assign the submodules as regular attributes::
+
+        import torch.nn as nn
+        import torch.nn.functional as F
+
+        class Model(nn.Module):
+            def __init__(self):
+                super(Model, self).__init__()
+                self.conv1 = nn.Conv2d(1, 20, 5)
+                self.conv2 = nn.Conv2d(20, 20, 5)
+
+            def forward(self, x):
+                x = F.relu(self.conv1(x))
+                return F.relu(self.conv2(x))
+
+    Submodules assigned in this way will be registered, and will have their
+    parameters converted too when you call :meth:`to`, etc.
+
+    :ivar training: Boolean represents whether this module is in training or
+                    evaluation mode.
+    :vartype training: bool
+    """
+
+    dump_patches: bool = False
+    _version: int = 1
+    training: bool
+    _is_full_backward_hook: Optional[bool]
+
+    def __init__(self):
+        """
+        Initializes internal Module state, shared by both nn.Module and ScriptModule.
+        """
+        torch._C._log_api_usage_once("python.nn_module")
+
+        self.training = True
+        self._parameters = OrderedDict()
+        self._buffers = OrderedDict()
+        self._non_persistent_buffers_set = set()
+        self._backward_hooks = OrderedDict()
+        self._is_full_backward_hook = None
+        self._forward_hooks = OrderedDict()
+        self._forward_pre_hooks = OrderedDict()
+        self._state_dict_hooks = OrderedDict()
+        self._load_state_dict_pre_hooks = OrderedDict()
+        self._modules = OrderedDict()
+
+
+1.2 成员变量
+Module 内部有如下重要变量，大致可以分为如下三类。
+
+基础类型：
+
+    _parameters ：类型为张量的权重参数，用于前向和后向传播，保存模型就是保存这些参数。
+    使用 parameters() 函数可以递归获取到模型所有参数，但是需要注意，parameters() 函数返回的是 iterator。
+
+    _buffers : 存储一些需要持久化的非网络参数的变量，比如BN 的 running_mean。
+
+    _modules : 存储类型为 Module 的变量，当后去一个模型的parameters 时候，PyTorch 通过递归遍历所有_modules来实现。
+    计算相关类型：
+
+在模型计算时候，是按照如下顺序完成：
+
+ _backward_hooks  ----> forward ----> _forward_hooks ----> _backward_hooks
+具体如下：
+
+    _forward_pre_hooks ：在 forward 之前运行，不会更改 forward 输入参数。
+
+    _forward_hooks ：在 forward 之后运行，不会改变 forward 的输入和输出。
+
+    _backward_hooks ：在 backward 之后运行，不会改变 backward 的输入和输出。
+
+保存/加载相关：
+
+以下是保存相关的，PyTorch 使用如下来保存 torch.save(cn.state_dict()...) ，使用 load_state_dict(state_dict) 来加载。
+
+    _load_state_dict_pre_hooks : 在调用 _load_from_state_dict 加载模型时希望执行的操作。
+
+    _state_dict_hooks ：在调用state_dict方法时希望执行的操作。
+
+具体运行时候如下：
+
+    net = {ToyModel}
+     T_destination = {TypeVar} ~T_destination
+     dump_patches = {bool} False
+     net1 = {Linear} Linear(in_features=10, out_features=10, bias=True)
+     net2 = {Linear} Linear(in_features=10, out_features=5, bias=True)
+     relu = {ReLU} ReLU()
+     training = {bool} True
+      _backward_hooks = {OrderedDict: 0} OrderedDict()
+      _buffers = {OrderedDict: 0} OrderedDict()
+      _forward_hooks = {OrderedDict: 0} OrderedDict()
+      _forward_pre_hooks = {OrderedDict: 0} OrderedDict()
+      _is_full_backward_hook = {NoneType} None
+      _load_state_dict_pre_hooks = {OrderedDict: 0} OrderedDict()
+      _modules = {OrderedDict: 3} OrderedDict([('net1', Linear(in_features=10, out_features=10, bias=True)),
+       ('relu', ReLU()), ('net2', Linear(in_features=10, out_features=5, bias=True))])
+      _non_persistent_buffers_set = {set: 0} set()
+      _parameters = {OrderedDict: 0} OrderedDict()
+      _state_dict_hooks = {OrderedDict: 0} OrderedDict()
+      _version = {int} 1
+
+1.3 _parameters
+优化器是优化 _parameters，所以我们需要特殊了解一下。
+
+1.3.1 构建
+我们首先看看生成时候的特点：requires_grad=True。参数这么设置，就说明 Parameter 就是需要计算梯度的。
+
+因为张量默认是不需要求导的，requires_grad属性默认为False，
+如果某个节点 requires_grad 属性被设置为True，就说明其需要求导，并且所有依赖于它的节点 requires_grad 都为True。
+
+    class Parameter(torch.Tensor):
+    。。。
+        def __new__(cls, data=None, requires_grad=True): # 需要计算梯度
+            if data is None:
+                data = torch.tensor([])
+            return torch.Tensor._make_subclass(cls, data, requires_grad)
+
+1.3.2 归类
+如果类的成员是从Parameter类派生，那么nn.Module使用__setattr__机制把他们归属到_parameters 之中。比如Linear的weight和bias。
+
+    def __setattr__(self, name: str, value: Union[Tensor, 'Module']) -> None:
+        # 省略 .....
+        def register_parameter(self, name: str, param: Optional[Parameter]) -> None:
+            r"""Adds a parameter to the module.
+    。。。。
+            else:
+                self._parameters[name] = param # 这里添加了
+
+1.3.3 获取
+我们无法直接获取到 _parameters 这个变量，只能通过 parameters 方法来获取，其返回的是一个Iterator。
+
+比如：
+
+    for param in net.parameters():
+        print(type(param), param.size())
+
+输出：
+
+    <class 'torch.nn.parameter.Parameter'> torch.Size([10, 10])
+    <class 'torch.nn.parameter.Parameter'> torch.Size([10])
+    <class 'torch.nn.parameter.Parameter'> torch.Size([5, 10])
+    <class 'torch.nn.parameter.Parameter'> torch.Size([5])
+
+parameters 代码如下。
+
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+。。。
+        for name, param in self.named_parameters(recurse=recurse):
+            yield param
+
+再来看看 named_parameters，其核心是 module._parameters.items()，以列表返回可遍历的元组数组。
+
+    def named_parameters(self, prefix: str = '', recurse: bool = True) -> Iterator[Tuple[str, Parameter]]:
+    。。。。
+        gen = self._named_members(
+            lambda module: module._parameters.items(),
+            prefix=prefix, recurse=recurse)
+        for elem in gen:
+            yield elem
+
+需要注意，我们目前已经有了两个关键知识：
+
+    Parameter 构造函数中参数 requires_grad=True。这么设置就说明 Parameter 默认就是需要计算梯度的。
+
+    通过 parameters 方法来获取，其返回的是一个Iterator。
+
+所以之前图可以拓展一下，现在 SGD 的 parameters 是一个指向 ToyModel._parameters 的 iterator，
+这说明优化器实际上是直接优化 ToyModel 的 _parameters。所以我们可以去掉原来图之中 4) 对应的问号。
+
+      +-------------------------------------------+                    +------------------+
+      |ToyModel                                   |                    | Engine           |
+      |                                           | forward / backward |                  |
+      | Linear(10, 10)+--> ReLU +--> Linear(10, 5)| +----------------> | Compute gradient |
+      |                                           |                    |        +         |
+      |         para_iterator = parameters()      |                    |        |         |
+      |                   +          ^            |                    |        |         |
+      |                   |          |            |                    +------------------+
+      +-------------------------------------------+                             |
+                          |          |                                          | gradient
+                          |          |                                          |
+                  1 ???   |          | 4 update                                 v
+                          |          |                                       2 ???
+                          |          |
+      +----------------------------------------------------------------+
+      |SGD                |          |                                 |
+      |                   |          |                                 |
+      |                   v          |                                 |
+      |                              +                                 |
+^ +--------> self.parameters = para_iterator(ToyModel._parameters) --------->
+|     |                                                                |    |
+|     |                                                                |    |
+|     +----------------------------------------------------------------+    |
+|                                                                           |
+<-------------------------------------------------------------------------+ v
+                     3 step()
+
+1.4 Linear
+Torch.nn.Linear 可以对输入数据实现线形变换，一般用来设置全连接层。
+
+1.4.1 使用
+在 PyTorch 之中使用 torch.nn.Linear 例子如下。
+
+    input = torch.randn(2,3)
+    linear = nn.Linear(3,4)
+    out = linear(input)
+    print(out)
+
+# 输出结果如下
+    tensor([[-0.6938,  0.0543, -1.4393, -0.3554],
+            [-0.4653, -0.2421, -0.8236, -0.1872]], grad_fn=<AddmmBackward>)
+1.4.2 定义
+Linear 具体定义如下，可以看到，其参数主要是
+
+    self.weight = Parameter()。
+
+    self.bias = Parameter()。
+
+由前面我们可以知道，Parameter 的生成时候参数是 requires_grad=True，说明 weight，bias 是需要计算梯度的。
+
+    class Linear(Module):
+        r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
+    。。。
+
+1.4.3 解释
+从前面简略计算图我们可以知道，torch.nn.Linear 的反向计算是 AddmmBackward。
+
+    struct TORCH_API AddmmBackward : public TraceableFunction {
+      using TraceableFunction::TraceableFunction;
+      variable_list apply(variable_list&& grads) override;
+      std::string name() const override { return "AddmmBackward"; }
+    。。。
+
+我们从代码之中找到了 addmm 的定义，其注释说明这是个矩阵乘法操作。
+
+    def addmm(mat: Tensor, mat1: Tensor, mat2: Tensor,
+              beta: float = 1., alpha: float = 1.) -> Tensor:
+    。。。。
+        return torch._sparse_addmm(mat, mat1, mat2, beta=beta, alpha=alpha)
+
+目前我们可以继续拓展。
+
+    Linear 里面的 weight，bias 都是 Parameter 类型。
+
+        Parameter 构造函数中参数 requires_grad=True。这么设置就说明 Parameter 默认是需要计算梯度的。
+
+        所以 Linear 的 weight，bias 就是需要引擎计算其梯度。
+
+    ToyModel 的 _parameters 成员变量通过 parameters 方法来获取，其返回的是一个Iterator。
+
+        这个 iterator 作为参数用来构建 SGD 优化器。
+
+        现在 SGD 优化器 的 parameters 是一个指向 ToyModel._parameters 的 iterator。
+
+
+这说明优化器实际上是直接优化 ToyModel 的 _parameters，对于例子就是全连接层的参数，图上对应两个Linear 发出的指向 parameters() 的箭头。
++--------------------------------------------------+                   +------------------+
+| ToyModel                                         |                   | Engine           |
+| +-------------------+             +------------+ |forward / backward |                  |
+| | Linear(10, 10)    +--> ReLU +-->+Linear(10,5)| +-----------------> | Compute gradient |
+| |                   |             |            | |                   |        +         |
+| |  weight=Parameter |             |    weight  | |                   |        |         |
+| |                   +----------+  |            | |                   |        |         |
+| |  bias=Parameter   |          |  |    bias    | |                   +------------------+
+| |                   |          |  |            | |                            |
+| +-------------------+          |  +--+---------+ |                          2 | gradient
+|                                |     |           |                            |
+|                                |     |           |                            v
+|                                v     v           |                           ???
+|               para_iterator = parameters()       |
+|                         +          ^             |
+|                         |          |             |
+|                         |          |             |
++--------------------------------------------------+
+                          |          |
+                   1 ???  |          | 4 update
+                          |          |
+                          |          |
+      +----------------------------------------------------------------+
+      |SGD                |          |                                 |
+      |                   |          |                                 |
+      |                   v          |                                 |
+      |                              +                                 |
+^ +--------> self.parameters = para_iterator(ToyModel._parameters) +-------->
+|     |                                                                |    |
+|     |                                                                |    |
+|     +----------------------------------------------------------------+    |
+|                                                                           |
+<-------------------------------------------------------------------------+ v
+                     3 step()
+0x02 Optimizer 基类
+Optimizer 是所有优化器的基类，它有如下主要公共方法:
+
+    add_param_group : 添加可学习参数组。
+
+    step : 进行一次参数更新操作。
+
+    zero_grad : 在反向传播计算梯度之前对上一次迭代时的梯度清零。
+
+    state_dict : 返回用 dict 结构表示的参数和状态。
+
+    load_state_dict : 加载 dict 结构表示的参数和状态。
+
+2.1 初始化
+在 Optimizer 初始化函数之中，会做如下操作：
+
+    初始化参数包括：可学习参数（params）和超参数（defaults）。
+
+    在 self.defaults 之中保存 lr, momentun 等全局参数（超参数）。
+
+    在 self.state 保存优化器当前状态。
+
+    在 self.param_groups 之中保存所有待优化的变量。
+
+class Optimizer(object):
+
+    def __init__(self, params, defaults):
+。。。
+
+
+2.2 添加待优化变量
+上面代码之中用到了 add_param_group，我们接下来就看看这个函数。
+
+add_param_group 添加不同分组的可学习参数。代码如下（省略了大部分检验代码）。
+其中，param_groups目的是为了可以用 key-value 方式来访问待优化变量，这在fine tuning时候特别有用。
+
+    def add_param_group(self, param_group):
+    。。。。
+
+2.3 待优化变量示例
+我们用如下代码打印 param_groups出来看看。
+
+    net = nn.Linear(3, 3)
+    nn.init.constant_(net.weight, val=10)
+    nn.init.constant_(net.bias, val=5)
+    optimizer = optim.SGD(net.parameters(), lr=0.025)
+    print(optimizer.param_groups)
+    结果如下，第一个 3 x 3 是 net 的权重矩阵，1 x 3 是偏置矩阵。
+
+    [
+      {'params':
+        [
+          Parameter containing: # 权重矩阵
+            tensor([[10., 10., 10.],
+                  [10., 10., 10.],
+                  [10., 10., 10.]], requires_grad=True),
+          Parameter containing: # 偏置矩阵
+            tensor([5., 5., 5.], requires_grad=True)
+        ],
+      'lr': 0.025,
+      'momentum': 0,
+      'dampening': 0,
+      'weight_decay': 0,
+      'nesterov': False
+      }
+    ]
+
+2.4 优化器状态
+2.4.1 定义
+PyTorch 的 state_dict 是 Python 的字典对象。
+
+    对于模型，state_dict 会把每一层和其训练过程中需要学习的参数（比如权重和偏置）建立起来映射关系，
+    只有参数可以训练的layer才会保存在模型的 state_dict 之中，如卷积层，线性层等。
+
+    对于优化器，state_dict 是其状态信息，其包括了两组信息：
+
+        state ：一个包括了优化器当前状态（也就是更新变量的过程之中计算得到的最新缓存变量）的字典。
+
+            字典的 key 是缓存的index。
+
+            字典的 value 也是一个字典，key 是缓存变量名，value 是相应的张量。
+
+        param_groups : 一个包括了所有 param groups 的字典。
+
+def state_dict(self):
+    r"""Returns the state of the optimizer as a :class:`dict`.
+
+    It contains two entries:
+
+    * state - a dict holding current optimization state. Its content
+        differs between optimizer classes.
+    * param_groups - a dict containing all parameter groups
+    """
+    # Save order indices instead of Tensors
+    param_mappings = {}
+    start_index = 0
+
+        def pack_group(group):
+    。。。。
+
+2.4.2 示例 1
+我们在示例 1 之中加入了如下打印语句，看看优化器内部变量：
+
+    # print model's state_dict
+    print('Model.state_dict:')
+    for param_tensor in model.state_dict():
+        print(param_tensor, '\t', model.state_dict()[param_tensor].size())
+
+    # print optimizer's state_dict
+    print('Optimizer,s state_dict:')
+    for var_name in optimizer.state_dict():
+        print(var_name, '\t', optimizer.state_dict()[var_name])
+
+结果如下：
+
+    Model.state_dict:
+    net1.weight  torch.Size([10, 10])
+    net1.bias 	 torch.Size([10])
+    net1.weight  torch.Size([10, 10])
+    net2.bias 	 torch.Size([5])
+
+    Optimizer,s state_dict:
+    state 	 {}
+    param_groups 	 [{'lr': 0.001, 'momentum': 0, 'dampening': 0,
+                    'weight_decay': 0, 'nesterov': False, 'params': [0, 1, 2, 3]}]
+
+2.4.3 示例 2
+示例2 是使用 SGD 优化一个函数。
+
+    from math import pi
+    import torch.optim
+
+    x = torch.tensor([pi/2,pi/3],requires_grad=True)
+    optimizer = torch.optim.SGD([x,],lr=0.2,momentum=0.5)
+
+    for step in range(11):
+        if step:
+            optimizer.zero_grad()
+            f.backward()
+            optimizer.step()
+
+            for var_name in optimizer.state_dict():
+                print(var_name, '\t', optimizer.state_dict()[var_name])
+        f=-((x.sin()**3).sum())**3
+
+输出结果如下，可以看出来优化过程。
+
+    state 	 {0: {'momentum_buffer': tensor([ 1.0704e-06, -9.1831e+00])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([-1.2757e-06, -4.0070e+00])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([-3.4580e-07, -4.7366e-01])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([7.3855e-07, 1.3584e+00])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([7.2726e-07, 1.6619e+00])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([-3.1580e-07,  8.4152e-01])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([2.3738e-07, 5.8072e-01])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([5.2412e-07, 8.4104e-01])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([-5.1160e-07,  1.9660e+00])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+    state 	 {0: {'momentum_buffer': tensor([4.9517e-07, 7.2053e+00])}}
+    param_groups 	 [{'lr': 0.2, 'momentum': 0.5, 'dampening': 0, 'weight_decay': 0, 'nesterov': False, 'params': [0]}]
+
+我们更新一下，确定了 SGD 内部的成员变量名字是 param_groups，这是优化器的优化目标，其指向了 ToyModel._parameters 的 iterator。
+
+ +-------------------------------------------------+                   +------------------+
+ |ToyModel                                         |                   | Engine           |
+ | +------------------+             +------------+ |forward / backward |                  |
+ | |Linear(10, 10)    +--> ReLU +-->+Linear(10,5)| +-----------------> | Compute gradient |
+ | |                  |             |            | |                   |        +         |
+ | |  weight=Parameter|             |    weight  | |                   |        |         |
+ | |                  +-----------+ |    bias    | |                   |        |         |
+ | |  bias=Parameter  |           | +--+---------+ |                   +------------------+
+ | |                  |           |    |           |                            |
+ | +------------------+           |    |           |                          2 | gradient
+ |                                v    v           |                            |
+ |                         self._parameters        |                            v
+ |                                  +              |                           ???
+ |                                  |              |
+ |                                  |              |
+ |                                  v              |
+ |              para_iterator = parameters()       |
+ |                        +          ^             |
+ |                        |          |             |
+ |                        |          |             |
+ +-------------------------------------------------+
+                          |          |
+                    1 ??? |          | 4 update
+                          |          |
+      +----------------------------------------------------------------+
+      |SGD                |          |                                 |
+      |                   |          |                                 |
+      |                   v          |                                 |
+      |                              +                                 |
+^ +-------> self.param_groups = para_iterator(ToyModel._parameters) -------->
+|     |                                                                |    |
+|     |                                                                |    |
+|     +----------------------------------------------------------------+    |
+|                                                                           |
+<-------------------------------------------------------------------------+ v
+                     3 step()
+
+0x03 SGD
+我们用 SGD 来进一步看看优化器。SGD（stochastic gradient descent）是随机梯度下降，即梯度下降的batch版本。
+对于训练数据集，将其分成n个batch，每个batch包含m个样本。每次更新都利用一个batch的数据，而非整个训练集。
+
+3.1 定义
+SGD 定义如下，主要是进行校验和设置缺省数值。
+
+    class SGD(Optimizer):
+        def __init__(self, params, lr=required, momentum=0, dampening=0,
+    。。。yknote torch\optim\sgd.py
+
+
+3.2 解析
+从注释可以看出来，SGD实现了 stochastic gradient descent (optionally with momentum) 算法。
+Nesterov momentum 是基于
+[On the importance of initialization and momentum in deep learning]
+(http://www.cs.toronto.edu/%7Ehinton/absps/momentum.pdf). 的算法。
+
+使用示例如下：
+
+    Example:
+        >>> optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+        >>> optimizer.zero_grad()
+        >>> loss_fn(model(input), target).backward()
+        >>> optimizer.step()
+PyTorch SGD with Momentum/Nesterov 的实现与Sutskever et. al.和其他框架的实现不同。
+yknote截图 0462.png
+比如 PyTorch 使用如下方法来实现 Momentum 的特殊例子：
+    vt+1 = μ∗vt + gt+1,
+    pt+1 = pt − lr∗vt+1,
+其他框架则使用：
+    vt+1 = μ∗vt + lr∗gt+1,
+    pt+1 = pt − vt+1.
+
+3.3 step
+step 方法的作用就是在一定的算法协助下，对变量进行优化。此方法主要完成一次模型参数的更新
+yknote torch/optim/sgd.py
+        @torch.no_grad()
+        def step(self, closure=None):
+    。。。。
+
+
+其中 sgd 函数如下：
+yknote torch/optim/_functional.py
+    def sgd(params: List[Tensor],
+    。。。
+
+3.4 变量解析
+我们接下来对全局参数具体做以下解析。
+
+3.4.1 lr
+这就是学习率，大家熟知的概念。
+
+3.4.2 dampening
+dampening 作用到偏导数之上， 用于动量SGD中调节当前梯度权重。
+
+对应公式如下：
+    vt = vt−1 ∗ momentum + gt ∗ (1 − dampening)
+对应代码则是：
+    buf.mul_(momentum).add_(d_p, alpha=1 - dampening)
+
+3.4.3 weight_decay
+weight_decay是 L2 penalty系数，用当前可学习参数p的值修改偏导数。
+
+待更新的可学习参数p的偏导数就是
+    gt = gt + (p ∗ weight_decay)
+对应代码是：
+
+if weight_decay != 0:
+	d_p = d_p.add(param, alpha=weight_decay)
+3.4.4 nesterov
+是否启用nesterov动量，从pytorch源码来看，当nesterov为True时，在上述得到 v_t 的基础上又使用了一次momentum和v_t。
+
+                ▽wJ(w)+m∗vt+1
+
+        if (nesterov) {
+          d_p = d_p.add(buf, momentum);
+        } else {
+          d_p = buf;
+        }
+
+3.4.5 Momentum
+Momentum ：来源于物理学，翻译为动量或则冲量。作用是把上次更新于当前梯度结合来进行当前权值优化更新。
+
+引入原因是：训练网络的初始化权值可能因为不合适而导致在训练过程之中出现局部最小值，没有找到全局最优。
+
+而引入动量可以在一定程度上解决此问题。动量模拟物体运动时候的惯性，表示力对时间的积累效应。
+更新时候在一定程度之上保持以前更新的方向，同时结合当前梯度来调整更新的方向。
+动量越大，转换为势能的能量越大，可以增加稳定性，也能更快的学习，从而越有可能摆脱局部凹区域，进入全局凹区域。
+
+原生权重更新公式如下：
+    w = w − Lr∗dw
+这里 w 是权重，Lr 是学习率，dw 是 w 的导数。
+
+引入momentum之后的权重更新公式如下：
+    v = momentum ∗ v − Lr∗dw
+    w = w + v
+
+这里 momentum 是动量，v 是速度。这个公式的意思就是加上上次更新的 v 与 momentum 的乘积。
+当本次梯度下降 -Lr * dw 的方向与上次更新 v 的方向相同，则上次更新 v 可以起到正向加速作用。
+当本次梯度下降 -Lr * dw 的方向与上次更新 v 的方向相反，则上次更新 v 可以起到减速作用。
+
+代码对应如下：
+
+    if momentum != 0:
+        buf = momentum_buffer_list[i]
+
+        if buf is None:
+            buf = torch.clone(d_p).detach()
+            momentum_buffer_list[i] = buf
+        else:
+            buf.mul_(momentum).add_(d_p, alpha=1 - dampening)
+
+        if nesterov:
+            d_p = d_p.add(buf, alpha=momentum)
+        else:
+            d_p = buf
+
+0x04 可视化
+4.1 目前问题
+到目前为止，我们还是有几个问题没有解决，就是下面下划线之处。
+
+    根据模型参数构建优化器
+
+        采用 optimizer = optim.SGD(params=net.parameters(), lr = 1) 进行构造，
+        这样看起来 params 被赋值到优化器的内部成员变量之上（我们假定是叫parameters）。
+
+        模型包括两个全连结层 Linear，这些层如何更新参数？？？
+
+        Linear 里面的 weight，bias 都是 Parameter 类型。
+
+            Parameter 构造函数中参数 requires_grad=True。这么设置就说明 Parameter 默认是需要计算梯度的。
+
+            所以 Linear 的 weight，bias 就是需要引擎计算其梯度。
+
+        ToyModel 的 _parameters 成员变量通过 parameters 方法来获取，其返回的是一个Iterator。
+
+            这个 iterator 作为参数用来构建 SGD 优化器。
+
+            现在 SGD 优化器 的 parameters 是一个指向 ToyModel._parameters 的 iterator。
+            这说明优化器实际上是直接优化 ToyModel 的 _parameters。
+
+    引擎计算梯度
+
+        如何保证 Linear 可以计算梯度？
+
+            weight，bias 都是 Parameter 类型，默认是需要计算梯度的。
+
+        2) 对于模型来说，计算出来的梯度怎么和 Linear 参数对应起来？引擎计算出来的这些梯度累积在哪里？？？
+
+    优化器优化参数：
+
+    调用 step 进行优化，优化目标是优化器内部成员变量 self.parameters。
+    self.parameters 是一个指向 ToyModel._parameters 的 iterator。这说明优化器实际上是直接优化 ToyModel 的 _parameters。
+    优化器更新模型：
+
+    优化目标（self.parameters）的更新实际上就是直接作用到模型参数（比如 Linear）之上。
+
+我们打印 outputs 看看，可以看到其 next_functions 实际是有三个，说明前面的图例是我们简化的，我们需要再做进一步可视化。
+
+    outputs = {Tensor: 10}
+     T = {Tensor: 5}
+     data = {Tensor: 10}
+     device = {device} cpu
+     dtype = {dtype} torch.float32
+     grad = {NoneType} None
+     grad_fn = {AddmmBackward}
+      metadata = {dict: 0} {}
+      next_functions = {tuple: 3}
+       0 = {tuple: 2} (<AccumulateGrad object at 0x7f9c3e3bd588>, 0)
+       1 = {tuple: 2} (<ReluBackward0 object at 0x7f9c3e5178d0>, 0)
+       2 = {tuple: 2} (<TBackward object at 0x7f9c3e517908>, 0)
+       __len__ = {int} 3
+      requires_grad = {bool} True
+     is_cuda = {bool} False
+     is_leaf = {bool} False
+     is_meta = {bool} False
+     is_mkldnn = {bool} False
+     is_mlc = {bool} False
+     is_quantized = {bool} False
+     is_sparse = {bool} False
+     is_sparse_csr = {bool} False
+     is_vulkan = {bool} False
+     is_xpu = {bool} False
+     layout = {layout} torch.strided
+     name = {NoneType} None
+     names = {tuple: 2} (None, None)
+     ndim = {int} 2
+     output_nr = {int} 0
+     requires_grad = {bool} True
+
+4.2 PyTorchViz可视化网络
+我们采用PyTorchViz来展示网络。
+
+先安装库：
+
+ pip install torchviz
+然后添加代码可视化，我们使用可视化函数make_dot()来获取绘图对象。
+运行之后，代码相同根目录下的data文件夹里会生成一个.gv文件和一个.png文件，
+.gv文件是Graphviz工具生成图片的脚本代码，.png是.gv文件编译生成的图片。
+默认情况下程序会自动打开.png文件。
+
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+
+    from torchviz import make_dot
+
+    class ToyModel(nn.Module):
+        def __init__(self):
+            super(ToyModel, self).__init__()
+            self.net1 = nn.Linear(10, 10)
+            self.relu = nn.ReLU()
+            self.net2 = nn.Linear(10, 5)
+
+        def forward(self, x):
+            return self.net2(self.relu(self.net1(x)))
+
+    net = ToyModel()
+    print(net) # 顺便打印一下看看
+    optimizer = optim.SGD(params=net.parameters(), lr = 1)
+    optimizer.zero_grad()
+    input = torch.randn(10,10)
+    outputs = net(input)
+    outputs.backward(outputs)
+    optimizer.step()
+
+    NetVis = make_dot(outputs, params=dict(list(net.named_parameters()) + [('x', input)]))
+    NetVis.format = "bmp" # 文件格式
+    NetVis.directory = "data" # 文件生成的文件夹
+    NetVis.view() # 生成文件
+
+输出。
+
+    ToyModel(
+      (net1): Linear(in_features=10, out_features=10, bias=True)
+      (relu): ReLU()
+      (net2): Linear(in_features=10, out_features=5, bias=True)
+    )
+图例如下： 0460.png
+
+我们发现，之前的简略图忽略了 AccumulateGrad 这个关键环节，我们接下来就分析一下。
+
+0x05 AccumulateGrad
+5.1 原理
+我们首先来概述一下 PyTorch 相关原理知识。
+
+从概念上讲，autograd 记录了一个计算图。图中节点分为两种：叶子节点和非叶子节点。
+
+由用户创建的节点称为叶子节点，比如：
+
+    a=torch.tensor([1.0])
+
+运行时变量为：
+
+    a = {Tensor: 1} tensor([1.])
+     T = {Tensor: 1} tensor([1.])
+     data = {Tensor: 1} tensor([1.])
+     device = {device} cpu
+     dtype = {dtype} torch.float32
+     grad = {NoneType} None
+     grad_fn = {NoneType} None
+     is_cuda = {bool} False
+     is_leaf = {bool} True
+     requires_grad = {bool} False
+
+但是此时 a 不能求导，在创建张量时，如果设置 requires_grad 为Ture，那么 Pytorch 才知道需要对该张量进行自动求导。
+
+    a=torch.tensor([1.0], requires_grad = True)
+
+    运行时变量为：
+    a = {Tensor: 1} tensor([1.], requires_grad=True)
+     T = {Tensor: 1} tensor([1.], grad_fn=<PermuteBackward>)
+     data = {Tensor: 1} tensor([1.])
+     device = {device} cpu
+     dtype = {dtype} torch.float32
+     grad = {NoneType} None
+     grad_fn = {NoneType} None
+     is_cuda = {bool} False
+     is_leaf = {bool} True
+     requires_grad = {bool} True
+     shape = {Size: 1} 1
+
+PyTorch会记录对该张量的每一步操作历史，从而生成一个概念上的有向无环图，该无环图的叶子节点是模型的输入张量，其根为模型的输出张量。
+用户不需要对图的所有执行路径进行编码，因为用户运行的就是用户后来想微分的。通过从根到叶跟踪此图形，用户可以使用链式求导规则来自动计算梯度。
+
+在内部实现上看，autograd 将此图表示为一个“Function” 或者说是"Node" 对象（真正的表达式）的图，该图可以使用apply方法来进行求值。
+
+反向传播时候，autograd 引擎沿着从根节点（就是前向传播的输出节点）溯源这个图，这样就可以利用链式求导法则计算所有叶子节点的梯度。
+每一个前向传播操作函数都有一个反向传播函数与之对应，这个反向传播函数用来计算每个variable的梯度。
+
+反向图之中，需要求导的叶子节点张量对应的反向传播计算函数就是AccumulateGrad，其梯度是累加的，多次求导都会在这个张量的导数上累积，比如：
+
+    a=torch.tensor([5.0], requires_grad = True)
+    b = torch.tensor([3.0], requires_grad = True)
+    c = a + b
+对应的是： 0461.png
+
+对应我们的示例，Linear 实例都是用户显式定义的，所有都是叶子节点。
+
+5.2 AccumulateGrad
+5.2.1 定义
+定义如下，accumulateGrad 实际就是：
+
+    先累积梯度。
+
+    再调用传入的 update_grad 函数来更新梯度。
+
+    struct TORCH_API AccumulateGrad : public Node {
+      explicit AccumulateGrad(Variable variable_);
+    ...
+
+5.2.2 apply
+当调用 apply 时候， 有两个注意点：
+
+    传入的更新函数就是 { grad = std::move(grad_update); } 更新梯度。
+
+    mutable_grad 得到的是张量的梯度成员变量。
+
+    Tensor& mutable_grad() const {
+      return impl_->mutable_grad();
+    }
+
+    /// Accesses the gradient `Variable` of this `Variable`.
+    Variable& mutable_grad() override {
+      return grad_;
+    }
+
+具体代码如下：
+
+    auto AccumulateGrad::apply(variable_list&& grads) -> variable_list {
+      check_input_variables("AccumulateGrad", grads, 1, 0);
+    ...
+
+
+具体流程图逻辑如下：
+
+AccumulateGrad                                 Tensor           AutogradMeta
+     +                                           +                   +
+     |                                           |                   |
+     |                                           |                   |
+     |                                           |                   |
+     v                                           |                   |
+   apply(update_grad)                            |                   |
+     +                                           |                   |
+     |                                           |                   |
+     |                                           |                   |
+     |                                           |                   |
+     v                                           |                   |
+accumulateGrad                                   |                   |
+     +                                           |                   |
+     |                                           |                   |
+     | result = variable_grad + new_grad         |                   |
+     |                                           |                   |
+     v                result                     v                   v
+ update_grad +---------------------------->  mutable_grad +--->    grad_
+
+或者如下，对于一个叶子张量，反向计算时候会调用AccumulateGrad进行累积梯度，然后更新到叶子张量的 grad_ 之中：
+
++----------------------------------------------+          +-------------------------+
+|Tensor                                        |          |TensorImpl               |
+|                                              |          |                         |
+|                                              |  bridge  |                         |
+|   <TensorImpl, UndefinedTensorImpl> impl_ +-----------> |    autograd_meta_ +---------+
+|                                              |          |                         |   |
+|                                              |          |                         |   |
++----------------------------------------------+          +-------------------------+   |
+                                                                                        |
+                                                                                        |
+                                                                                        |
++-------------------------+                                                             |
+| AutogradMeta            | <-----------------------------------------------------------+
+|                         |
+|                         |
+|                         |            +------------------------------------------------+
+|                         |            | AccumulateGrad                                 |
+|      grad_fn_ +--------------------> |                                                |
+|                         |            |                                                |
+|                         |            |      apply(grads) {                            |
+|                         |            |                                                |
+|      grad_accumulator_  |            |         accumulateGrad(new_grad) {             |
+|                         |            |                                                |
+|                         |            |           result = variable_grad + new_grad    |
+|                         |   update   |                                                |
+|      grad_    <--------------------------------+ update_grad(result)                  |
+|                         |            |                                                |
+|                         |            |         }                                      |
+|                         |            |      }                                         |
+|                         |            |                                                |
+|                         |            |                                                |
++-------------------------+            +------------------------------------------------+
+
+现在我们知道了，梯度就是累积在叶子节点的 grad_ 之上，但是这些梯度如何更新模型参数？
+
+5.3 结合优化器
+我们回到 SGD 的step 函数，只选取关键部分，可以看到其获取了模型中参数的梯度，然后更新模型参数。
+yknote torch/optim/sgd.py
+    @torch.no_grad()
+    def step(self, closure=None):
+    ...
+
+0x06 总结
+我们按照根据模型参数构建优化器 ---> 引擎计算梯度 ---> 优化器优化参数 ---> 优化器更新模型这个顺序来总结。
+
+    根据模型参数构建优化器
+
+        采用 optimizer = optim.SGD(params=net.parameters(), lr = 1) 进行构造，
+        这样 params 被赋值到优化器的内部成员变量 param_groups 之上。
+
+        模型包括两个 Linear，这些层如何更新参数？
+
+            Linear 里面的 weight，bias 都是 Parameter 类型。
+
+                Parameter 构造函数中参数 requires_grad=True。这么设置就说明 Parameter 默认是需要计算梯度的。
+
+                所以 Linear 的 weight，bias 就是需要引擎计算其梯度。
+
+                weight，bias 被添加到 ToyModel 的 _parameters 成员变量 之中。
+
+            ToyModel 的 _parameters 成员变量通过 parameters 方法来获取，其返回的是一个Iterator。
+
+                用 这个 iterator 作为参数用来构建 SGD 优化器。
+
+                现在 SGD 优化器 的 parameters 是一个指向 ToyModel._parameters 的 iterator。
+                这说明优化器实际上是直接优化 ToyModel 的 _parameters。
+
+            所以优化器就是直接优化更新 Linear 的 weight 和 bias。其实优化器就是一套代码而已，
+            具体优化哪些东西，需要在构建时候指定，优化一个模型的参数也行，优化用户自己指定的其他变量也行。
+
+    引擎计算梯度
+
+        如何保证 Linear 可以计算梯度？
+
+            weight，bias 都是 Parameter 类型，默认是需要计算梯度的。
+
+            所以计算 weight，bias 梯度。
+
+        对于模型来说，计算出来的梯度怎么和 Linear 参数对应起来？引擎计算出来的这些梯度累积在哪里？
+
+            对应我们的示例，Linear 实例都是用户显式定义的，所以都是叶子节点。
+
+            叶子节点通过 AccumulateGrad 把梯度累积在模型参数张量 autograd_meta_.grad_ 之中。
+
+    优化器优化参数：
+
+        调用 step 进行优化，优化目标是优化器内部成员变量 self.parameters。
+
+        self.parameters 是一个指向 ToyModel._parameters 的 iterator。这说明优化器实际上是直接优化 ToyModel 的 _parameters。
+
+    优化器更新模型：
+
+        优化目标（self.parameters）的更新实际上就是直接作用到模型参数（比如 Linear 的 weight，bias）之上。
+
+具体如图：
+
++---------------------------------------------------------------------+
+| ToyModel                                                            |
+|  +---------------------------------+                 +------------+ |                   +------------------+
+|  | Linear(10, 10)                  +------> ReLU +-->+Linear(10,5)| |                   | Engine           |
+|  |                                 |                 |            | |forward / backward |                  |
+|  |  weight=Parameter               |                 |    weight  | +-----------------> | Compute gradient |
+|  |                                 +---------------+ |    bias    | |                   |        +         |
+|  |  +----------------------------+ |               | +--+---------+ |                   |        |         |
+|  |  | bias=Parameter             | |               |    |           |                   |        |         |
+|  |  |                            | |               |    |           |                   +------------------+
+|  |  |                            | |               |    |           |  3 accumulate              |
+|  |  |    autograd_meta_.grad_ <----------------------------------------------------+           2 | gradient
+|  |  |                            | |               |    |           |              |             |
+|  |  |    data                    | |               |    |           |              |             v
+|  |  |                            | |               v    v           |              |
+|  |  |                            | |        self._parameters        |              |    +------------------+
+|  |  +----------------------------+ |                 +              |              |    | AccumulateGrad   |
+|  +---------------------------------+                 |              |              |    |                  |
+|                                                      |              |              |    |                  |
+|                                                      v              |  5 update    -----------+ apply()    |
+|                                  para_iterator = parameters()  <----------------+       |                  |
+|                                            +                        |           |       |                  |
+|                                            |                        |           |       +------------------+
+|                                            |                        |           |
++---------------------------------------------------------------------+           |
+                                           1 |                                    |
+                                             |                                    |
+              +---------------------------------------------------------------------------+
+              | SGD                          |                                    |       |
+              |                              |                                    |       |
+              |                              v                                    +       |
+              |                                                                 4 step()  |
+      ^-------------> self.param_groups = para_iterator(ToyModel._parameters) +---------------->
+      |       |                                                                           |    |
+      |       |                                                                           |    |
+      |       +---------------------------------------------------------------------------+    |
+      |                                                                                        |
+      <--------------------------------------------------------------------------------------+ v
+
+手机如下： 0463.png
+
+
+
+至此，普通优化器分析完毕，下一章我们分析数据并行的优化器。
+
+0xFF 参考
+torch.optim.optimizer源码阅读和灵活使用
+
+pytorch源码阅读（二）optimizer原理
+
+pytorch 优化器(optim)不同参数组,不同学习率设置的操作
+
+Pytorch——momentum动量
+
+各种优化方法总结比较（sgd/momentum/Nesterov/adagrad/adadelta）
+
+【优化器】优化器算法及PyTorch实现（一）：永不磨灭的SGD
+
+以optim.SGD为例介绍pytorch优化器
+
+Pytorch学习笔记08----优化器算法Optimizer详解（SGD、Adam）
+
+pytorch中使用torch.optim优化神经网络以及优化器的选择 - pytorch中文网
+
+pytorch优化器详解：SGD
+
+Pytorch里addmm()和addmm_()的用法详解
+
+PyTorch下的可视化工具
+
+PyTorch的优化器
+
+PyTorch 源码解读之 torch.optim：优化算法接口详解
+
+详解Pytorch中的网络构造

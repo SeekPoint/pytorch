@@ -81,25 +81,31 @@ class SGD(Optimizer):
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
+        # 使用 closure 重新计算loss
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
-        for group in self.param_groups:
+        # 使用计算得到的梯度更新变量
+        # self.param_groups 就是我们传入的参数列表
+        for group in self.param_groups: # 每一个group是一个dict, 其包含每组参数所需的必要参数
             params_with_grad = []
             d_p_list = []
             momentum_buffer_list = []
+            # 本组参数更新所必需的设置
             weight_decay = group['weight_decay']
             momentum = group['momentum']
             dampening = group['dampening']
             nesterov = group['nesterov']
             lr = group['lr']
 
-            for p in group['params']:
-                if p.grad is not None:
-                    params_with_grad.append(p)
+            for p in group['params']: # 遍历本组所有需要更新的参数
+                if p.grad is not None: # 获取到模型参数的梯度
+                    params_with_grad.append(p) # 利用梯度进行优化
                     d_p_list.append(p.grad)
+
+                    # momentum 相关
 
                     state = self.state[p]
                     if 'momentum_buffer' not in state:
@@ -107,7 +113,7 @@ class SGD(Optimizer):
                     else:
                         momentum_buffer_list.append(state['momentum_buffer'])
 
-            F.sgd(params_with_grad,
+            F.sgd(params_with_grad, # 更新当前组学习参数  w.data -= w.grad*lr，使用 param.add_(d_p, alpha=-lr) 来更新参数
                   d_p_list,
                   momentum_buffer_list,
                   weight_decay=weight_decay,

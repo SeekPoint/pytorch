@@ -374,7 +374,7 @@ class Module:
                 "as a function of another Tensor, compute the value in "
                 "the forward() method.".format(name))
         else:
-            self._parameters[name] = param
+            self._parameters[name] = param  # 这里添加了
 
     def add_module(self, name: str, module: Optional['Module']) -> None:
         r"""Adds a child module to the current module.
