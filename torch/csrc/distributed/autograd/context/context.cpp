@@ -69,8 +69,8 @@ DistAutogradContext::recvFunctions() const {
 }
 
 void DistAutogradContext::accumulateGrad(
-    const torch::autograd::Variable& variable,
-    const torch::Tensor& grad,
+    const torch::autograd::Variable& variable, // variable就是目标变量
+    const torch::Tensor& grad, // grad就是梯度，需要累积到variable之上
     size_t num_expected_refs) {
   TORCH_INTERNAL_ASSERT(grad.defined());
   TORCH_INTERNAL_ASSERT(variable.requires_grad());
@@ -97,12 +97,12 @@ void DistAutogradContext::accumulateGrad(
   // No higher order gradients supported in distributed autograd.
   AutoGradMode grad_mode(false);
 
-  at::Tensor new_grad = AccumulateGrad::callHooks(variable, grad);
+  at::Tensor new_grad = AccumulateGrad::callHooks(variable, grad);  // 计算
 
   // TODO: Need to bump 'num_expected_refs' here when we support post_hooks for
   // distributed autograd as part of
   // https://github.com/pytorch/pytorch/issues/33482
-  AccumulateGrad::accumulateGrad(
+  AccumulateGrad::accumulateGrad(  // 调用算子函数来累积梯度
       variable,
       old_grad,
       new_grad,

@@ -1,0 +1,696 @@
+PyTtorch 分布式 Autograd (6) ---- 引擎(下)
+https://www.cnblogs.com/rossiXYZ/p/15646816.html
+
+目录
+[源码解析] PyTtorch 分布式 Autograd (6) ---- 引擎(下)
+0x00 摘要
+0x01 回顾
+0x02 执行GraphTask
+2.1 runEngineAndAccumulateGradients
+2.2 execute_graph_task_until_ready_queue_empty
+2.3 evaluate_function
+2.4 globalCpuThread
+2.5 小结
+0x03 RPC调用
+3.1 RecvRpcBackward
+3.1.1 定义
+3.1.2 构建
+3.1.3 apply
+3.2 PropagateGradientsReq
+3.2.1 定义
+3.3 接受方
+3.3.1 接受消息
+3.3.2 processBackwardAutogradReq
+3.3.3 executeSendFunctionAsync
+0x04 DistAccumulateGradCaptureHook
+4.1 定义
+4.2 生成
+4.3 使用
+4.4 累积梯度
+4.4.1 上下文累积
+4.4.2 算子累积
+0x05 等待完成
+0xFF 参考
+0x00 摘要
+上文我们介绍了引擎如何获得后向计算图的依赖，本文我们就接着看看引擎如何依据这些依赖进行后向传播。通过本文的学习，大家可以：
+
+    了解 RecvRpcBackward 如何给对应的下游节点发送 RPC 消息，可以再次梳理一下worker之间后向传播的交互流程。
+    了解 AccumulateGrad 如何在上下文累积梯度。
+
+PyTorch分布式其他文章如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+
+[源码解析] Pytorch 如何实现后向传播 (2)---- 引擎静态结构
+
+[源码解析] Pytorch 如何实现后向传播 (3)---- 引擎动态逻辑
+
+[源码解析] PyTorch 如何实现后向传播 (4)---- 具体算法
+
+[源码解析] PyTorch 分布式(1)------历史和概述
+
+[源码解析] PyTorch 分布式(2) ----- DataParallel(上)
+
+[源码解析] PyTorch 分布式(3) ----- DataParallel(下)
+
+[源码解析] PyTorch 分布式(4)------分布式应用基础概念
+
+[源码解析] PyTorch分布式(5) ------ DistributedDataParallel 总述&如何使用
+
+[源码解析] PyTorch分布式(6) ---DistributedDataParallel -- 初始化&store
+
+[源码解析] PyTorch 分布式(7) ----- DistributedDataParallel 之进程组
+
+[源码解析] PyTorch 分布式(8) -------- DistributedDataParallel之论文篇
+
+[源码解析] PyTorch 分布式(9) ----- DistributedDataParallel 之初始化
+
+[源码解析] PyTorch 分布式(10)------DistributedDataParallel 之 Reducer静态架构
+
+[源码解析] PyTorch 分布式(11) ----- DistributedDataParallel 之 构建Reducer和Join操作
+
+[源码解析] PyTorch 分布式(12) ----- DistributedDataParallel 之 前向传播
+
+[源码解析] PyTorch 分布式(13) ----- DistributedDataParallel 之 反向传播
+
+[源码解析] PyTorch 分布式 Autograd (1) ---- 设计
+
+[源码解析] PyTorch 分布式 Autograd (2) ---- RPC基础
+
+[源码解析] PyTorch 分布式 Autograd (3) ---- 上下文相关
+
+[源码解析] PyTorch 分布式 Autograd (4) ---- 如何切入引擎
+
+[源码解析] PyTorch 分布式 Autograd (5) ---- 引擎(上)
+
+为了更好的说明，本文代码会依据具体情况来进行相应精简。
+
+0x01 回顾
+我们首先回顾FAST模式算法算法如下，本文需要讨论后面若干部分。
+
+    我们从具有反向传播根的worker开始（所有根都必须是本地的）。
+
+    查找当前Distributed Autograd Context 的所有send函数 。
+
+    从提供的根和我们检索到的所有send函数开始，我们在本地计算依赖项 。
+
+    计算依赖项后，使用提供的根来启动本地 autograd 引擎。
+
+    当 autograd 引擎执行该recv函数时，该recv 函数通过 RPC 将输入梯度发送到适当的worker。
+    每个recv函数都知道目标 worker id，因为它被记录为前向传播的一部分。
+    通过autograd_context_id和 autograd_message_id 该recv函数被发送到远程主机。
+
+    当远程主机收到这个请求时，我们使用 autograd_context_id和autograd_message_id来查找适当的send函数。
+
+    如果这是worker第一次收到对给定 autograd_context_id的请求，它将按照上面的第 1-3 点所述在本地计算依赖项。
+
+    然后将在第6点接受到的send方法插入队列，以便在该worker的本地 autograd 引擎上执行。
+
+    最后，我们不是在 Tensor的.grad之上累积梯度，而是在每个Distributed Autograd Context之上分别累积梯度 。
+    梯度存储在Dict[Tensor, Tensor]之中 ，Dict[Tensor, Tensor]基本上是从 Tensor 到其关联梯度的映射，
+    并且可以使用 get_gradients() API检索该映射 。
+
+其次，我们看看总体执行代码，总体执行是在 DistEngine::execute 之中完成，具体分为如下步骤：
+
+    使用 contextId 得到前向的上下文。
+    使用 validateRootsAndRetrieveEdges 进行验证。
+    构造一个GraphRoot，用它来驱动后向传播，可以认为是一个虚拟根。
+    使用 computeDependencies 计算依赖。
+    使用 runEngineAndAccumulateGradients 进行反向传播计算。
+    使用 clearAndWaitForOutstandingRpcsAsync 等待 RPC 完成。
+
+    void DistEngine::execute(
+        int64_t contextId,
+    ....
+
+再次，从前文我们知道，依赖项已经在 computeDependencies 之中处理完毕，
+所有需要计算的函数信息都位于 GraphTask.exec_info_ 之上。
+我们接下来就看看如何计算，就是 runEngineAndAccumulateGradients 和 clearAndWaitForOutstandingRpcsAsync 这两个方法。
+
+0x02 执行GraphTask
+我们首先看看如何使用 runEngineAndAccumulateGradients 进行反向传播计算，累积梯度。
+
+2.1 runEngineAndAccumulateGradients
+引擎之中，首先调用了 runEngineAndAccumulateGradients。
+主要是封装了一个 NodeTask，然后以此调用 execute_graph_task_until_ready_queue_empty。
+其中使用 at::launch 来启动线程。
+
+    c10::intrusive_ptr<c10::ivalue::Future> DistEngine::
+        runEngineAndAccumulateGradients(
+    ...
+
+at::launch 位于 aten/src/ATen/ParallelThreadPoolNative.cpp，这里会在线程之中调用传入的 func。
+
+    void launch(std::function<void()> func) {
+      internal::launch_no_thread_state(std::bind([](
+    ....
+
+    namespace internal {
+        void launch_no_thread_state(std::function<void()> fn) {
+    ..
+
+我们接下来一一看看内部这几个方法如何执行。
+
+2.2 execute_graph_task_until_ready_queue_empty
+此函数类似 Engine::thread_main，通过一个 NodeTask 来完成本 GraphTask的执行，
+其中 evaluate_function 会不停的向 cpu_ready_queue 插入新的 NodeTask。engine_.evaluate_function 方法会：
+
+    首先，初始化原生引擎线程。
+
+    其次，每个调用建立一个 cpu_ready_queue，用来从root_to_execute开始遍历graph_task，
+    这允许用不同的线程来对GraphTask并行执行，这是一个CPU相关的queue。
+
+    把传入的 node_task 插入到 cpu_ready_queue。
+
+    沿着反向计算图从根部开始，一直计算到叶子节点。
+
+        这里叶子节点都是 AccumulateGrad 或者 RecvRpcBackward。
+
+        如果是中间节点，则正常计算。
+
+        如果是 RecvRpcBackward 则会给对应的下游节点发送 RPC 消息。
+
+        如果是 AccumulateGrad，则在上下文累积梯度。
+
+具体代码如下：
+
+    void DistEngine::execute_graph_task_until_ready_queue_empty(
+        NodeTask&& node_task,
+    ....
+
+另外，一共有三个地方调用 execute_graph_task_until_ready_queue_empty。
+
+    runEngineAndAccumulateGradients 会调用，这里就是用户主动调用 backward 的情形，就是本节介绍的。
+
+    executeSendFunctionAsync 会调用，这里对应了某节点从反向传播上一节点接受到梯度之后的操作，我们会在下一节介绍。
+
+    globalCpuThread 会调用，这是CPU工作专用线程，我们马上会介绍。
+
+    在 Engine.evaluate_function 之中，会针对 AccumulateGrad 来累积梯度。
+
+    在 Engine.evaluate_function 之中，会调用 RecvRpcBackward 来向反向传播下游发送消息。
+
+我们总结一下几个计算梯度的流程，分别对应下面三个数字。
+
+ User Training Script             RPC BACKWARD_AUTOGRAD_REQ
+     +                                         +
+     |                                         |
+     | 1                                       | 2
+     v                                         v
+ backward                         RequestCallbackNoPython.processRpc
+     +                                         +
+     |                                         |
+     |                                         |
+     v                                         v
+ DistEngine.execute               RequestCallbackNoPython.processBackwardAutogradReq
+     +                                         +
+     |                                         |
+     |                                         |
+     |                                         v
+     |              +----------+  DistEngine.executeSendFunctionAsync
+     |              |                               +
+     |              |                               |
+     v              v                               |
+DistEngine.computeDependencies                      |
+     |                                              |
+     |                                              |
+     v                                              |
+ DistEngine.runEngineAndAccumulateGradients         |     DistEngine.globalCpuThread
+     +                                              |                   +
+     |                           +------------------+                   |
+     |                           |                                      | 3
+     |                           |             +------------------------+
+     |                           |             |
+     |                           |             |
+     v                           v             v
+ DistEngine.execute_graph_task_until_ready_queue_empty
+     +
+     |
+     |
+     v
+ DistEngine.evaluate_function
+     +
+     |
+     +--------------------------------------------------------------+
+     |                                                              |
+     |  4 AccumulateGrad                                            | 5  RecvRpcBackward
+     v                                                              v
+
+(*hook)(captured_grad)                            call_function(graph_task, func, inputs)
+
+2.3 evaluate_function
+上面代码之中，实际上会调用原生引擎的 evaluate_function 来完成操作。
+
+我们看看如何使用 exec_info_，如果没有设置为需要执行，则就不处理。
+在此处，我们可以看到 上文提到的recvBackwardEdges 如何与 exec_info_ 交互。
+
+    遍历 recvBackwardEdges，对于每个 recvBackward，在 GraphTask.exec_info_ 之中对应项之上设止为需要执行。
+
+具体代码如下，这里会：
+
+    针对 AccumulateGrad 来累积梯度。
+
+    调用 RecvRpcBackward 来向反向传播下游发送消息。
+
+    void Engine::evaluate_function(
+        std::shared_ptr<GraphTask>& graph_task,
+    ...
+
+2.4 globalCpuThread
+globalCpuThread 可以参见上文的 [GPU to CPU continuations] 一节，globalCpuThread是工作线程，
+其就是从 ready queue 里面弹出 NodeTask，然后执行。
+
+对于globalCpuThread，其参数 ready_queue 是 global_cpu_ready_queue_
+
+    void DistEngine::globalCpuThread(
+        const std::shared_ptr<ReadyQueue>& ready_queue) {
+    ....
+          execute_graph_task_until_ready_queue_empty( // 这里会调用
+          /*node_task*/ NodeTask(graphTask, graphRoot, std::move(inputs)),
+          /*incrementOutstandingTasks*/ false);
+
+对于普通引擎也会设置一个 cpu 专用 queue。
+
+    auto graph_task = std::make_shared<GraphTask>(
+        /* keep_graph */ keep_graph,
+        /* create_graph */ create_graph,
+        /* depth */ not_reentrant_backward_call ? 0 : total_depth + 1,
+        /* cpu_ready_queue */ local_ready_queue);
+
+2.5 小结
+对于分布式引擎，与普通引擎在计算部分主要不同之处为：
+
+    如果是 RecvRpcBackward 则会给对应的下游节点发送 RPC 消息。
+
+    如果是 AccumulateGrad，则在上下文累积梯度。
+
+所以我们接下来看看具体这两部分如何处理。
+
+0x03 RPC调用
+在之前文章中，我们看到了接受方如何处理反向传播 RPC 调用，我们接下来看看引擎如何发起反向传播 RPC 调用，就是如何调用 recv 方法。
+
+这里就适用于下面worker 0 调用 recv ，执行来到 worker 1 这种情况，对应设计文档中如下。
+
+    当 autograd 引擎执行该recv函数时，该recv 函数通过 RPC 将输入梯度发送到适当的worker。
+    每个recv函数都知道目标 worker id，因为它被记录为前向传播的一部分。
+    通过autograd_context_id和 autograd_message_id 该recv函数被发送到远程主机。
+0455.png
+
+我们就看看如何执行 recv 函数。
+
+具体结合到分布式引擎，就是当引擎发现某一个 Node 是 RecvRpcBackward，就调用其 apply 函数。
+
+    void Engine::evaluate_function(
+        std::shared_ptr<GraphTask>& graph_task,
+        Node* func,
+        InputBuffer& inputs,
+        const std::shared_ptr<ReadyQueue>& cpu_ready_queue) {
+      // If exec_info_ is not empty, we have to instrument the execution
+      auto& exec_info_ = graph_task->exec_info_;
+      if (!exec_info_.empty()) {
+        // 省略了梯度累积部分代码，具体可以参见上面章节
+        if (!fn_info.needed_) {
+          // Skip execution if we don't need to execute the function.
+          return; // 如果没有设置需要执行，则直接返回。recvBackward 会设置需要执行
+        }
+      }
+
+      // 这里就是调用 recvBackward.apply 函数
+      auto outputs = call_function(graph_task, func, inputs);
+    .....
+
+3.1 RecvRpcBackward
+3.1.1 定义
+RecvRpcBackward 定义如下，
+
+    class TORCH_API RecvRpcBackward : public torch::autograd::Node {
+    ....
+
+3.1.2 构建
+构造函数如下。
+
+    RecvRpcBackward::RecvRpcBackward(
+        const AutogradMetadata& autogradMetadata,
+...
+
+
+3.1.3 apply
+torch/csrc/distributed/autograd/functions/recvrpc_backward.cpp 定义了其 apply 函数，其作用就是：
+
+    把传入的梯度 grads 放入outputGrads，因为要输出给下一环节。
+
+    构建 PropagateGradientsReq，这就是 BACKWARD_AUTOGRAD_REQ。
+
+    发送 RPC 给下一环节。
+
+    variable_list RecvRpcBackward::apply(variable_list&& grads) {
+    ....
+
+因为这里发送了 PropagateGradientsReq，所以我们接着看。
+
+3.2 PropagateGradientsReq
+3.2.1 定义
+PropagateGradientsReq 扩展了 RpcCommandBase。
+
+    class TORCH_API PropagateGradientsReq : public rpc::RpcCommandBase {
+     public:
+    ....
+
+其 toMessageImpl 指明了本消息是 BACKWARD_AUTOGRAD_REQ。
+
+    Message PropagateGradientsReq::toMessageImpl() && {
+      std::vector<at::IValue> ivalues;
+    .....
+      return Message(
+          std::move(payload),
+          std::move(tensorTable),
+          MessageType::BACKWARD_AUTOGRAD_REQ); // 这里指明了消息类型。
+    ...
+
+3.3 接受方
+为了论述完整，我们接下来看看接收方如何处理反向传播。
+
+3.3.1 接受消息
+在生成 TensorPipeAgent 时候，把 RequestCallbackImpl 配置为回调函数。
+这是 agent 的统一响应函数。前面关于代理接收逻辑时候，我们也提到了，会进入 RequestCallbackNoPython::processRpc 函数。
+其中可以看到有对 BACKWARD_AUTOGRAD_REQ 的处理逻辑。
+
+这种是 RPC 的正常流程。
+
+    void RequestCallbackNoPython::processRpc(
+        RpcCommandBase& rpc,
+        const MessageType& messageType,
+        const int64_t messageId,
+        const c10::intrusive_ptr<JitFuture>& responseFuture,
+        std::shared_ptr<LazyStreamContext> ctx) const {
+
+      switch (messageType) {
+
+        case MessageType::BACKWARD_AUTOGRAD_REQ: {
+          processBackwardAutogradReq(rpc, messageId, responseFuture); // 这里调用
+          return;
+        };
+3.3.2 processBackwardAutogradReq
+在 processBackwardAutogradReq 之中会：
+
+    获取 DistAutogradContainer。
+
+    获取 上下文。
+
+    调用 executeSendFunctionAsync 进行引擎处理。
+
+由此，我们可以看到有两个途径进入引擎：
+
+    一个是示例代码显式主动调用 backward，进而调用到 DistEngine::getInstance().execute，就是 worker 0。
+
+    一个是被动调用 DistEngine::getInstance().executeSendFunctionAsync，就是 worker 1。
+
+void RequestCallbackNoPython::processBackwardAutogradReq(
+    RpcCommandBase& rpc,
+...
+
+3.3.3 executeSendFunctionAsync
+executeSendFunctionAsync 这里开始进入了引擎，注意，这里是接收方也进入了引擎，在接收方上进行计算。
+executeSendFunctionAsync 会直接调用 execute_graph_task_until_ready_queue_empty，也可能先计算依赖然后继续执行。
+此处可以参考设计之中的：
+
+    6）当远程主机收到这个请求时，我们使用 autograd_context_id和autograd_message_id来查找适当的send函数。
+    7）如果这是worker第一次收到对给定 autograd_context_id的请求，它将按照上面的第 1-3 点所述在本地计算依赖项。
+    8）然后将在第6点接受到的send方法插入队列，以便在该worker的本地 autograd 引擎上执行。
+
+具体代码如下：
+
+    c10::intrusive_ptr<c10::ivalue::Future> DistEngine::executeSendFunctionAsync(
+        const ContextPtr& autogradContext,
+    ....
+
+具体如下图：
+
+                                                                  +
+                                                         worker 0 | worker 1
+                                                                  |
+  Engine            RecvRpcBackward              RpcAgent         |     RequestCallbackNoPython             DistEngine
+    +                    +                          +             |              +                              +
+    |                    |                          |             |              |                              |
+    |                    |                          |             |              |                              |
+evaluate_function        |                          |             |              |                              |
+    +                    |                          |             |              |                              |
+    |                    |                          |             |              |                              |
+    +                    |                          |             |              |                              |
+  call_function          |                          |             |              |                              |
+    +                    |                          |             |              |                              |
+    |      grads         v                          |             |              |                              |
+    +----------------> apply                        |             |              |                              |
+    |                    +                          |             |              |                              |
+    |                    |                          |             |              |                              |
+    |                    +                          |             |              |                              |
+    |                 gradCall                      |             |              |                              |
+    |                    +                          |             |              |                              |
+    |                    |  PropagateGradientsReq   |             |              |                              |
+    |                    +------------------------> |             |              |                              |
+    |                    |                          |             +              |                              |
+    |                    |                          +   BACKWARD_AUTOGRAD_REQ    |                              |
+    |                    |                        send  +---------+--------->    |                              |
+    |                    |                          +             |              |                              |
+    |                    |                          |             |              +                              |
+    |                    |                          |             |     processBackwardAutogradReq              |
+    |                    |                          |             |              +                              |
+    |                    |                          |             |              |                              +
+    |                    |                          |             |              +------------> executeSendFunctionAsync
+    |                    |                          |             |              |                              +
+    |                    |                          |             |              |                              |
+    |                    |                          |             |              |                              |
+    v                    v                          v             +              v                              v
+
+
+手机如下：  0456.png
+
+0x04 DistAccumulateGradCaptureHook
+目前看起来总体逻辑已经完成了，但是实际上缺了一块，对应了设计文档中的：
+
+最后，我们不是在 Tensor的.grad之上累积梯度，而是在每个Distributed Autograd Context之上分别累积梯度 。
+梯度存储在Dict[Tensor, Tensor]之中 ，Dict[Tensor, Tensor]基本上是从 Tensor 到其关联梯度的映射，
+并且可以使用 get_gradients() API检索该映射 。
+
+就是把异地/本地的梯度累积到本地上下文之中，所以我们再分析一下 DistAccumulateGradCaptureHook。
+
+4.1 定义
+DistAccumulateGradCaptureHook 有三个作用：
+
+    调用原始AccumulateGrad的 pre hooks 来修改输入梯度。
+
+    将 grad 累积到RPC上下文。
+
+    调用原始AccumulateGrad的 post hooks。
+
+其定义如下：
+
+    // This hook does 3 things:
+    //   1. Call pre hooks of the original AccumulateGrad to modify the input grad.
+    //   2. Accumuate the gard to RPC context.
+    //   3. Call post hooks of the original AccumulateGrad.
+    class DistAccumulateGradCaptureHook
+        : public GraphTask::ExecInfo::Capture::GradCaptureHook {
+     public:
+    ...
+
+4.2 生成
+如何生成 DistAccumulateGradCaptureHook？计算依赖时候生成 DistAccumulateGradCaptureHook，
+但是记录在 capture.hooks_.push_back 之中。
+
+这里是为了处理 AccumulateGrad。
+
+    AccumulateGrad 一定是叶子节点，不需执行，而需要在其上积累梯度，但是RecvRpcBackward需要执行。
+
+    AccumulateGrad 就保存在 DistAccumulateGradCaptureHook 之中。
+
+void DistEngine::computeDependencies(
+    const ContextPtr& autogradContext,
+...
+          capture.hooks_.push_back( // 这里会生成
+              std::make_unique<DistAccumulateGradCaptureHook>(
+                  std::dynamic_pointer_cast<AccumulateGrad>( // 会保存 AccumulateGrad
+...
+
+
+4.3 使用
+代码是缩减版。
+
+首先，execute_graph_task_until_ready_queue_empty 会调用到原始引擎 engine_.evaluate_function。
+
+void DistEngine::execute_graph_task_until_ready_queue_empty(
+    NodeTask&& node_task,
+    bool incrementOutstandingTasks) {
+
+  while (!cpu_ready_queue->empty()) {
+    std::shared_ptr<GraphTask> local_graph_task;
+    {
+      NodeTask task = cpu_ready_queue->pop();
+
+      if (task.fn_ && !local_graph_task->has_error_.load()) {
+        AutoGradMode grad_mode(local_graph_task->grad_mode_);
+        GraphTaskGuard guard(local_graph_task);
+        engine_.evaluate_function( // 调用原始引擎
+              local_graph_task, task.fn_.get(), task.inputs_, cpu_ready_queue);
+      }
+    }
+    // Decrement the outstanding task.
+    --local_graph_task->outstanding_tasks_;
+  }
+
+}
+其次，原始引擎代码之中，会调用hooks。
+
+void Engine::evaluate_function(
+....
+// 这里调用 hook，就是 DistAccumulateGradCaptureHook 的 operator()，captured_grad 就是累积的梯度
+          captured_grad = (*hook)(captured_grad);
+...
+
+DistAccumulateGradCaptureHook 的 operator() 方法之中，会调用下面来累积梯度。
+
+      autogradContext_->accumulateGrad(
+          accumulateGrad_->variable, inputGrads[0], 3 /* num_expected_refs */);
+
+4.4 累积梯度
+4.4.1 上下文累积
+    void DistAutogradContext::accumulateGrad(
+        const torch::autograd::Variable& variable, // variable就是目标变量
+        const torch::Tensor& grad, // grad就是梯度，需要累积到variable之上
+        size_t num_expected_refs) {
+    ....
+      at::Tensor new_grad = AccumulateGrad::callHooks(variable, grad); // 计算
+
+      AccumulateGrad::accumulateGrad( // 调用算子函数来累积梯度
+          variable,
+    ...
+
+4.4.2 算子累积
+代码位于 torch/csrc/autograd/functions/accumulate_grad.h。AccumulateGrad 的定义如下：
+
+    struct TORCH_API AccumulateGrad : public Node {
+      explicit AccumulateGrad(Variable variable_);
+    ....
+      template <typename T>
+  static void accumulateGrad( // 这里会进行具体的累积梯度
+...
+
+
+具体可以如下图所示，左边是数据结构，右面是算法流程，右面的序号表示执行从上至下，执行过程之中会用到左边的数据结构，算法与数据结构的调用关系由横向箭头表示。
+
+    分布式引擎调用execute_graph_task_until_ready_queue_empty来执行具体的 GraphTask。
+
+    Engine::evaluate_function 会调用 GraphTask 之中的 ExecInfo。
+
+    然后会访问 GradCaptureHook，调用hook，hook 的 operator函数会调用到 autogradContext_->accumulateGrad。
+
+    autogradContext_ 会执行 accumulateGrad，对 hook（DistAccumulateGradCaptureHook）之中保存的 accumulateGrad_ 做操作。
+
+    AccumulateGrad::accumulateGrad 会完成最终的梯度更新操作。
+
+                                     DATA STRUCTURE   +  ALGORITHM
+                                                      |
++-----------------------------------------------+     |
+| GraphTask                                     |     |  DistEngine::execute_graph_task_until_ready_queue_empty
+|                                               |     |      +                |
+|   unordered_map<Node*, ExecInfo> exec_info_   |     |      |                |
+|                            +                  | <----------+                |
+|                            |                  |     |                       |
++-----------------------------------------------+     |                       | 1
+                             |                        |                       |
+                             |                        |                       |
+                             v                        |                       |
+       +---------------------+------------------+     |                       v
+       | ExecInfo                               | <-------------+  Engine::evaluate_function
+       |                                        |     |                       +
+       |       < vector<Capture> > captures_    |     |                       |
+       |                   +                    |     |                       |
+       |                   |                    |     |                       | 2
+       +----------------------------------------+     |                       |
+                           |                          |                       v
+                           |                          |
+                           v                          |      +--+ captured_grad = (*hook)(captured_grad)
+       +-------------------+--------------------+     |      |                +
+       | Capture                                |     |      |                |
+       |                                        |     |      |                |
+       |   vector< <GradCaptureHook> > hooks_ <--------------+                | 3
+       |                   +                    |     |                       |
+       +----------------------------------------+     |                       v
+                           |                          |
+                           |                          |   +--+ autogradContext_->accumulateGrad(
+                           v                          |   |         accumulateGrad_-> variable, inputGrads[0], 3)
+       +-------------------+--------------------+     |   |                   +
+       | DistAccumulateGradCaptureHook          |     |   |                   |
+       |                                        |     |   |                   |
+       |      ContextPtr autogradContext_    <------------+                   | 4
+       |                                        |     |   |                   |
+       |      AccumulateGrad accumulateGrad_ <------------+                   v
+       |                          +             |     |
+       +----------------------------------------+     |   +-+ new_grad = AccumulateGrad::callHooks(variable, grad)
+                                  |                   |   |                   +
+                                  |                   |   |                   |
+                                  v                   |   |                   | 5
+              +-------------------+------+            |   |                   v
+              | AccumulateGrad           |            |   |
+              |                          |            |   |      AccumulateGrad::accumulateGrad(
+              |      Variable variable <------------------+------+   variable, old_grad, new_grad,)
+              |                          |            |
+              +--------------------------+            +
+
+手机如下： 0457.png
+
+0x05 等待完成
+最后，分布式引擎会调用 clearAndWaitForOutstandingRpcsAsync 来等待处理完成。
+
+    c10::intrusive_ptr<c10::ivalue::Future> DistAutogradContext::
+        clearAndWaitForOutstandingRpcsAsync() {
+    ...
+
+支持，分布式 autograd 全部分析完毕，前面说过，分布式处理有四大金刚，我们简介了 RPC，RRef，
+分析了分布式引擎，从下一篇开始，我们开始分析剩下的分布式优化器，此系列可能包括4~6篇。
+
+0xFF 参考
+Distributed Autograd Design
+
+Remote Reference Protocol
+
+PyTorch 源码解读之分布式训练了解一下？
+
+https://pytorch.org/docs/stable/distributed.html
+
+https://pytorch.apachecn.org/docs/1.7/59.html
+
+https://pytorch.org/docs/stable/distributed.html#module-torch.distributed
+
+https://pytorch.org/docs/master/notes/autograd.html
+
+https://pytorch.org/docs/master/rpc/distributed_autograd.html
+https://pytorch.org/docs/master/rpc/rpc.html
+
+https://www.w3cschool.cn/pytorch/pytorch-cdva3buf.html
+
+PyTorch 分布式 Autograd 设计
+
+Getting started with Distributed RPC Framework
+
+Implementing a Parameter Server using Distributed RPC Framework
+
+Combining Distributed DataParallel with Distributed RPC Framework
+
+Profiling RPC-based Workloads
+
+Implementing batch RPC processing
+
+Distributed Pipeline Parallel

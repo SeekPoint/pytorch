@@ -90,7 +90,7 @@ struct TORCH_API AccumulateGrad : public Node {
   //              The argument to the function is a Tensor which
   //              is used to set a new value for the grad.
   template <typename T>
-  static void accumulateGrad(
+  static void accumulateGrad( // 这里会进行具体的累积梯度
       const Variable& variable,
       at::Tensor& variable_grad,
       const at::Tensor& new_grad,

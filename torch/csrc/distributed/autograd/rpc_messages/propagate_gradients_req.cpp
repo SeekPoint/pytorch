@@ -40,7 +40,7 @@ Message PropagateGradientsReq::toMessageImpl() && {
   return Message(
       std::move(payload),
       std::move(tensorTable),
-      MessageType::BACKWARD_AUTOGRAD_REQ);
+      MessageType::BACKWARD_AUTOGRAD_REQ); // 这里指明了消息类型。
 }
 
 std::unique_ptr<PropagateGradientsReq> PropagateGradientsReq::fromMessage(

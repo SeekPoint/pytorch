@@ -47,7 +47,7 @@ class DistAccumulateGradCaptureHook
     // It's intended that pre/post hooks are still called even if the grad is
     // undenfined here.
     for (const auto& hook : accumulateGrad_->pre_hooks()) {
-      inputGrads = (*hook)(inputGrads);
+      inputGrads = (*hook)(inputGrads); // 调用 pre-hooks
     }
 
     // It is possible that the grad is not defined since a separate
@@ -59,18 +59,18 @@ class DistAccumulateGradCaptureHook
       //   2. 'graph_task->captured_vars_' on the callsite in the local engine.
       //   3. 'InputBuffer& inputs' on the callsite as the inputs of the
       //   function node.
-      autogradContext_->accumulateGrad(
+      autogradContext_->accumulateGrad(   // 累积梯度
           accumulateGrad_->variable, inputGrads[0], 3 /* num_expected_refs */);
     }
     const variable_list kEmptyOuput;
     for (const auto& hook : accumulateGrad_->post_hooks()) {
-      (*hook)(kEmptyOuput, inputGrads);
+      (*hook)(kEmptyOuput, inputGrads);  // 调用 post-hooks
     }
     return inputGrads[0];
   }
 
  private:
-  std::shared_ptr<AccumulateGrad> accumulateGrad_;
+  std::shared_ptr<AccumulateGrad> accumulateGrad_; // 这就是需要累积的目标向量，后续操作在其之上
   ContextPtr autogradContext_;
 };
 
@@ -191,7 +191,8 @@ void DistEngine::computeDependencies(
   // NOTE: we don't need to build and pass a cpu_ready_queue to GraphTask
   // as we use execute_graph_task_until_ready_queue_empty, which will build
   // a separate ReadyQueue for each call.
-  // 不需要给 GraphTask 传一个cpu_ready_queue，因为我们后面使用execute_graph_task_until_ready_queue_empty，在那里会给每一个调用建立一个独立的ReadyQueue
+  // 不需要给 GraphTask 传一个cpu_ready_queue，
+  // 因为我们后面使用execute_graph_task_until_ready_queue_empty，在那里会给每一个调用建立一个独立的ReadyQueue
   auto graphTask = std::make_shared<GraphTask>(
       /* keep_graph */ retainGraph,
       /* create_graph */ false,
@@ -306,9 +307,9 @@ void DistEngine::computeDependencies(
       if (auto accumulateGradFn = dynamic_cast<AccumulateGrad*>(fn)) {
         // 如果是叶子节点
         for (auto& capture : *execInfo.captures_) { // 遍历张量路径上的节点
-          capture.hooks_.push_back(
+          capture.hooks_.push_back(  // 这里会生成
               std::make_unique<DistAccumulateGradCaptureHook>( // 给张量插入Hook
-                  std::dynamic_pointer_cast<AccumulateGrad>(
+                  std::dynamic_pointer_cast<AccumulateGrad>( // 会保存 AccumulateGrad
                       accumulateGradFn->shared_from_this()),
                   autogradContext));
         }
@@ -330,10 +331,15 @@ void DistEngine::computeDependencies(
 void DistEngine::execute_graph_task_until_ready_queue_empty(
     NodeTask&& node_task,
     bool incrementOutstandingTasks) {
+
+  // 初始化原生引擎线程
   engine_.initialize_device_threads_pool();
+
   // Create a ready queue per call to traverse the graph_task from
   // root_to_execute This allow concurrent execution of the same GraphTask from
   // different threads
+  // 每个调用建立一个 ready queue，用来从root_to_execute开始遍历graph_task，
+  // 这允许用不同的线程来对GraphTask并行执行，这是一个CPU相关的queue
   std::shared_ptr<ReadyQueue> cpu_ready_queue = std::make_shared<ReadyQueue>();
   auto graph_task = node_task.base_.lock();
   if (graph_task == nullptr) {
@@ -352,7 +358,7 @@ void DistEngine::execute_graph_task_until_ready_queue_empty(
       // Scope this block of execution since NodeTask is not needed after this
       // block and can be deallocated (release any references to grad tensors
       // as part of inputs_)
-      NodeTask task = cpu_ready_queue->pop();
+      NodeTask task = cpu_ready_queue->pop(); // 取出一个NodeTask
       if (!(local_graph_task = task.base_.lock())) {
         continue;
       }
@@ -360,7 +366,7 @@ void DistEngine::execute_graph_task_until_ready_queue_empty(
         AutoGradMode grad_mode(local_graph_task->grad_mode_);
         try {
           GraphTaskGuard guard(local_graph_task);
-          engine_.evaluate_function(
+          engine_.evaluate_function(  // 这里会调用具体Node对应的函数
               local_graph_task, task.fn_.get(), task.inputs_, cpu_ready_queue);
         } catch (std::exception& e) {
           engine_.thread_on_exception(local_graph_task, task.fn_, e);
@@ -372,7 +378,7 @@ void DistEngine::execute_graph_task_until_ready_queue_empty(
       }
     }
     // Decrement the outstanding task.
-    --local_graph_task->outstanding_tasks_;
+    --local_graph_task->outstanding_tasks_;  // 处理了一个NodeTask
   }
   // Check if we've completed execution.
   if (graph_task->completed()) {
@@ -394,13 +400,18 @@ c10::intrusive_ptr<c10::ivalue::Future> DistEngine::
   // lingering if we're running backward multiple times and some of the
   // passes ran into errors.
   autogradContext->clearOutstandingRpcs();
+
+  // 得到GraphTask
   auto graphTask = autogradContext->retrieveGraphTask();
+
+  // 启动了一个线程来运行 execute_graph_task_until_ready_queue_empty
   at::launch([this, graphTask, graphRoot, incrementOutstandingTasks]() {
     execute_graph_task_until_ready_queue_empty(
         /*node_task*/ NodeTask(graphTask, graphRoot, InputBuffer(0)),
         /*incrementOutstandingTasks*/ incrementOutstandingTasks);
   });
   // Use a reference here to avoid refcount bump on futureGrads.
+  // 处理结果
   auto& futureGrads = graphTask->future_result_;
 
   // Build a future that waits for the callbacks to execute (since callbacks
@@ -430,6 +441,8 @@ c10::intrusive_ptr<c10::ivalue::Future> DistEngine::
           const variable_list& grads =
               futureGrads.constValue().toTensorVector();
           TORCH_INTERNAL_ASSERT(grads.size() == outputEdges.size());
+
+          // 标识已经结束
           accumulateGradFuture->markCompleted(c10::IValue());
         } catch (std::exception& e) {
           accumulateGradFuture->setErrorIfNeeded(std::current_exception());
@@ -450,25 +463,26 @@ c10::intrusive_ptr<c10::ivalue::Future> DistEngine::executeSendFunctionAsync(
   // sendFunction itself runs on a different stream. As a result, we need to
   // manually synchronize those two streams here.
   const auto& send_backward_stream = sendFunction->stream(c10::DeviceType::CUDA);
-  if (send_backward_stream) {
+  if (send_backward_stream) {  // 拿到本次执行对应的Stream
     for (const auto& grad : sendFunction->getGrads()) {  // 这里有获取
         const auto guard = c10::impl::VirtualGuardImpl{c10::DeviceType::CUDA};
         const auto default_stream = guard.getStream(grad.device());
         if (send_backward_stream != default_stream) {
           auto event = c10::Event{c10::DeviceType::CUDA};
           event.record(default_stream);
-          send_backward_stream->wait(event);
+          send_backward_stream->wait(event);  // 需要同步，保证当前操作完成
         }
     }
   }
 
   std::unique_lock<std::mutex> lock(initializedContextIdsLock_);
   if (initializedContextIds_.find(autogradContext->contextId()) ==
-      initializedContextIds_.end()) {
+      initializedContextIds_.end()) {   // 遍历，查找sendFunction对应的上下文是否在本节点之中已经记录
+    // 没有找到上下文，需要计算依赖
     edge_list outputEdges;
     // Pass in a dummy graphRoot since all send functions are the roots.
     auto dummyRoot = std::make_shared<GraphRoot>(edge_list(), variable_list());
-    computeDependencies(
+    computeDependencies( // 计算依赖
         autogradContext, {}, {}, dummyRoot, outputEdges, retainGraph);
 
     // Mark the autograd context id as initialized and unlock.
@@ -478,13 +492,14 @@ c10::intrusive_ptr<c10::ivalue::Future> DistEngine::executeSendFunctionAsync(
     // Enqueue the current send function.
     auto graphTask = autogradContext->retrieveGraphTask();
     // Run the autograd engine.
-    auto accumulateGradFuture = runEngineAndAccumulateGradients(
+    auto accumulateGradFuture = runEngineAndAccumulateGradients(  // 计算梯度
         autogradContext,
         sendFunction,
         outputEdges,
         /*incrementOutstandingTasks=*/false);
 
     // Build the 'uber' future that waits for everything.
+    // 注册回调
     auto callbackFuture =
         c10::make_intrusive<c10::ivalue::Future>(c10::NoneType::get());
 
@@ -527,7 +542,7 @@ c10::intrusive_ptr<c10::ivalue::Future> DistEngine::executeSendFunctionAsync(
 
     // Return the future which waits for all async processing to be done.
     return callbackFuture;
-  } else {
+  } else {// 可以在当前Node找到上下文
     lock.unlock();
     auto graphTask = autogradContext->retrieveGraphTask();
     at::launch([this, graphTask, sendFunction]() {

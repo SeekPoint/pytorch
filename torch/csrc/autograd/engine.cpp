@@ -733,6 +733,7 @@ void Engine::evaluate_function(
   // If exec_info_ is not empty, we have to instrument the execution
   auto& exec_info_ = graph_task->exec_info_;
   if (!exec_info_.empty()) {
+    // 省略了梯度累积部分代码，具体可以参见上面章节
     auto& fn_info = exec_info_.at(func);
     if (auto* capture_vec = fn_info.captures_.get()) {
       // Lock mutex for writing to graph_task->captured_vars_.
@@ -741,13 +742,14 @@ void Engine::evaluate_function(
         auto& captured_grad = graph_task->captured_vars_[capture.output_idx_];
         captured_grad = inputs[capture.input_idx_];
         for (auto& hook : capture.hooks_) {
+        //这里调用 hook，就是 DistAccumulateGradCaptureHook 的 operator()，captured_grad 就是累积的梯度
           captured_grad = (*hook)(captured_grad);
         }
       }
     }
     if (!fn_info.needed_) {
       // Skip execution if we don't need to execute the function.
-      return;
+      return;  // 如果没有设置需要执行，则直接返回。recvBackward 会设置需要执行
     }
   }
 
@@ -760,6 +762,7 @@ void Engine::evaluate_function(
   const auto opt_parent_stream = (*func).stream(c10::DeviceType::CUDA);
   c10::OptionalStreamGuard parent_stream_guard{opt_parent_stream};
 
+// 这里就是调用 recvBackward.apply 函数
   auto outputs = call_function(graph_task, func, inputs);
 
   auto& fn = *func;

@@ -23,7 +23,7 @@ RecvRpcBackward::RecvRpcBackward(
 
 variable_list RecvRpcBackward::apply(variable_list&& grads) {  // 调用Node
   std::vector<Variable> outputGrads;
-  for (size_t i = 0; i < grads.size(); i++) {
+  for (size_t i = 0; i < grads.size(); i++) {  // 下面就是把传入的梯度 grads 放入outputGrads
     const auto& grad = grads[i];
     if (grad.defined()) {
       outputGrads.emplace_back(grad);
@@ -50,9 +50,9 @@ variable_list RecvRpcBackward::apply(variable_list&& grads) {  // 调用Node
 
   // Send the gradients over to the appropriate node.
   auto rpcAgent = rpc::RpcAgent::getCurrentRpcAgent();
-  auto jitFuture = rpcAgent->send( // 发送出去，就是给后向传播过程的下一个节点
+  auto jitFuture = rpcAgent->send( // 发送出去，就是给后向传播过程的下一个节点  // 发送 RPC
       rpcAgent->getWorkerInfo(fromWorkerId_),
-      std::move(gradCall).toMessage(),  // 这里调用了PropagateGradientsReq::toMessageImpl
+      std::move(gradCall).toMessage(),  // 这里调用了PropagateGradientsReq::toMessageImpl  // 调用了toMessageImpl
       rpc::kUnsetRpcTimeout,
       deviceMap_);
 
