@@ -78,19 +78,19 @@ class _LocalOptimizer(object):
 
     def __init__(self, optim_cls, local_params_rref, *args, **kwargs):
         self._local_params = [rref.local_value() for rref in local_params_rref]
-        self.optim = optim_cls(
-            self._local_params,
+        self.optim = optim_cls( # 优化器还是普通的优化器，因为优化器代码还是之前的，只是优化的参数对象变成了异地节点参数
+            self._local_params, # 用参数代理初始化
             *args,
             **kwargs)
 
     def step(self, autograd_ctx_id):
+        # 获取到分布上下文里面计算好的梯度
         all_local_grads = dist_autograd.get_gradients(autograd_ctx_id)
 
         with _LocalOptimizer.global_lock:
             for param, grad in all_local_grads.items():
                 param.grad = grad
-            self.optim.step()
-
+            self.optim.step() # 参数优化
 
 def _new_local_optimizer(optim_cls, local_params_rref, *args, **kwargs):
     return rpc.RRef(
@@ -213,6 +213,7 @@ class DistributedOptimizer:
         for param in params_rref:
             per_worker_params_rref[param.owner()].append(param)
 
+        # 拿到对应的本地优化器类
         if optimizer_class in DistributedOptimizer.functional_optim_map and jit._state._enabled:
             optim_ctor = DistributedOptimizer.functional_optim_map.get(optimizer_class)
         else:
@@ -229,19 +230,19 @@ class DistributedOptimizer:
                 "Global Interpreter Lock (GIL). Please file an issue if you need this "
                 "optimizer in TorchScript. "
             )
-            optimizer_new_func = _new_local_optimizer
+            optimizer_new_func = _new_local_optimizer  # 下面会介绍
 
         remote_optim_futs = []
         for worker, param_rrefs in per_worker_params_rref.items():
             remote_optim_rref_fut = rpc.rpc_async(
-                worker,
-                optimizer_new_func,
+                worker,  # 在 worker 之上生成其本地优化器
+                optimizer_new_func, # rpc_async 会调用
                 args=(optim_ctor, param_rrefs) + args,
                 kwargs=kwargs,
             )
             remote_optim_futs.append(remote_optim_rref_fut)
 
-        self.remote_optimizers = _wait_for_all(remote_optim_futs)
+        self.remote_optimizers = _wait_for_all(remote_optim_futs) # 本地保存的远端各个节点上优化器
 
     def step(self, context_id):
         """
@@ -265,10 +266,10 @@ class DistributedOptimizer:
             optimizer_step_func = _local_optimizer_step
 
         rpc_futs = []
-        for optimizer in self.remote_optimizers:
-            rpc_futs.append(rpc.rpc_async(
+        for optimizer in self.remote_optimizers: # 遍历 _LocalOptimizer
+            rpc_futs.append(rpc.rpc_async( # 异步异地调用
                 optimizer.owner(),
-                optimizer_step_func,
+                optimizer_step_func,  # 逐一调用
                 args=(optimizer, context_id),
             ))
         _wait_for_all(rpc_futs)
