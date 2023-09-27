@@ -117,7 +117,7 @@ of the following implementations that come with PyTorch:
 
      store = TCPStore("localhost")
 
-     backend = C10dRendezvousBackend(store, "my_run_id")
+     backend = C10dRendezvousBackend(store, "my_run_id") # 配置了后端
 
      rdzv_handler = DynamicRendezvousHandler.from_backend(
          run_id="my_run_id",

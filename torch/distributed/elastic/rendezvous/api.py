@@ -38,11 +38,13 @@ class RendezvousHandler(ABC):
         ``RendezvousHandler``. An implementation based on C10d Store is already
         provided, and is recommended for most users.
     """
-
+    # 获取 rendezvous backend名字
     @abstractmethod
     def get_backend(self) -> str:
         """Returns the name of the rendezvous backend."""
 
+    # rendezvous barrier 的主要入口，新加入的节点会等待在这里，直到当前rendezvous结束，
+    # 或者超时，或者当前 rendezvous 被标识为closed。
     @abstractmethod
     def next_rendezvous(
         self,
@@ -68,6 +70,7 @@ class RendezvousHandler(ABC):
                 The rendezvous did not complete on time.
         """
 
+    # 是否已经结束，如果rendezvous结束，意味着所有试图re-rendezvous都将失败
     @abstractmethod
     def is_closed(self) -> bool:
         """Checks whether the rendezvous has been closed.
@@ -85,7 +88,9 @@ class RendezvousHandler(ABC):
     @abstractmethod
     def set_closed(self):
         """Marks the rendezvous as closed."""
-
+    # 返回在rendezvous barrier等待的当前阶段数目，这些节点不属于当前工作组。
+    # 用户应该周期调用这个方法来检查是否有新节点等待加入工作组，
+    # 如果有，就调用`next_rendezvous()` (re-rendezvous。) 进行下一次re-rendezvous。
     @abstractmethod
     def num_nodes_waiting(self) -> int:
         """Returns the number of nodes who arrived late at the rendezvous

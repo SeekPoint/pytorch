@@ -210,6 +210,8 @@ def launch_agent(
     )
 
     agent = None
+
+    # 构建了 rdzv_handler
     rdzv_handler = rdzv_registry.get_rendezvous_handler(rdzv_parameters)
     master_addr, master_port = _get_addr_and_port(rdzv_parameters)
     try:
@@ -218,7 +220,7 @@ def launch_agent(
             local_world_size=config.nproc_per_node,
             entrypoint=entrypoint,
             args=tuple(args),
-            rdzv_handler=rdzv_handler, # RendezvousHandler
+            rdzv_handler=rdzv_handler, # RendezvousHandler # 这里设置了 rdzv_handler
             max_restarts=config.max_restarts,
             monitor_interval=config.monitor_interval,
             redirects=config.redirects,

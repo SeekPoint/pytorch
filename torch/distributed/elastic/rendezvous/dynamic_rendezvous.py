@@ -360,7 +360,7 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
             has_set = False
 
             state_bits = pickle.dumps(self._state)
-
+            # 这里会对后端进行设置
             set_response = self._backend.set_state(state_bits, self._token)
             if set_response is not None:
                 state_bits, token, has_set = set_response
@@ -543,7 +543,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
             # Reads or writes the latest rendezvous state shared by all nodes in
             # the rendezvous. Note that our local changes might get overridden
             # by another node if that node synced its changes before us.
-            has_set = self._state_holder.sync()
+            has_set = self._state_holder.sync() # 这里要同步各种状态，因为最新状态在 rendezvous。
             if has_set is not None:
                 if has_set:
                     log.debug(
@@ -556,7 +556,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                         f"changes with other nodes in the rendezvous '{self._settings.run_id}'."
                     )
 
-            self._state = self._state_holder.state
+            self._state = self._state_holder.state # 得到最新的状态
 
             ctx = _RendezvousContext(self._node, self._state, self._settings)
 
@@ -594,7 +594,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                     self._mark_rendezvous_closed()
 
                 # Attempt to sync our changes back to other nodes.
-                self._state_holder.mark_dirty()
+                self._state_holder.mark_dirty() # 再次同步，把自己状态同步给其他节点
 
     def _keep_alive(self) -> None:
         log.debug(

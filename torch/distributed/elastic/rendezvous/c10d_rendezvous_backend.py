@@ -60,6 +60,7 @@ class C10dRendezvousBackend(RendezvousBackend):
 
     def get_state(self) -> Optional[Tuple[bytes, Token]]:
         """See base class."""
+        # 从store读取数据
         base64_state: bytes = self._call_store("get", self._key)
 
         return self._decode_state(base64_state)
@@ -85,6 +86,7 @@ class C10dRendezvousBackend(RendezvousBackend):
         else:
             token = self._NULL_SENTINEL
 
+        # 往 store 之中插入数据
         base64_state: bytes = self._call_store("compare_set", self._key, token, base64_state_str)
 
         state_token_pair = self._decode_state(base64_state)
@@ -123,14 +125,14 @@ class C10dRendezvousBackend(RendezvousBackend):
 def _create_tcp_store(params: RendezvousParameters) -> TCPStore:
     host, port = parse_rendezvous_endpoint(params.endpoint, default_port=29400)
 
-    cfg_is_host = params.get_as_bool("is_host")
+    cfg_is_host = params.get_as_bool("is_host") # 获取配置看看
     # If the user has explicitly specified whether our process should host the
     # the store, respect it.
-    if cfg_is_host is not None:
+    if cfg_is_host is not None:  # 如果配置了，就使用
         is_host = cfg_is_host
     # Otherwise try to determine whether we are the host based on our hostname
     # and IP address.
-    else:
+    else: # 否则动态看看本机是不是host
         is_host = _matches_machine_hostname(host)
 
     # The timeout
