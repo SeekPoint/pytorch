@@ -170,7 +170,7 @@ class LocalElasticAgent(SimpleElasticAgent):
         os.makedirs(attempt_log_dir)
 
         assert spec.entrypoint is not None
-        self._pcontext = start_processes(
+        self._pcontext = start_processes( # 把启动多线程的结果保存在 _pcontext 之中。
             name=spec.role,
             entrypoint=spec.entrypoint,
             args=args,
@@ -202,17 +202,18 @@ class LocalElasticAgent(SimpleElasticAgent):
             )
             return RunResult(state=WorkerState.UNKNOWN)
 
-        result = self._pcontext.wait(0)
+        result = self._pcontext.wait(0)  # 对运行结构进行监控
         if result:
-            if result.is_failed():
+            if result.is_failed(): # 如果进程失败
                 # map local rank failure to global rank
                 worker_failures = {}
+                #  返回的结果内部就包括每个进程的运行结果
                 for local_rank, failure in result.failures.items():
                     worker = worker_group.workers[local_rank]
                     worker_failures[worker.global_rank] = failure
                 return RunResult(
                     state=WorkerState.FAILED,
-                    failures=worker_failures,
+                    failures=worker_failures,  # 返回运行结果
                 )
             else:
                 # copy ret_val_queue into a map with a global ranks
@@ -222,7 +223,7 @@ class LocalElasticAgent(SimpleElasticAgent):
                     workers_ret_vals[worker.global_rank] = ret_val
                 return RunResult(
                     state=WorkerState.SUCCEEDED,
-                    return_values=workers_ret_vals,
+                    return_values=workers_ret_vals, # 返回运行结果
                 )
         else:
             return RunResult(state=WorkerState.HEALTHY)

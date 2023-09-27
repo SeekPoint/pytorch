@@ -582,8 +582,8 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                     self._keep_alive()
                 elif action == _Action.ADD_TO_PARTICIPANTS:
                     self._add_to_participants()
-                elif action == _Action.ADD_TO_WAIT_LIST:
-                    self._add_to_wait_list()
+                elif action == _Action.ADD_TO_WAIT_LIST: # 发现当前Action
+                    self._add_to_wait_list() # 然后执行
                 elif action == _Action.REMOVE_FROM_PARTICIPANTS:
                     self._remove_from_participants()
                 elif action == _Action.REMOVE_FROM_WAIT_LIST:
@@ -943,7 +943,7 @@ class DynamicRendezvousHandler(RendezvousHandler):
             f"{world_size}."
         )
 
-        return store, rank, world_size
+        return store, rank, world_size # 返回的是 worker group 的rank
 
     def is_closed(self) -> bool:
         """See base class."""

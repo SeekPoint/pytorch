@@ -527,9 +527,11 @@ class SimpleElasticAgent(ElasticAgent):
 
         spec = worker_group.spec
 
+        # 处理成员关系变化，注意，这里得到的是 group rank!
         store, group_rank, group_world_size = spec.rdzv_handler.next_rendezvous()
-        self._store = store
+        self._store = store # store被设置到 Agent之中，store可以被认为是远端KV存储
 
+        # 依据 group rank 为 worker 建立 ranks
         workers = self._assign_worker_ranks(store, group_rank, group_world_size, spec)
         worker_group.workers = workers
         worker_group.store = store
@@ -598,9 +600,13 @@ class SimpleElasticAgent(ElasticAgent):
            in the point 3 with the exception that the offset is done from the first
            agent that has the same role as current one and has the minimum group rank.
         """
-
+        # 每个代理将其配置（group_rank, group_world_size, num_workers）写入公共存储。
         role_infos = self._share_and_gather(store, group_rank, group_world_size, spec)
+        # 每个代理检索所有代理的配置，并使用角色和rank执行两级排序。
         my_role_info = role_infos[group_rank]
+        # 确定全局rank：当前代理的global rank是 本代理 的 group_rank 在infos数组的偏移量（offset）。
+        # 偏移量的计算方法是，
+        # 排名低于group_rank的所有代理的local_world之和。workers 的等级为：[offset, offset+local_world_size]。
         worker_world_size, worker_global_ranks = self._get_ranks(role_infos, group_rank)
         role_infos = sorted(
             role_infos, key=functools.cmp_to_key(_RoleInstanceInfo.compare)
@@ -613,9 +619,12 @@ class SimpleElasticAgent(ElasticAgent):
             for idx, role_info in enumerate(role_infos)
             if _RoleInstanceInfo.compare(role_info, my_role_info) == 0
         )
+        # 确定role rank：使用第3点中的算法确定role rank，
+        # 不同之处是：偏移量计算是从与当前角色相同且具有最小 group rank 的第一个代理开始。
         role_world_size, role_ranks = self._get_ranks(
             role_infos, role_pos, role_start_idx, role_end_idx + 1
         )
+        # 生成 workers，把 worker 都赋值在 worker_group.workers 之中。
         workers = []
         for ind in range(spec.local_world_size):
             worker = Worker(
@@ -667,13 +676,13 @@ class SimpleElasticAgent(ElasticAgent):
         # workers on different nodes to fail on a collective op before waiting
         # on the rdzv barrier, this way we ensure that nodes enter rdzv
         # at around the same time and reduce false positive rdzv timeout errors
-        self._rendezvous(worker_group)
+        self._rendezvous(worker_group) # 同步共识操作 # Worker实例已经生成了
 
-        log.info(f"[{role}] Starting worker group")
+        log.info(f"[{role}] Starting worker group") # 启动worker
         worker_ids = self._start_workers(worker_group)
         for local_rank, w_id in worker_ids.items():
             worker = worker_group.workers[local_rank]
-            worker.id = w_id
+            worker.id = w_id # 得到进程ID
 
         worker_group.state = WorkerState.HEALTHY
 
@@ -844,6 +853,7 @@ class SimpleElasticAgent(ElasticAgent):
                 self._exit_barrier()
                 return run_result
             elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED}:
+                # 程序出错
                 if self._remaining_restarts > 0:  # 重试
                     log.info(
                         f"[{role}] Worker group {state.name}. "
