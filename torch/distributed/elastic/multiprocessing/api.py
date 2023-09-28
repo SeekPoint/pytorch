@@ -223,8 +223,8 @@ class PContext(abc.ABC):
             timeout = sys.maxsize
 
         expiry = time.time() + timeout
-        while time.time() < expiry:
-            pr = self._poll()
+        while time.time() < expiry:  # 定期操作
+            pr = self._poll()  # 用poll来检测
             if pr:
                 return pr
             time.sleep(period)
@@ -343,7 +343,7 @@ class MultiprocessContext(PContext):
 
         # see comments in ``join()`` for what this is
         self._return_values: Dict[int, Any] = {}
-        self._pc: Optional[mp.ProcessContext] = None
+        self._pc: Optional[mp.ProcessContext] = None # 这里是关键
         # Note: set method should ONLY be invoked for the use case when all processes finished
         # successfully. If any process died on event.wait() calling set() method will deadlock.
         self._worker_finished_event = mp.get_context(self.start_method).Event()
@@ -354,7 +354,7 @@ class MultiprocessContext(PContext):
                 "The process context already initialized."
                 " Most likely the start method got called twice."
             )
-        self._pc = mp.start_processes(
+        self._pc = mp.start_processes( # 这里返回了 mp.ProcessContext
             fn=_wrap,
             args=(
                 self.entrypoint,
@@ -391,11 +391,11 @@ class MultiprocessContext(PContext):
             # pipe. Hence to prevent deadlocks on large return values,
             # we opportunistically try queue.get on each join call
             # See: https://docs.python.org/2/library/multiprocessing.html#all-platforms
-            for local_rank in range(0, self.nprocs):
+            for local_rank in range(0, self.nprocs):  # 遍历自己下面的进程
                 return_queue = self._ret_vals[local_rank]
                 if not return_queue.empty():
                     # save the return values temporarily into a member var
-                    self._return_values[local_rank] = return_queue.get()
+                    self._return_values[local_rank] = return_queue.get()  # 得到进程运行结果
 
             if self._is_done():
                 # we should ALWAYS have ALL the return values when all the processes are done
@@ -408,7 +408,7 @@ class MultiprocessContext(PContext):
                 )
                 self.close()
                 return RunProcsResult(
-                    return_values=self._return_values,
+                    return_values=self._return_values,  # 返回进程结果
                     stdouts=self.stdouts,
                     stderrs=self.stderrs,
                 )
@@ -430,7 +430,7 @@ class MultiprocessContext(PContext):
             )
 
             self.close()
-            return RunProcsResult(
+            return RunProcsResult( # 返回进程结果
                 failures={
                     failed_local_rank: ProcessFailure(
                         local_rank=failed_local_rank,

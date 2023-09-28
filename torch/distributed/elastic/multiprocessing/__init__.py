@@ -218,6 +218,7 @@ def start_processes(
     tee_stderrs: Dict[int, str] = {}
     error_files = {}
 
+    # 大量使用了local_rank
     for local_rank in range(nprocs):
         clogdir = os.path.join(log_dir, str(local_rank))
         os.mkdir(clogdir)
@@ -240,7 +241,7 @@ def start_processes(
         envs[local_rank]["TORCHELASTIC_ERROR_FILE"] = error_file
 
     context: PContext
-    if isinstance(entrypoint, str):
+    if isinstance(entrypoint, str): # 如果是字符串
         context = SubprocessContext(
             name=name,
             entrypoint=entrypoint,
@@ -253,7 +254,7 @@ def start_processes(
             error_files=error_files,
         )
     else:
-        context = MultiprocessContext(
+        context = MultiprocessContext(  # 函数则来到这里
             name=name,
             entrypoint=entrypoint,
             args=args,
@@ -267,7 +268,7 @@ def start_processes(
         )
 
     try:
-        context.start()
+        context.start()  # 调用到这里
         return context
     except Exception:
         context.close()

@@ -173,7 +173,7 @@ def start_processes(fn, args=(), nprocs=1, join=True, daemon=False, start_method
         error_queue = mp.SimpleQueue()
         process = mp.Process(
             target=_wrap,
-            args=(fn, i, args, error_queue),
+            args=(fn, i, args, error_queue), # 训练进程开始跑训练代码
             daemon=daemon,
         )
         process.start()

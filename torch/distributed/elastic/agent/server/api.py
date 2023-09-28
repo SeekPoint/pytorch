@@ -838,7 +838,7 @@ class SimpleElasticAgent(ElasticAgent):
             time.sleep(monitor_interval)
             # 监控客户程序运行情况
             run_result = self._monitor_workers(self._worker_group)  # 得到进程运行结果
-            state = run_result.state
+            state = run_result.state  # 进程运行情况
             self._worker_group.state = state
 
             put_metric(f"workers.{role}.remaining_restarts", self._remaining_restarts)
@@ -850,7 +850,7 @@ class SimpleElasticAgent(ElasticAgent):
                     f"[{role}] worker group successfully finished."
                     f" Waiting {self._exit_barrier_timeout} seconds for other agents to finish."
                 )
-                self._exit_barrier()
+                self._exit_barrier()  # 有一个成功了就全部结束
                 return run_result
             elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED}:
                 # 程序出错
@@ -861,13 +861,14 @@ class SimpleElasticAgent(ElasticAgent):
                         f" will restart worker group"
                     )
                     self._remaining_restarts -= 1
-                    self._restart_workers(self._worker_group)
+                    self._restart_workers(self._worker_group)  # 进行重启
                 else:
                     self._stop_workers(self._worker_group) # 重试次数达到，结束workers
                     self._worker_group.state = WorkerState.FAILED
                     self._exit_barrier()
                     return run_result
             elif state == WorkerState.HEALTHY:
+                # 程序正常运行
                 # 节点成员关系有变化，比如scale up，就会有新节点waiting
                 # membership changes do not count as retries
                 num_nodes_waiting = rdzv_handler.num_nodes_waiting()

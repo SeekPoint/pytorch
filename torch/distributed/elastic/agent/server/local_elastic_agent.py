@@ -172,8 +172,8 @@ class LocalElasticAgent(SimpleElasticAgent):
         assert spec.entrypoint is not None
         self._pcontext = start_processes( # 把启动多线程的结果保存在 _pcontext 之中。
             name=spec.role,
-            entrypoint=spec.entrypoint,
-            args=args,
+            entrypoint=spec.entrypoint, # 训练代码入口
+            args=args,   # 这里重要的是local rank
             envs=envs,
             log_dir=attempt_log_dir,
             start_method=self._start_method,
@@ -192,7 +192,7 @@ class LocalElasticAgent(SimpleElasticAgent):
     @prof
     def _monitor_workers(self, worker_group: WorkerGroup) -> RunResult:
         role = worker_group.spec.role
-        worker_pids = {w.id for w in worker_group.workers}
+        worker_pids = {w.id for w in worker_group.workers} # 拿到本agent所有worker的pid
         assert self._pcontext is not None
         pc_pids = set(self._pcontext.pids().values())
         if worker_pids != pc_pids:
@@ -208,11 +208,11 @@ class LocalElasticAgent(SimpleElasticAgent):
                 # map local rank failure to global rank
                 worker_failures = {}
                 #  返回的结果内部就包括每个进程的运行结果
-                for local_rank, failure in result.failures.items():
-                    worker = worker_group.workers[local_rank]
-                    worker_failures[worker.global_rank] = failure
+                for local_rank, failure in result.failures.items(): # local_rank是进程index
+                    worker = worker_group.workers[local_rank]   # 拿到对应的worker
+                    worker_failures[worker.global_rank] = failure   # 拿到其 global_rank，进而设置worker状态
                 return RunResult(
-                    state=WorkerState.FAILED,
+                    state=WorkerState.FAILED, # 进程出错，返回 WorkerState.FAILED
                     failures=worker_failures,  # 返回运行结果
                 )
             else:
