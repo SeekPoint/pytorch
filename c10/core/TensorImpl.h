@@ -1998,7 +1998,7 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
   std::unique_ptr<c10::AutogradMetaInterface> autograd_meta_ = nullptr;
 
  protected:
-  std::unique_ptr<c10::NamedTensorMetaInterface> named_tensor_meta_ = nullptr;
+  std::unique_ptr<c10::NamedTensorMetaInterface> named_tensor_meta_ = nullptr; // 主要关注这里
 
   c10::VariableVersion version_counter_;
 

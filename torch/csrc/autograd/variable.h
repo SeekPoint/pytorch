@@ -190,8 +190,14 @@ namespace impl {
 struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
   std::string name_;
 
-  Variable grad_;
+  Variable grad_; // 保存当前Variable的梯度，本身也是一个Variable
+
+  // 非叶子节点才有意义，中间节点负责梯度计算。
+  // Pytorch就是判断grad_fn_是否为空来判断一个Variable是否是叶子节点，可以通过grad_fn()方法来访问。
   std::shared_ptr<Node> grad_fn_;
+
+  // Node实例，只有叶子节点才有，叶子节点负责对梯度进行累加，
+  // grad_accumulator_就是梯度累加处理函数，梯度就被保存在grad_变量之中
   std::weak_ptr<Node> grad_accumulator_;
 
   // This field is used to store all the forward AD gradients
@@ -209,18 +215,18 @@ struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
   std::shared_ptr<hooks_list> cpp_hooks_list_;
 
   // Only meaningful on leaf variables (must be false otherwise)
-  bool requires_grad_;
+  bool requires_grad_;  // 此Variable是否需要grad
 
   // Only meaningful on non-leaf variables (must be false otherwise)
-  bool retains_grad_;
+  bool retains_grad_; // 只有非叶子节点才有意义，是否需要保持图
 
-  bool is_view_;
+  bool is_view_; // 此Variable是否是一个View（没有实际存储，这是基于base的Variable）
 
   // The "output number" of this variable; e.g., if this variable
   // was the second output of a function, then output_nr == 1.
   // We use this to make sure we can setup the backwards trace
   // correctly when this variable is passed to another function.
-  uint32_t output_nr_;
+  uint32_t output_nr_; // Variable是某一个函数的输出数据，output_nr_ 就记录了它是第几个输出，比如 = 0，就表示是函数的第1个输出
 
   // Mutex to ensure that concurrent read operations that modify internal
   // state are still thread-safe. Used by grad_fn(), grad_accumulator(),

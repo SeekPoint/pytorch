@@ -1,0 +1,896 @@
+PyTorch如何实现前向传播(2) --- 基础类(下)
+https://www.cnblogs.com/rossiXYZ/p/15426719.html
+
+目录
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+0x00 摘要
+0x01 前文回顾
+0x02 TensorImpl
+2.1 转嫁
+2.2 定义
+0x03 自动求导相关类
+3.1 AutogradMeta
+3.2 DifferentiableViewMeta
+3.3 AutogradContext
+3.4 Auto Function
+0x04 Node
+4.1 定义
+4.2 重要成员变量
+4.2.1 input_metadata_
+4.2.2 next_edges_
+4.2.3 sequence_nr_
+4.2.4 topological_nr_
+4.2.5 operator()
+0x05 Edge
+0x06 逻辑图
+0xFF 参考
+
+
+0x00 摘要
+本系列将通过大概十篇左右文章来分析 PyTorch 的自动微分功能如何实现。
+本文是前向传播的第二篇，介绍自动微分（梯度计算）所涉及的部分 PyTorch 基础类。因为字数太多（1万两千字），所以拆分成上下两篇。
+
+系列前几篇连接如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+0x01 前文回顾
+前文介绍了部分基础类，比如 Variable, Function, Tensor，本文我们继续分析其他基础类。
+为了行文完整，我们从前文摘取了总体逻辑关系如下，SubBackward0，PowBackward0 和 都是Node 的派生类，在本文我们会细化这个图。
+
++---------------------+              +----------------------+
+| SubBackward0        |              | PowBackward0         |
+|                     |      Edge    |                      |  Edge
+|   next_functions  +-----+--------> |     next_functions +----------> ...
+|                     |   |          |                      |
++---------------------+   |          +----------------------+
+                          |
+                          |
+                          |          +----------------------+
+                          |  Edge    | MulBackward0         |
+                          +--------> |                      |  Edge
+                                     |     next_functions +----------> ...
+                                     |                      |
+                                     +----------------------+
+0x02 TensorImpl
+2.1 转嫁
+PyTorch 之中大量使用了bridge设计模式，at::Tensor就是利用bridge模式把具体实现转交给TensorImpl完成。
+
+class TORCH_API Tensor {
+ private:
+  struct unsafe_borrow_t { explicit unsafe_borrow_t() = default; };
+
+  explicit Tensor(unsafe_borrow_t, const Tensor& rhs)
+      : impl_(c10::intrusive_ptr<at::TensorImpl, UndefinedTensorImpl>::reclaim(rhs.impl_.get())) {}
+
+  friend MaybeOwnedTraits<Tensor>;
+  protected:
+  friend class ::caffe2::Tensor;
+
+  void enforce_invariants();
+  c10::intrusive_ptr<TensorImpl, UndefinedTensorImpl> impl_; // 转嫁出去
+};
+具体如下：
+
++------------------------------------------------+          +---------------------------+
+|Tensor                                          |          |TensorImpl                 |
+|                                                |          |                           |
+|                                                |  bridge  |                           |
+|      <TensorImpl, UndefinedTensorImpl> impl_+-----------> |       autograd_meta_      |
+|                                                |          |                           |
+|                                                |          |       named_tensor_meta_  |
++------------------------------------------------+          |                           |
+                                                            |       pyobj_              |
+                                                            |                           |
+                                                            |       sizes_and_strides_  |
+                                                            |                           |
+                                                            |       storage_offset_     |
+                                                            |                           |
+                                                            |       data_type_          |
+                                                            |                           |
+                                                            |       device_opt_         |
+                                                            |                           |
+                                                            |                           |
+                                                            +---------------------------+
+
+2.2 定义
+TensorImpl 定义如下，因为本文是自动微分和前向传播相关，因此我们专注这部分功能的相关变量，就是autograd_meta_ 。
+除了 autograd_meta_ 之外，主要是一些描述Tensor大小的元数据，包含元素的类型（dtype），Tensor所依赖的设备，Strides（步幅）等等。
+
+struct C10_API TensorImpl : public c10::intrusive_ptr_target {
+  Storage storage_;
+
+ private:
+  // This pointer points to an AutogradMeta struct that stores autograd-specific
+  // fields (such as grad_ / grad_fn_ / grad_accumulator_). This pointer always
+  // has unique ownership (meaning only one TensorImpl can own it at a time).
+  //
+  // autograd_meta_ can be nullptr, as an optimization.  When this occurs, it is
+  // equivalent to having an autograd_meta_ pointing to a default constructed
+  // AutogradMeta; intuitively, tensors which don't require grad will have this
+  // field set to null.
+  //
+  // This means accessors on autograd_meta_ have to be careful to test if they
+  // got a nullptr, and handle default behavior appropriately in that case.
+  //
+  // Note that we don't enforce the invariant that if the AutogradMeta is
+  // default constructed, it is nullptr (to do this, we'd have to continuously
+  // check if an AutogradMeta became, by mutation, equal to the default
+  // constructed form.  (This might be useful, but it seems rare enough that
+  // a requires_grad=True variable will turn back into the requires_grad=False
+  // version.)  So there are three representable states:
+  //
+  //    1. autograd_meta_ == nullptr
+  //    2. autograd_meta_ is default constructed (semantically, same as (1))
+  //    3. autograd_meta_ has nontrivial information content
+  //
+  std::unique_ptr<c10::AutogradMetaInterface> autograd_meta_ = nullptr; // 主要关注这里
+
+ protected:
+  std::unique_ptr<c10::NamedTensorMetaInterface> named_tensor_meta_ = nullptr;
+  c10::VariableVersion version_counter_;
+  PyObject* pyobj_ = nullptr;
+  c10::impl::SizesAndStrides sizes_and_strides_;
+  int64_t storage_offset_ = 0;
+  int64_t numel_ = 1;
+  caffe2::TypeMeta data_type_;
+  c10::optional<c10::Device> device_opt_;
+  bool is_contiguous_ : 1;
+  /* HasContiguityPolicy */ uint8_t has_contiguity_ : 2;
+  bool storage_access_should_throw_ = false;
+  bool is_channels_last_ : 1;
+  bool is_channels_last_contiguous_ : 1;
+  bool is_channels_last_3d_ : 1;
+  bool is_channels_last_3d_contiguous_ : 1;
+  bool is_non_overlapping_and_dense_ : 1;
+  bool is_wrapped_number_ : 1;
+  bool allow_tensor_metadata_change_ : 1;
+  bool reserved_ : 1;
+  DispatchKeySet key_set_;
+};
+
+对于自动微分，std::unique_ptr<c10::AutogradMetaInterface> autograd_meta_ = nullptr; 是关键。
+
+此成员变量用来存储自动微分相关的特殊变量，比如grad_ / grad_fn_ / grad_accumulator_，每一个TensorImpl在同一时刻只有唯一一个AutogradMeta。
+
+autograd_meta_ 是区分一个 Variable 是普通张量还是带 autograd 功能张量的唯一标识：
+
+    对于不需要梯度的张量，autograd_meta_ 这个变量为null。
+
+    但是出于优化的目的，即使需要梯度，autograd_meta_ 也可以是null，这种情况等同于被赋值成一个缺省的AutogradMeta。
+    所以在使用时候需要仔细校验是否为null。
+
+    在需要梯度情况下，一般来说，autograd_meta_会被初始化为 AutogradMeta 或者DifferentiableViewMeta。
+
+AutogradMetaInterface 定义如下，这是一个抽象接口，需要派生类来实现具体功能。
+
+struct C10_API AutogradMetaInterface {
+  virtual void set_requires_grad(
+      bool requires_grad,
+      at::TensorImpl* self_impl) = 0;
+  virtual bool requires_grad() const = 0;
+  virtual at::Tensor& mutable_grad() = 0;
+  virtual const at::Tensor& grad() const = 0;
+  virtual const at::Tensor& fw_grad(uint64_t level, const at::Tensor& self)
+      const = 0;
+  virtual void set_fw_grad(
+      const at::Tensor& new_grad,
+      const at::Tensor& self,
+      uint64_t level,
+      bool is_inplace_op) = 0;
+  virtual ~AutogradMetaInterface();
+};
+
+0x03 自动求导相关类
+以下类是与自动求导相关。
+
+3.1 AutogradMeta
+AutogradMeta 继承了 AutogradMetaInterface，存储于自动微分相关的东西，比如节点的梯度值和梯度计算函数，其具体定义如下：
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//                            AutogradMeta
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/// Each `Variable` has one unique `AutogradMeta` struct, which stores autograd
+/// metadata fields that are necessary for tracking the Variable's autograd history.
+/// As an optimization, a Variable may store a nullptr, in lieu of a default
+/// constructed AutogradMeta.
+
+/// 1. A `grad_fn`, if the variable is in the interior of the graph. This is the
+///    gradient of the function that produced the variable.
+/// 2. A `grad_accumulator`, if the variable is a leaf, which accumulates a
+///    scalar gradient value into its `grad` variable.
+
+struct TORCH_API AutogradMeta : public c10::AutogradMetaInterface {
+  std::string name_;
+
+  Variable grad_; // 保存当前Variable的梯度，本身也是一个Variable
+  std::shared_ptr<Node> grad_fn_; // 非叶子节点才有意义，中间节点负责梯度计算。Pytorch就是判断grad_fn_是否为空来判断一个Variable是否是叶子节点，可以通过grad_fn()方法来访问。
+  std::weak_ptr<Node> grad_accumulator_; // Node实例，只有叶子节点才有，叶子节点负责对梯度进行累加，grad_accumulator_就是梯度累加处理函数，梯度就被保存在grad_变量之中
+
+  // This field is used to store all the forward AD gradients
+  // associated with this AutogradMeta (and the Tensor it corresponds to)
+  // There is a semantic 1:1 correspondence between AutogradMeta and
+  // ForwardGrad but:
+  //   - This field is lazily populated.
+  //   - This field is a shared_ptr but it must never be
+  //     shared by multiple Tensors. See Note [ Using ForwardGrad ]
+  // Any transition from not_initialized to initialized
+  // must be protected by mutex_
+  std::shared_ptr<ForwardGrad> fw_grad_; // forward AD gradients
+
+  std::vector<std::shared_ptr<FunctionPreHook>> hooks_;
+  std::shared_ptr<hooks_list> cpp_hooks_list_;
+
+  // Only meaningful on leaf variables (must be false otherwise)
+  bool requires_grad_; // 此Variable是否需要grad
+
+  // Only meaningful on non-leaf variables (must be false otherwise)
+  bool retains_grad_; // 只有非叶子节点才有意义，是否需要保持图
+
+  bool is_view_; // 此Variable是否是一个View（没有实际存储，这是基于base的Variable）
+
+  // The "output number" of this variable; e.g., if this variable
+  // was the second output of a function, then output_nr == 1.
+  // We use this to make sure we can setup the backwards trace
+  // correctly when this variable is passed to another function.
+  uint32_t output_nr_; // Variable是某一个函数的输出数据，output_nr_ 就记录了它是第几个输出，比如 = 0，就表示是函数的第1个输出
+
+  // Mutex to ensure that concurrent read operations that modify internal
+  // state are still thread-safe. Used by grad_fn(), grad_accumulator(),
+  // fw_grad() and set_fw_grad()
+  // This is mutable because we need to be able to acquire this from const
+  // version of this class for the functions above
+  mutable std::mutex mutex_;
+};
+AutogradMeta 的主要成员变量如下：
+
+    grad_ ：存储当前Variable实例的梯度，本身也是一个Variable。
+
+    grad_fn ：是个Node实例，非叶子节点才有。
+    通过 grad_fn() 方法来访问，实际上，PyTorch中就是通过 grad_fn是否为空 来判断一个Variable是否是leaf variable。
+
+    grad_accumulator_ ：也是Node的实例，只有叶子节点才有。
+
+        通过Variable的grad_accumulator()来访问。
+
+        叶子节点负责对梯度进行累加，grad_accumulator_ 就是梯度累加处理函数。
+
+        其对应梯度就被保存在 grad_ 变量之中。
+
+        我们总结一下，对于非叶子节点，grad_fn是计算梯度操作。
+        对于叶子节点，PyTorch 虚拟出了一个特殊计算操作，输出这个叶子节点，
+        同时此虚拟计算操作也作为叶子节点的grad_accumulator_来累加其梯度，因此叶子节点的 output_nr_ 必定为 0。
+
+    requires_grad_ ：表明此Variable实例是否需要grad。
+
+    retains_grad_ ： 只有非叶子节点才有意义，意义为是否需要保持图。
+
+    is_view_ ：是个flag，表明此Variable实例是否是个view（没有实际存储，基于base的variable）。
+
+    version_counter_ ：version number。
+
+    output_nr_：是个数字。output_nr_表明是 Node 的第几个输出，比如为 0 就 表明这个Variable是Node 的第 1 个输出。
+
+    base_ ：是view的base variable。
+
+具体如下，这里把 grad_fn 配置为 SubBackward0 作为例子：
+
++----------------------------------------------+          +-------------------------+
+|Tensor                                        |          |TensorImpl               |
+|                                              |          |                         |
+|                                              |  bridge  |                         |
+|   <TensorImpl, UndefinedTensorImpl> impl_ +-----------> |    autograd_meta_ +---------+
+|                                              |          |                         |   |
+|                                              |          |    named_tensor_meta_   |   |
++----------------------------------------------+          |                         |   |
+                                                          |    pyobj_               |   |
+                                                          |                         |   |
+                                                          |    sizes_and_strides_   |   |
+                                                          |                         |   |
+                                                          |    storage_offset_      |   |
+                                                          |                         |   |
+                                                          |    data_type_           |   |
+                                                          |                         |   |
+                                                          |    device_opt_          |   |
+                                                          |                         |   |
+                                                          |                         |   |
+                                                          +-------------------------+   |
+                                                                                        |
+                   +-------------------------+                                          |
+                   | AutogradMeta            |                                          |
+                   |                         +<-----------------------------------------+
+                   |                         |
+                   |      grad_accumulator_  |
+                   |                         |            +-------------------------+
+                   |      grad_fn_ +--------------------> | SubBackward0            |
+                   |                         |            |                         |
+                   |      hooks_             |            |                         |
+                   |                         |            |                         |
+                   |      retains_grad_      |            |           next_edges_   |
+                   |                         |            |                         |
+                   |      output_nr_         |            |                         |
+                   |                         |            |                         |
+                   |      fw_grad_           |            |                         |
+                   |                         |            |                         |
+                   +-------------------------+            +-------------------------+
+
+
+AutogradMeta 构造函数之中，gradient_edge 参数需要特别注意，其类型为 Edge。
+
+    gradient_edge.function 就被赋值给AutogradMeta 的 grad_fn。
+
+    gradient_edge.input_nr 被赋值给 AutoGradMeta 的 output_nr。
+
+AutogradMeta(at::TensorImpl* self_impl = nullptr, bool requires_grad = false, Edge gradient_edge = Edge() ) {
+  grad_fn_ = std::move(gradient_edge.function);
+  requires_grad_ = false;
+  retains_grad_ = false;
+  is_view_ = false;
+  output_nr_ = gradient_edge.input_nr;
+
+  // set_requires_grad also checks error conditions.
+  if (requires_grad) {
+    TORCH_INTERNAL_ASSERT(self_impl);
+    // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.VirtualCall)
+    set_requires_grad(requires_grad, self_impl);
+  }
+  TORCH_CHECK(
+      !grad_fn_ || !requires_grad_,
+      "requires_grad should be false if grad_fn is set");
+}
+
+3.2 DifferentiableViewMeta
+对于输入变量，许多操作返回与输入变量共享存储的新变量，返回的变量被称为在基变量之上的视图（view）变量。
+在PyTorch中，我们有两种类型的视图：可微视图和不可微的视图。
+为了支持合适的版本校验，无论是哪种类型，基变量和视图变量必须分享同样的版本计数器（version_counter）。
+
+DifferentiableViewMeta 就是用来处理可微视图。
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//                     DifferentiableViewMeta
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// DifferentiableViewMeta is created to support gradient tracking of
+/// such **in-place** operations. In particular,
+///   + if an in-place op is done on base, the grad_fn field of the view may
+///     become stale. So accesses should always go through grad_fn(), which
+///     reconstructs an updated grad_fn if the version_counter has incremented.
+///     All other fields are always valid.
+///   + if an in-place op is done on view, in rebase_history() of view, which is
+///     called after every in-place op in VariableType.cpp, the grad_fn of base
+///     is updated.
+///   + if a single autograd Node returns multiple differentiable views, if any
+///     output is modified by an inplace operation, the autograd engine will make
+///     an equivalent graph (corresponding to the view operations) without using
+///     equivalent graph, where each output is treated as if it were produced by a
+///     distinct view operation. This discards the original (e.g., user provided)
+///     grad_fn. If the provided grad_fn does more than the backward of the view,
+///     then the DifferentiableViewMeta must be created with creation_meta=
+///     CreationMeta::MULTI_OUTPUT_NODE to prevent the engine from ignoring the
+///     provided grad_fn.
+
+enum class CreationMeta: uint8_t { DEFAULT, IN_CUSTOM_FUNCTION, MULTI_OUTPUT_NODE,
+                                   NO_GRAD_MODE, MULTI_OUTPUT_SAFE, INFERENCE_MODE};
+
+struct TORCH_API DifferentiableViewMeta : public AutogradMeta {
+private:
+  /// Informations about the views
+  c10::optional<ViewInfo> backward_info_;
+  c10::optional<ViewInfo> forward_info_;
+
+  // Optimization to reduce the number of ViewInfo we create.
+  // In the (very common) case where backward_info_ == forward_info_, we only
+  // populate backward_info_ (that should be used as both the forward and backward
+  // view information) and set shared_view_info_ = true.
+  // Invariants:
+  //   - If shared_view_info_ is false, there is no special constraints on
+  //     backward_info_ and forward_info_
+  //   - If shared_view_info_ is true, we must have:
+  //      - backward_info_.has_value() == true
+  //      - forward_info_.has_value() == false
+  bool shared_view_info_;
+
+  /// The two following fields are extra information that we track to ensure that
+  /// any operation on this backward view is valid.
+
+  /// The value of the version_counter at the time grad_fn was created. The
+  /// grad_fn field is stale if attr_version_ != version_counter.current_version().
+  uint32_t attr_version_;
+  CreationMeta creation_meta_;
+};
+
+3.3 AutogradContext
+AutogradContext 是操作 autograd 的上下文，用来存储在前向过程中产生的信息，这样在后向传播中就可以访问。
+
+/// Context to save information during `forward` that can be accessed in `backward`
+/// in custom autograd operations (see `torch::autograd::Function` for details).
+struct TORCH_API AutogradContext {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
+  AutogradContext() : materialize_grads_(true) {}
+  AutogradContext(const AutogradContext &other) = delete;
+  AutogradContext& operator=(const AutogradContext& other) = delete;
+
+  /// Can be used to save non-variable data for `backward`.
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
+  ska::flat_hash_map<std::string, at::IValue> saved_data;
+
+  /// Saves the list of variables for a future call to `backward`. This
+  /// should be called at most once from inside of `forward`.
+  void save_for_backward(variable_list to_save);
+  /// Marks variables in the list as modified in an in-place operation. This
+  /// should be called at most once from inside of `forward` and all arguments
+  /// should be inputs.
+  void mark_dirty(const variable_list &inputs);
+  /// Marks outputs in the list as not requiring gradients. This should be called
+  /// at most once from inside of `forward` and all arguments should be outputs.
+  void mark_non_differentiable(const variable_list &outputs);
+  // Sets whether undefined output grad tensors should be expanded to tensors
+  // full of zeros before calling backward function. Default value is true.
+  void set_materialize_grads(bool value);
+
+  /// Get the list of variables that were saved in `forward` using
+  /// `save_for_backward()`. Before returning them to the user, a check is made to
+  /// ensure that they were not modified by any in-place operations.
+  variable_list get_saved_variables() const;
+  const std::unordered_set<at::TensorImpl*>& get_and_bump_dirty() const;
+  const std::unordered_set<at::TensorImpl*>& get_non_differentiable() const;
+
+private:
+  std::unordered_set<at::TensorImpl*> non_differentiable_;
+  std::unordered_set<at::TensorImpl*> dirty_inputs_;
+  std::vector<torch::autograd::SavedVariable> saved_variables_;
+  variable_list to_save_;
+  bool materialize_grads_;
+
+  // The CppNode in the autograd graph that owns this AutogradContext. We need a
+  // weak_ptr to avoid a refcycle. Since grad_fn_ owns this AutogradContext, it
+  // will always be alive when we want to use it.
+  std::weak_ptr<Node> grad_fn_;
+  bool has_freed_buffers_;
+
+  void save_variables();
+
+  template <class T> friend struct CppNode;
+};
+
+对用户来说，AutogradContext 主要是在 自定义 Auto Function 方面。以下是注释之中的例子。
+
+/// ```
+/// class MyFunction : public Function<MyFunction> {
+///   public:
+///   static variable_list forward(AutogradContext *ctx, int n, Variable var) {
+///      // Save data for backward in context
+///      ctx->saved_data["n"] = n;
+///      var.mul_(2);
+///      // Mark var as modified by inplace operation
+///      ctx->mark_dirty({var});
+///      return {var};
+///   }
+///
+///   static variable_list backward(AutogradContext *ctx, variable_list
+///   grad_output) {
+///      // Use data saved in forward
+///      auto n = ctx->saved_data["n"].toInt();
+///      return {grad_output[0]*n};
+///   }
+/// };
+/// ```
+///
+/// To use `MyFunction`:
+/// ```
+/// Variable x;
+/// auto y = MyFunction::apply(6, x);
+/// // Example backward call
+/// y[0].sum().backward();
+
+我们籍此进入到 Auto Function。
+
+3.4 Auto Function
+Autograd使用Function来计算结果和梯度，并对操作历史进行编码。
+在Tensor 上执行的每个操作都会创建一个新的 Function 对象，该对象执行计算并记录发生了什么。
+操作历史以函数 DAG 的形式保留，边表示数据依赖关系 ( input <- output )。
+
+通常，用户与 Function 交互的唯一方式是创建子类和定义新操作（扩展新的功能），这是扩展 torch.autograd 的推荐方式。
+有关如何使用此类的更多详细信息，请参阅有关扩展 autograd 引擎的说明：
+https://pytorch.org/docs/stable/notes/extending.html#extending-torch-autograd
+
+用户如果要使用自定义autograd操作，请使用静态正向和反向函数实现一个Function子类。
+
+    forward可以接受任意多个参数，并应返回变量列表或变量。
+
+        任何Variable参数的使用都将在计算图中注册，但是vectors/sets 或者其他数据结构不会遍历注册。
+
+        您可以使用c10::optional作为参数之一，如果参数有值，它将在图形中注册为变量。
+
+        forward应该将指向“torch::autograd::AutogradContext”的指针作为第一个参数。
+        变量可以使用“ctx->save_for_backward”，保存在“ctx->saved_data” map中，
+        其他数据将以<std::string, at::IValue>”对的形式保存在“ctx->saved_data” map中。
+
+    backward应该使用指向torch::autograd::AutogradContext的指针 以及一个变量列表作为参数。
+
+        该变量列表包含的变量数量与forward输出的变量数量相同。
+
+        backward应该返回与输入一样多的变量，其中每个变量都包含与输入相应的梯度。
+
+        “forward”中保存的变量可以通过“ctx->get_saved_Variables”访问，其他保存的数据可以通过“ctx->saved_data”访问。
+
+        当 backward被调用时，通过调用每个Function对象的方法，
+        并将返回的梯度传递给下一个Function ，我们就可以按照拓扑顺序来处理这个计算图 。
+
+Function 具体派生子类例子如下：
+
+class Exp(Function):
+
+     @staticmethod
+     def forward(ctx, i):
+         result = i.exp()
+         ctx.save_for_backward(result)
+         return result
+
+     @staticmethod
+     def backward(ctx, grad_output):
+         result, = ctx.saved_tensors
+         return grad_output * result
+
+#Use it by calling the apply method:
+output = Exp.apply(input)
+
+如前所示，Function 已经被 Node 替换，所以我们再来到了 Node。
+
+0x04 Node
+早期版本中，Node的名字是Function，后来修改为Node，应该是想与节点概念更好的对应。
+
+Node 是一个代表操作的抽象类，其输入是0个或者多个Variable，输出是0个或多个Variable。
+前向图中该Node节点的输入节点，就是后向传播图中该Node节点的输出节点。
+PyTorch的autograd机制中，所有函数都派生自此类，并重写其“apply”方法。这样子类的实例就可以通过call操作符调用。
+
+将autograd系统视为计算图时，Node是通过（有向）Edge相互连接的顶点或节点，其本身通过（Node，input_nr）对来表示。
+Variable 是Node 的输入和输出，并在图形执行期间在这些边之间移动。
+当两个或多个“边”（来自不同来源）指向一个“节点”的同一输入时，沿所有这些边生成的值在转发到目标“节点”之前将被隐式求和。
+
+其子类通常用来表示可微函数及其梯度算子。
+然而，请注意，由于“节点”的定义非常笼统，“节点”接受零或更多的输入并产生零或更多的输出。
+“节点”的使用非常灵活，超出了纯数学运算的范围。
+例如，AccumageGrad函数是一个sink，它接受一个输入，但不产生输出，而是将输入作为副作用进行累积。
+在另一端，“GraphRoot”函数不接收来自其他函数的输入，而是产生多个输出。
+具体可以参见 torch/csrc/autograd/function.h 的注释。
+
+4.1 定义
+我们看看 Node 类的定义，为了更好的说明，这里只保留成员变量，删除成员函数。
+
+using edge_list = std::vector<Edge>;
+
+struct TORCH_API Node : std::enable_shared_from_this<Node> {
+
+ protected:
+  /// Performs the `Node`'s actual operation.
+  virtual variable_list apply(variable_list&& inputs) = 0;
+
+  /// Calls `apply()`, but instruments it with tracing machinery.
+  variable_list traced_apply(variable_list inputs);
+
+  /// NOTE [ Sequence Number]
+  ///
+  /// The sequence_nr has two main usages in autograd:
+  ///
+  /// 1) Helps determine the node's execution priority in the engine.
+  ///    All else being equal, nodes with higher priority numbers are executed first.
+  ///    Thus, nodes corresponding to ops executed later are the first to be executed in
+  ///    the backward pass. One caveat is that we prioritize AccumulateGrad nodes by
+  ///    explicitly setting its sequence_nr to be UINT64_MAX.
+  /// 2) The sequence number of this `Node` is paired with with thread_id it was created in
+  ///    as a unique identifier by the profiler to annotate recorded events.
+  ///    The purpose of this is to help users (and possibly programs) interpreting the profiler's
+  ///    output to correlate backward nodes with its forward ops.
+  ///    We need both sequence_nr and thread_id to identify a node because sequence_nr is
+  ///    thread_local, i.e., starts counting up from zero in a new thread
+
+  // Sequence number used to correlate backward nodes with forward ops in the
+  // profiler and provide determinisim in the engine.
+  const uint64_t sequence_nr_;
+
+
+  // NOTE [ Topological Number ]
+  //
+  // topological_nr is used to prune branches in the DAG during autograd discovery as
+  // maintaining topological_nr helps us check in O(1) if there does NOT exist
+  // a directed path between two nodes.
+  //
+  // The topological order number of this `Node` representing the length of the
+  // longest possible path from this Node to any leaf node. If you are leaf node,
+  // aka AccumulateGrad, this will be zero. This value has the property that
+  // For every pair of nodes X, Y in G, existence of a directed path from X to Y
+  // implies topo_nr(X) > topo_nr(Y). The converse is not true, however, so we
+  // cannot prove existence of a path from X to Y, only non-existence.
+  //
+  // One assumption we make when using topo_nr is that once a node
+  // has been used, i.e., has a parent node, its own topo_nr does not change
+  // we have added some checks with the `has_parent_` field to enforce this.
+  //
+  // What NOT to do:
+  //
+  //   1) 2 -> 1 -> 0               In this diagram we label nodes with their topo_nr.
+  //      2 -> 1 -> 0               We have two simple graphs that can each arise from
+  //                                `t.exp().exp()`, for example.
+  //   2)        2 -> 1 -> 0
+  //            /
+  //      2 -> 1 -> 0               We add 2 as a next edge to 1 even though 1 already
+  //                                has a parent.
+  //   3)        2 -> 1 -> 0
+  //            /
+  //      2 -> 3 -> 0               2 < 3, yet there exists a path from 2 to 3!
+  //
+  uint64_t topological_nr_ = 0;
+
+  // Tracks whether this node has been added as the next_edge of another node
+  // via set_next_edge(s), which always calls topological_nr() of all its children
+  // See NOTE [ Topological Number ] for why we need this.
+  mutable bool has_parent_ = false;
+
+  // Id of the thread that created the instance
+  uint64_t thread_id_ = 0;
+
+  std::mutex mutex_;
+
+  // 前向过程中的输入variable，在前向过程中与该算子相关联的边
+  edge_list next_edges_;
+  PyObject* pyobj_ = nullptr; // weak reference
+  std::unique_ptr<AnomalyMetadata> anomaly_metadata_ = nullptr;
+  std::vector<std::unique_ptr<FunctionPreHook>> pre_hooks_;
+  std::vector<std::unique_ptr<FunctionPostHook>> post_hooks_;
+  at::SmallVector<InputMetadata, 2> input_metadata_;
+
+  // 这里对运算符()进行重载，核心其实就是调用apply()
+  variable_list operator()(variable_list&& inputs) {
+    // In the first iteration of named tensors, autograd ignores names and
+    // operates on unnamed tensors. In the long term, autograd should
+    // probably operate with names.
+    at::NoNamesGuard no_names_guard;
+
+    bool pre_sampled = false;
+    if (at::shouldRunRecordFunction(&pre_sampled)) {
+      // Using RecordFunction to trigger observers in the backward pass
+      at::RecordFunction guard(at::RecordScope::BACKWARD_FUNCTION, pre_sampled);
+      if (guard.isActive()) {
+        // Using sequence number and thread id to correlate with
+        // the forward pass function
+        guard.setForwardThreadId(thread_id_);
+        if (guard.needsInputs()) {
+          guard.before(
+            name(),
+            std::vector<c10::IValue>(inputs.begin(), inputs.end()),
+            sequence_nr());
+        } else {
+          guard.before(name(), sequence_nr());
+        }
+      }
+      // keeping stack guard object alive during the call
+      return apply(std::move(inputs));
+    } else {
+      return apply(std::move(inputs));
+    }
+  }
+};
+
+其构造函数是：
+
+  explicit Node(
+      uint64_t sequence_nr,
+      edge_list&& next_edges = edge_list())
+      : sequence_nr_(sequence_nr),
+      next_edges_(std::move(next_edges)) {
+
+    for (const Edge& edge: next_edges_) {
+      update_topological_nr(edge);
+    }
+
+    if (AnomalyMode::is_enabled()) {
+      metadata()->store_stack();
+
+      // If anomaly mode is enabled and graph is constructed, then assign the
+      // currently evaluating node as the parent of this node.
+      // A parent is a Node where this Node is created.
+      // We are tracking the parents to track multiple backward operations.
+      assign_parent();
+    }
+
+    // Store the thread_id of the forward operator.
+    // See NOTE [ Sequence Numbers ]
+    thread_id_ = at::RecordFunction::currentThreadId();
+  }
+4.2 重要成员变量
+我们具体解释一些重要成员变量。
+
+4.2.1 input_metadata_
+input_metadata_ 代表了 input data 的元信息，界定了一个Function的输入参数。
+
+4.2.2 next_edges_
+这是在前向过程中与该算子相关联的边。
+
+我们将 PyTorch的autograd系统看作是一个图，每个 Node 实例就是图节点，各个 Node 实例之间则是通过Edge连接的。
+Edge是个结构体，通过 (Function, input_nr) 的配对来代表graph中的边。
+Node 的成员 next_edges_ 正是一组这样的Edge实例，其代表此 Node 实例的返回值要输出到的（另外）Node，
+即 next_edges_是 Node 和Node 之间的纽带。
+
+Node 的输入输出都是Variable实例，因此当一个graph被执行的时候，Variable实例就在这些edges之间来传输流动。
+当两个或者多个Edge指向同一个Node的时候（这个节点的入度大于1），这些edges的输出将被隐含相加起来再送给指向的目标 Node。
+
+用户可以使用add_next_edge()来向 Node 添加一个edge, 通过next_edge(index)获取对应的edge，
+通过next_edges()方法获得迭代edge的迭代器。
+
+4.2.3 sequence_nr_
+该变量用于将网络中的后向节点与前向操作关联起来，并且在引擎中提供确定信息。
+sequence_nr_ 随着Function实例的不断构建而单调增长，具体有两个用处：
+
+    帮助确定节点在引擎中的执行优先级。在所有其他条件相同的情况下，优先级较高的节点将首先执行。
+    因此，前向传播时后执行的操作就是后向传播之中先执行的操作。
+    需要注意的一点是，对于 AccumulateGrad 节点，我们将sequence_nr显式地设置为UINT64_MAX。
+    在PyTorch的反向图计算中，AccumulateGrad类型代表的就是叶子节点类型，也就是计算图终止节点。AccumulateGrad类中有一个.variable属性指向叶子节点。
+
+    此“节点”的 sequence_nr_ 与 thread_id 一起搭配，作为一个节点的唯一标示，在 profiler 之中记录事件。
+    这样做的目的是帮助用户（可能还有程序）解释 profiler 的输出，以便将向后的节点与其向前的操作关联起来。
+    因为 sequence_nr 是 thread_local 类型变量，即在新线程中从零开始计数。
+
+4.2.4 topological_nr_
+此变量是 “节点”的拓扑顺序号，表示从该节点到任何叶节点的最长可能路径的长度。
+如果有一个叶节点，即AccumulateGrad，topological_nr_ 将是零。
+
+topological_nr_ 用于在autograd发现期间对DAG中的分支进行修剪，
+维护拓扑 topological_nr_有助于我们在两个节点之间不存在有向路径时，在O(1) 时间完成检查。
+
+topological_nr_ 具有以下属性：
+
+    对于G中的每一对节点X，Y，如果存在从X到Y的有向路径，则意味着 topo_nr(X) > topo_nr(Y)。
+    然而，事实并非如此，因此我们无法证明从X到Y的路径的存在性，只能证明不存在。
+
+    我们在使用 topological_nr_ 时所做的一个假设是：
+    一旦使用了一个节点，即它有一个父节点，那么它自己的topological_nr_ 就不会改变。
+    我们在“has_parent_”字段中添加了一些检查来强制执行这一点。
+
+4.2.5 operator()
+variable_list operator()(variable_list&& inputs)是Node的主要方法。
+该方法接收vector封装的多个Variable实例，并输出vector封装的多个Variable实例，然后调用apply 具体业务函数。
+该方法依靠C++的多态，将对operator 的调用转化为对自身（子类）的apply方法调用。
+
+PyTorch中所有用于反向传播计算的函数都继承自Function类，并重写Function类中的apply纯虚函数。
+
+0x05 Edge
+从名字可知，Edge 就是计算图的边。主要变量是：
+
+    std::shared_ptr function ：本边指向的目标Node。
+    uint32_t input_nr ： 指定本Edge是 function 的第几个输入 。
+
+using tensor_list = std::vector<at::Tensor>;
+using variable_list = std::vector<Variable>;
+using edge_list = std::vector<Edge>;
+using saved_variable_list = std::vector<SavedVariable>;
+using IndexRange = std::pair<size_t, size_t>;
+
+/// Represents a particular input of a function.
+struct Edge {
+  Edge() noexcept : function(nullptr), input_nr(0) {}
+
+  Edge(std::shared_ptr<Node> function_, uint32_t input_nr_) noexcept
+      : function(std::move(function_)), input_nr(input_nr_) {}
+
+  /// Convenience method to test if an edge is valid.
+  bool is_valid() const noexcept {
+    return function != nullptr;
+  }
+
+  // Required for use in associative containers.
+  bool operator==(const Edge& other) const noexcept {
+    return this->function == other.function && this->input_nr == other.input_nr;
+  }
+
+  bool operator!=(const Edge& other) const noexcept {
+    return !(*this == other);
+  }
+
+  /// The function this `Edge` points to.
+  std::shared_ptr<Node> function; // 指向的Node
+
+  /// The identifier of a particular input to the function.
+  uint32_t input_nr; //指定本Edge是function的第几个输入
+};
+}} // namespace torch::autograd
+
+0x06 逻辑图
+我们把文初的逻辑图细化如下，上半部分是 Python 世界，下半部分是 C++世界：
+
++--------------------------------------------+         +------------------------------+
+| SubBackward0                               |         | PowBackward0                 |
+|                                            |         |                              |  Edge
+|                                            |         |            next_functions  +----------> ...
+|   next_functions[0] = (PowBackward0, 0) +----------> |                              |
+|                                            |         +------------------------------+
+|                                            |
+|                                            |         +-------------------------------+
+|   next_functions[1] = (MulBackward0, 0) +----------> | MulBackward0                  |
+|                                            |         |                               |  Edge
+|                                            |         |             next_functions  +----------> ...
++--------------------------------------------+         |                               |
+                                                       +-------------------------------+
+                      ^
+                      |
+                      |
+                      |                                                                            Python
++--------------------------------------------------------------------------------------------------------+
+                      |                                                                            C++
+                      |
+                      v
+
++---------------------------------------------+       +----------------------+        +------------------+
+| SubBackward0                                |       | Edge 1               |        | PowBackward0     |
+|                         +-------------------------> |                      |        |                  |
+|                         |                   |       |         function +----------> |                  |
+|                         +                   |       |                      |        |                  |
+|        next_edges_ = [Edge 1, Edge 2]       |       |         input_nr = 0 |        |                  |
+|                                  +          |       +----------------------+        +------------------+
+|                                  |          |
+|                                  |          |
++---------------------------------------------+       +----------------------+        +------------------+
+                                   |                  | Edge 2               |        | MulBackward0     |
+                                   |                  |                      |        |                  |
+                                   +----------------> |         function +----------> |                  |
+                                                      |                      |        |                  |
+                                                      |         input_nr = 0 |        |                  |
+                                                      |                      |        |                  |
+                                                      +----------------------+        +------------------+
+
+手机如下： 04.png
+
+
+
+至此，传播过程中的基础类已经分析完毕，下一篇我们介绍如何使用这些类来完成前向传播。
+
+0xFF 参考
+https://github.com/KeithYin/read-pytorch-source-code/
+
+pytorch学习笔记（十三）：backward过程的底层实现解析
+
+PyTorch的初始化
+
+pytorch的自动求导机制 - 计算图的建立
+
+How autograd encodes the history
+
+https://pytorch.org/tutorials/beginner/blitz/autograd_tutorial.html
+
+pytorch笔记(计算图+autograd)-Node(1)
+
+详解Pytorch中的网络构造
+
+PyTorch的优化器
+
+PyTorch的分布式
+
+PyTorch的Tensor（下）
+
+PyTorch的Tensor(中)
+
+PyTorch的Tensor（上）
+
+PyTorch的动态图(下)
+
+PyTorch的动态图(上)
+
+计算图——用Pytorch解释李宏毅老师PPT中的实例
+
+如何使用pytorch自动求梯度
+
+PyTorch自动求导（Autograd）原理解析
+
+pytorch自动求导Autograd系列教程（一）
+
+PyTorch核心开发者亲自揭秘其内部机制
+
+PyTorch自动微分基本原理
+
+https://towardsdatascience.com/pytorch-autograd-understanding-the-heart-of-pytorchs-magic-2686cd94ec95
