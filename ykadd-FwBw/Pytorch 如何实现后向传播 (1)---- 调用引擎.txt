@@ -1,0 +1,996 @@
+Pytorch 如何实现后向传播 (1)---- 调用引擎
+https://www.cnblogs.com/rossiXYZ/p/15455546.html
+
+目录
+[源码解析] Pytorch 如何实现后向传播 (1)---- 调用引擎
+0x00 摘要
+0x01 前文回顾
+1.1 训练过程
+1.2 例子
+1.3 源码剖析
+0x02 Python 调用过程
+2.1 调用
+2.2 引擎
+0x03 c++世界
+3.1 支撑系统
+3.1.1 Edge
+3.1.2 Edge 相关函数
+3.1.3 Python 扩展
+3.2 引入
+3.2.1 初始化
+3.2.1.1 初始化继承体系
+3.2.2.2 初始化引擎
+3.2.3 与Python世界联系起来
+3.3 C++引擎入口
+3.3.1 try_get_grad_accumulator
+3.3.2 gradient_edge
+3.3.3 output_edges
+3.4 PythonEngine
+3.4.1 获取引擎
+3.4.2 定义
+3.5 另一调用途径
+0xFF 参考
+0x00 摘要
+本系列将通过大概十篇左右文章来分析 PyTorch 的自动微分功能如何实现。
+本文是后向传播的第一篇，介绍调用流程：如何从 Python 代码进入到 C++ autograd 引擎。
+
+系列前几篇连接如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+
+0x01 前文回顾
+我们首先从三个角度来看看前向传播和后向传播的联系。
+
+1.1 训练过程
+我们首先回忆一下训练过程。
+
+神经网络 (NN) 是对某些输入数据执行的嵌套函数的集合。
+这些函数由参数 （由权重和偏差组成）定义，这些参数在 PyTorch 中存储在张量中。训练 NN 分两步进行：
+
+    前向传播：
+    在前向传播中，神经网络对正确的输出做出最好的猜测。它通过它的每个函数运行输入数据来做出这个猜测。
+
+    反向传播：
+    在反向传播中，神经网络根据其猜测中的误差成比例地调整其参数。
+    它通过从输出向后遍历，收集关于函数参数（梯度）的误差导数，并使用梯度下降优化参数来实现这一点。
+
+1.2 例子
+其次，我们回忆一下前文示例。
+
+        def train_loop(model, optimizer, iterations):
+            for _ in range(iterations):
+                optimizer.zero_grad()
+                output = model(input) # 前向传播
+                loss = criterion(output, target) # 计算损失
+                loss.backward() # 反向传播
+                optimizer.step()
+
+前向计算结束之后，我们已经得到了计算图的依赖关系，于是可以开始进行后向传播了。我们需要从 backward 开始分析。
+
+1.3 源码剖析
+从前文我们可以看到，前向计算函数 sub_Tensor 针对前向计算结果 result 做了如下配置：
+
+    如何知道调用反向计算 ：
+    result 就是前向计算的结果，result 之中有 autograd_meta_，
+    其是一个 DifferentiableViewMeta 类型，DifferentiableViewMeta 的 grad_fn_ 就是反向计算的梯度函数。
+    grad_fn_ 指向了 SubBackward0。
+
+    反向传播如何计算 ：调用 SubBackward0 计算。
+
+    SubBackward0 的输入 ：
+    得到了前向计算的输出 result（其会在反向传播时候作为输入变量，就是设定到了 SubBackward0.input_metadata_ 之上）。
+
+    SubBackward0 的输出 ：
+    构建了 next_edges_ 作为其反向传播时候的输出边。根据 next_edges_ 就能得到反向传导图了。
+
+既然梳理了前向传播与后向传播的关系，我们接下来就看看如何进入到后向传播环节。
+
+0x02 Python 调用过程
+2.1 调用
+我们首先来到了 torch/_tensor.py，这里有两个函数可以计算梯度，我们选取 backward 来看看。
+
+def backward(self, gradient=None, retain_graph=None, create_graph=False, inputs=None):
+    r"""Computes the gradient of current tensor w.r.t. graph leaves.
+    """
+    if has_torch_function_unary(self):
+        return handle_torch_function(
+            Tensor.backward,
+            (self,),
+            self,
+            gradient=gradient,
+            retain_graph=retain_graph,
+            create_graph=create_graph,
+            inputs=inputs)
+    torch.autograd.backward(self, gradient, retain_graph, create_graph, inputs=inputs)
+
+然后来到了 torch/autograd/__init__.py。这里 backward 主要逻辑是：
+
+    利用输入参数来构建输入张量和梯度张量 。
+
+    使用 _make_grads 把 grad_tensors 中的元素重新组织成tuple(list(torch.Tensor, ...))的形式。
+
+    然后利用 Variable._execution_engine.run_backward 执行后向传播。
+
+def backward(
+    tensors: _TensorOrTensors,
+    grad_tensors: Optional[_TensorOrTensors] = None,
+    retain_graph: Optional[bool] = None,
+    create_graph: bool = False,
+    grad_variables: Optional[_TensorOrTensors] = None,
+    inputs: Optional[_TensorOrTensors] = None,
+) -> None:
+    r"""Computes the sum of gradients of given tensors with respect to graph
+    leaves.
+    """
+    if grad_variables is not None:
+        warnings.warn("'grad_variables' is deprecated. Use 'grad_tensors' instead.")
+        if grad_tensors is None:
+            grad_tensors = grad_variables
+        else:
+            raise RuntimeError("'grad_tensors' and 'grad_variables' (deprecated) "
+                               "arguments both passed to backward(). Please only "
+                               "use 'grad_tensors'.")
+    if inputs is not None and len(inputs) == 0:
+        raise RuntimeError("'inputs' argument to backward() cannot be empty.")
+
+    # 利用输入参数来构建输入张量和梯度张量
+    tensors = (tensors,) if isinstance(tensors, torch.Tensor) else tuple(tensors)
+    inputs = (inputs,) if isinstance(inputs, torch.Tensor) else \
+        tuple(inputs) if inputs is not None else tuple()
+
+    # _make_grads 把 grad_tensors 中的元素重新组织成tuple(list(torch.Tensor, ...))的形式
+    grad_tensors_ = _tensor_or_tensors_to_tuple(grad_tensors, len(tensors))
+    grad_tensors_ = _make_grads(tensors, grad_tensors_)
+    if retain_graph is None:
+        retain_graph = create_graph
+
+    # 执行后向传播
+    Variable._execution_engine.run_backward(
+        tensors, grad_tensors_, retain_graph, create_graph, inputs,
+        allow_unreachable=True, accumulate_grad=True)  # allow_unreachable flag
+Variable._execution_engine.run_backward 这里开始进入了C++世界。
+
+                                Python      +      C++
+                                            |
+                                            |
+                                            |
+backward                                    |
+    +                                       |
+    |                                       |
+    |                                       |
+    |                                       |
+    v                                       |
+Variable._execution_engine.run_backward +---------->
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            |
+                                            +
+2.2 引擎
+torch/autograd/variable.py 文件之中，生成了 _execution_engine。
+
+    from torch._C import _ImperativeEngine as ImperativeEngine
+
+    Variable._execution_engine = ImperativeEngine()
+
+从 torch/_C/__init__.pyi.in 我们可以看到，C++世界应该去python_engine.cpp寻找答案。
+
+    # Defined in torch/csrc/autograd/python_engine.cpp
+    class _ImperativeEngine:
+
+0x03 c++世界
+进入 C++ 世界之后，我们放慢下脚步，先回忆一下支撑系统，否则会因为太复杂而绕晕。
+
+3.1 支撑系统
+3.1.1 Edge
+Edge 通过function，input_nr 的配对来表示图中的边。
+
+using tensor_list = std::vector<at::Tensor>;
+using variable_list = std::vector<Variable>;
+using edge_list = std::vector<Edge>;
+using saved_variable_list = std::vector<SavedVariable>;
+using IndexRange = std::pair<size_t, size_t>;
+
+/// Represents a particular input of a function.
+struct Edge {
+  Edge() noexcept : function(nullptr), input_nr(0) {}
+
+  Edge(std::shared_ptr<Node> function_, uint32_t input_nr_) noexcept
+      : function(std::move(function_)), input_nr(input_nr_) {}
+
+  /// The function this `Edge` points to.
+  std::shared_ptr<Node> function; // 本边指向的Node
+
+  /// The identifier of a particular input to the function.
+  uint32_t input_nr; //指定本Edge在后向传播之中是function的第几个输入
+};
+}} // namespace torch::autograd
+
+3.1.2 Edge 相关函数
+torch/csrc/autograd/function.h 这里是边相关的函数。都是 Node 类的函数。
+
+  void set_next_edge(size_t index, Edge edge) {
+    update_topological_nr(edge);
+    next_edges_[index] = std::move(edge);
+  }
+
+  void add_next_edge(Edge edge) {
+    update_topological_nr(edge);
+    next_edges_.push_back(std::move(edge));
+  }
+
+  void set_next_edges(edge_list&& next_edges) {
+    next_edges_ = std::move(next_edges);
+    for(const auto& next_edge : next_edges_) {
+      update_topological_nr(next_edge);
+    }
+  }
+
+  const Edge& next_edge(size_t index) const noexcept {
+    return next_edges_[index];
+  }
+
+  const edge_list& next_edges() const noexcept {
+    return next_edges_;
+  }
+
+  edge_list& next_edges() noexcept {
+    return next_edges_;
+  }
+
+  uint32_t num_outputs() const noexcept {
+    return next_edges_.size();
+  }
+
+torch/csrc/jit/runtime/graph_executor.cpp 之中也有一些edge相关函数。
+
+void addOutputForTensor(const at::Tensor& tensor) {
+  auto v = Variable(tensor);
+  add_next_edge(
+      v.defined() ? torch::autograd::impl::gradient_edge(v)
+                  : autograd::Edge{});
+}
+
+void addOutputForIValue(const IValue& value) {
+  if (value.isTensorList()) {
+    for (const at::Tensor tensor : value.toTensorList()) {
+      addOutputForTensor(tensor);
+    }
+  } else if (value.isTensor()) {
+    addOutputForTensor(value.toTensor());
+  } else {
+    // We could have None passed here via `Optional[Tensor]`
+    add_next_edge(autograd::Edge{});
+  }
+}
+gradient_edge 在前文和本文下面会用到，就是利用一个Variable的梯度和前向传播的输出来构建一个Edge。
+
+Edge gradient_edge(const Variable& self) {
+  // If grad_fn is null (as is the case for a leaf node), we instead
+  // interpret the gradient function to be a gradient accumulator, which will
+  // accumulate its inputs into the grad property of the variable. These
+  // nodes get suppressed in some situations, see "suppress gradient
+  // accumulation" below. Note that only variables which have `requires_grad =
+  // True` can have gradient accumulators.
+
+  // self.grad_fn() 这里触发了一个调用
+  if (const auto& gradient = self.grad_fn()) { // 这是一个中间节点，gradient 是一个Function，比如可以得到一个SubBackward0实例
+    return Edge(gradient, self.output_nr()); // self.output_nr() 表示本Edge是function的第n个输入。前向传播时候的第 n 个输出在反向传播时候就是第 n 个输入。
+  } else {
+    return Edge(grad_accumulator(self), 0); // 这是一个叶子节点，所以生成一个AccumulateGrad，0表示本Edge是function的第一个输入
+  }
+}
+
+3.1.3 Python 扩展
+我们接下来介绍 Python 扩展。一般来说，人们不会用C直接编写Python模块，而是直接写C模块，然后包装一下让Python可以直接调用，过程大致是：
+
+    C 语言引入 Python.h 头文件。
+    编写封装函数，该函数处理从 Python 世界传入的参数。
+    C 语言实现功能逻辑。
+    把 C 语言的返回值包装成 Python 对象。
+    在 PyMethodDef 结构体中注册所需要的函数。
+    在初始化方法中注册模块名。
+    把 C 源文件编译成链接库以供Python使用。
+
+PyMethodDef 的定义如下：
+
+typedef PyObject *(*PyCFunction)(PyObject *, PyObject *);
+
+struct PyMethodDef {
+    const char  *ml_name;   /* The name of the built-in function/method */
+    PyCFunction ml_meth;    /* The C function that implements it */
+    int         ml_flags;   /* Combination of METH_xxx flags, which mostly
+                               describe the args expected by the C func */
+    const char  *ml_doc;    /* The __doc__ attribute, or NULL */
+};
+typedef struct PyMethodDef PyMethodDef;
+
+3.2 引入
+3.2.1 初始化
+在 torch/csrc/Module.cpp 之中，initModule 会进行 C++ 世界的初始化。
+这是一个庞大的函数，对于本文，我们只关注 THPFunction_initModule 和 THPEngine_initModule，省略了众多代码。
+
+PyObject* initModule() {
+
+  ......
+
+  ASSERT_TRUE(THPFunction_initModule(module));
+  ASSERT_TRUE(THPEngine_initModule(module));
+
+  ......
+
+}
+
+3.2.1.1 初始化继承体系
+初始化时候，THPFunction_initModule(module) 创建了torch._C._FunctionBase。
+
+bool THPFunction_initModule(PyObject *module)
+{
+  if (PyType_Ready(&THPFunctionType) < 0)
+    return false;
+  Py_INCREF(&THPFunctionType);
+
+  // 创建了`torch._C._FunctionBase`
+  PyModule_AddObject(module, "_FunctionBase", (PyObject *)&THPFunctionType);
+  return true;
+}
+而在torch/autograd/function.py中，有以下两个类以torch._C._FunctionBase为基类：
+
+    class Function(with_metaclass(FunctionMeta, _C._FunctionBase, _ContextMethodMixin, _HookMixin))
+    class BackwardCFunction(_C._FunctionBase, _ContextMethodMixin, _HookMixin)
+
+这个Function继承体系就构成了DAG的基础。
+
+3.2.2.2 初始化引擎
+THPEngine_initModule(module) 创建了torch._C._EngineBase，_EngineBase这个类负责动态图执行之前的预处理，
+_EngineBase会将torch.autograd的backward之类的请求预处理后送给真正的Engine去执行。
+
+PyObject* initModule() {
+  ......
+  ASSERT_TRUE(THPVariable_initModule(module));
+  ASSERT_TRUE(THPFunction_initModule(module));
+  ASSERT_TRUE(THPEngine_initModule(module)); // 这里初始化引擎
+}
+
+THPEngine_initModule 通过函数PyModule_AddObject 把 THPEngineType 这个对象注册到模块 module（一个PyObject类型） 之中，
+命名为 _ImperativeEngine。对应的就是 Python端的 _ImperativeEngine。
+
+bool THPEngine_initModule(PyObject *module)
+{
+#ifndef _WIN32
+  if (pthread_atfork(nullptr, nullptr, child_atfork) != 0) {
+    throw std::runtime_error("unable to set pthread_atfork handler");
+  }
+#endif
+  if (PyType_Ready(&THPEngineType) < 0)
+    return false;
+  Py_INCREF(&THPEngineType);
+
+  // 为 Python 注册了引擎
+  PyModule_AddObject(module, "_ImperativeEngine", (PyObject *)&THPEngineType);
+  set_default_engine_stub(python::PythonEngine::get_python_engine);
+  return true;
+}
+
+THPEngineType 定义如下，可以看出来，生成的实例是 "torch._C._EngineBase"。
+
+PyTypeObject THPEngineType = {
+  PyVarObject_HEAD_INIT(nullptr, 0)
+  "torch._C._EngineBase",                      /* tp_name */
+  sizeof(THPEngine),                           /* tp_basicsize */
+  0,                                           /* tp_itemsize */
+  nullptr,                                     /* tp_dealloc */
+  0,                                           /* tp_vectorcall_offset */
+  nullptr,                                     /* tp_getattr */
+  nullptr,                                     /* tp_setattr */
+  nullptr,                                     /* tp_reserved */
+  nullptr,                                     /* tp_repr */
+  nullptr,                                     /* tp_as_number */
+  nullptr,                                     /* tp_as_sequence */
+  nullptr,                                     /* tp_as_mapping */
+  nullptr,                                     /* tp_hash  */
+  nullptr,                                     /* tp_call */
+  nullptr,                                     /* tp_str */
+  nullptr,                                     /* tp_getattro */
+  nullptr,                                     /* tp_setattro */
+  nullptr,                                     /* tp_as_buffer */
+  Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,    /* tp_flags */
+  nullptr,                                     /* tp_doc */
+  nullptr,                                     /* tp_traverse */
+  nullptr,                                     /* tp_clear */
+  nullptr,                                     /* tp_richcompare */
+  0,                                           /* tp_weaklistoffset */
+  nullptr,                                     /* tp_iter */
+  nullptr,                                     /* tp_iternext */
+  THPEngine_methods,                           /* tp_methods */
+  nullptr,                                     /* tp_members */
+  nullptr,                                     /* tp_getset */
+  nullptr,                                     /* tp_base */
+  nullptr,                                     /* tp_dict */
+  nullptr,                                     /* tp_descr_get */
+  nullptr,                                     /* tp_descr_set */
+  0,                                           /* tp_dictoffset */
+  nullptr,                                     /* tp_init */
+  nullptr,                                     /* tp_alloc */
+  THPEngine_new                                /* tp_new */
+};
+
+3.2.3 与Python世界联系起来
+既然 C++ 的引擎已经和 Python 的引擎联系了起来，我们再看看引擎的具体函数。
+
+对于torch._C._EngineBase，其成员函数是 THPEngine_methods。
+THPEngine_methods 的类型就是我们前面介绍的 PyMethodDef，用来进行 Python 拓展。
+这里定义了 run_backward，queue_callback 和 is_checkpoint_valid。
+我们回忆一下，run_backward 就是 Python世界的切入点。
+
+static struct PyMethodDef THPEngine_methods[] = {
+  {(char*)"run_backward",
+    castPyCFunctionWithKeywords(THPEngine_run_backward), // 与Python对应
+    METH_VARARGS | METH_KEYWORDS, nullptr},
+  {(char*)"queue_callback", THPEngine_queue_callback, METH_O, nullptr},
+  {(char*)"is_checkpoint_valid", THPEngine_is_checkpoint_valid, METH_NOARGS, nullptr},
+  {nullptr}
+};
+
+按照前面 PyMethodDef 的定义有："run_backward" 是方法名字，THPEngine_run_backward 是对应的C语言方法。
+所以，Python 世界的 Variable._execution_engine.run_backward 就对应了 THPEngine_run_backward。
+
+                                                      Python      +      C++
+                                                                  |
+                                                                  |                     initModule
+                                                                  |                          +
+                                                                  |                          |
+                                                                  |                          |
+                                                                  |                          |
+                                                                  |                          v
+                   backward                                       |                   THPEngine_initModule
+                       +                                          |                          +
+                       |                                          |                          |
+                       |                                          |                          |
+                       |                                          |                          |
+                       v                                          |                          v
+                   Variable._execution_engine.run_backward        |   PyModule_AddObject(module, "_ImperativeEngine", &THPEngineType)
+                                               +                  |                          +
+                                               |                  |                          |
+                                               |                  |                          |
+                                               |                  |                          v
+                                               |                  |
+                                               |                  |       +----------------------------------------------------------+
+                                               v                  |       | module                                                   |
+                                                                  |       |                                                          |
+                                 +-------------------------+      |       |   +---------------------------------------------------+  |
+                                 | _ImperativeEngine       |      |       |   | _ImperativeEngine                                 |  |
+Variable._execution_engine +---> |                         |      |       |   |                                                   |  |
+                                 |                         |      |       |   |  +----------------------------------------------+ |  |
+                                 |                         |      |       |   |  | THPEngine_methods                            | |  |
+                                 |                         |      |       |   |  |                                              | |  |
+                                 |                         |      |       |   |  |                                              | |  |
+                                 |        run_backward +----------------------------->  "run_backward" : THPEngine_run_backward | |  |
+                                 |                         |      |       |   |  |                                              | |  |
+                                 |                         |      |       |   |  +----------------------------------------------+ |  |
+                                 +-------------------------+      |       |   |                                                   |  |
+                                                                  |       |   +---------------------------------------------------+  |
+                                                                  |       |                                                          |
+                                                                  +       +----------------------------------------------------------+
+
+
+手机如下： 17.png
+
+
+
+于是我们要在 C++ 世界分析 THPEngine_run_backward。
+
+3.3 C++引擎入口
+THPEngine_run_backward 是 C++ 引擎的入口，位于：torch/csrc/autograd/python_engine.cpp。
+
+主要逻辑如下：
+
+    首先，是通过函数PyArg_ParseTupleAndKeywords对输入的参数重新解析，并赋值给新定义的变量:
+
+        新的变量为：
+        tensors，grad_tensors，keep_graph，create_graph，inputs以及allow_unreachable。
+        比如 inputs就是一个vector。
+
+        python世界中的输入是 torch.autograd.backward(tensors, grad_tensors)，
+        这些参数分别转换被成了C++世界中的tensors和grad_tensors变量。
+        这两个变量在C++中的类型是PyObject，并且size为1。
+        PyObject是任何python对象的基类，在本方法之中，tensors和grad_tensors 其实是THPVariable类的实例。
+
+    从输入获取输入张量和梯度张量，主要是检查tensors和grad_tensors的变量类型以及tuple size是否一致。
+
+    依据输入构建了三个变量 edge_list roots，output_edges 和variable_list grads，
+    这三个分别是反向传播（求导）的起始点，模型最终输出的边信息和梯度。
+
+        roots是包含有前向传播输出节点的 gradient_edge()（即输出节点的(grad_fn_, 0)）的 vector。
+        需要注意，grad_fn_ 是 Node 的派生类。
+
+        grads 是前向传播产生的梯度，如果没有配置，则初始化为(tensor(1.),)。
+
+        output_edges 是依据前向传播输入节点 inputs 构建的后向传播输出边。
+
+    调用outputs = engine.execute(roots, grads, keep_graph, create_graph, output_edges)，正式进入反向传播引擎。
+
+具体代码如下：
+
+// Implementation of torch._C._EngineBase.run_backward
+PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+  HANDLE_TH_ERRORS
+  PyObject *tensors = nullptr;
+  PyObject *grad_tensors = nullptr;
+  unsigned char keep_graph = 0;
+  unsigned char create_graph = 0;
+  PyObject *inputs = nullptr;
+  unsigned char allow_unreachable = 0;
+  unsigned char accumulate_grad = 0; // Indicate whether to accumulate grad into leaf Tensors or capture
+  const char *accepted_kwargs[] = { // NOLINT
+      "tensors", "grad_tensors", "keep_graph", "create_graph", "inputs",
+      "allow_unreachable", "accumulate_grad", nullptr
+  };
+
+  // 对输入的参数重新解析并赋值给新定义的变量tensors,grad_tensors等等，比如 inputs就是一个vector
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OObb|Obb", (char**)accepted_kwargs,
+        &tensors, &grad_tensors, &keep_graph, &create_graph, &inputs, &allow_unreachable, &accumulate_grad))
+    return nullptr;
+
+  // 从输入获取输入张量和梯度张量，主要是检查tensors和grad_tensors的变量类型以及tuple size是否一致。
+  Py_ssize_t num_tensors = PyTuple_GET_SIZE(tensors);
+  Py_ssize_t num_gradients = PyTuple_GET_SIZE(grad_tensors);
+  THPUtils_assert(num_tensors == num_gradients, "got %ld tensors and %ld "
+      "gradients", num_tensors, num_gradients);
+
+  // The user either called autograd.backward(...) or autograd.grad(...) to get here
+  bool backward_api_called = accumulate_grad;
+
+  // 我们回忆一下定义
+  // using variable_list = std::vector<Variable>;
+  // using edge_list = std::vector<Edge>;
+  edge_list roots; // 就是反向传播的起点（根节点）
+  roots.reserve(num_tensors);
+  variable_list grads; // 就是反向传播的梯度
+  grads.reserve(num_tensors);
+
+  // 依据输入来配置roots和grads
+  for (int i = 0; i < num_tensors; i++) {
+    // tensors是输入节点，即前向传播图的输出
+    PyObject *_tensor = PyTuple_GET_ITEM(tensors, i);
+    THPUtils_assert(THPVariable_Check(_tensor), "element %d of tensors "
+	  // 得到 gradient_edge = Edge(grad_fn(), output_nr())
+    auto gradient_edge = torch::autograd::impl::gradient_edge(variable);
+    roots.push_back(std::move(gradient_edge)); // root增加一个Edge
+
+    PyObject *grad = PyTuple_GET_ITEM(grad_tensors, i);
+    if (THPVariable_Check(grad)) {
+      const Variable& grad_var = THPVariable_Unpack(grad);
+      if (grad_var.has_names()) {
+        TORCH_WARN(
+            "Autograd was passed a named grad tensor with dims ", grad_var.names(),
+            ". Autograd does not yet support named tensor semantics, so all names ",
+            "will be ignored. In practice all computed gradients will still be correct "
+            "according to regular tensor semantics.");
+      }
+      grads.push_back(grad_var); // 增加一个梯度
+    }
+  }
+
+  // 构建一个输出Edge列表
+  std::vector<Edge> output_edges;
+  if (inputs != nullptr) {
+    int num_inputs = PyTuple_GET_SIZE(inputs);
+    output_edges.reserve(num_inputs);
+    // 遍历输入列表
+    for (int i = 0; i < num_inputs; ++i) {
+      PyObject *input = PyTuple_GET_ITEM(inputs, i);
+      const auto& tensor = THPVariable_Unpack(input);
+      const auto output_nr = tensor.output_nr();
+      auto grad_fn = tensor.grad_fn();
+      if (!grad_fn) {
+        // 获取 grad_accumulator，用来判断是否是叶子节点
+        grad_fn = torch::autograd::impl::try_get_grad_accumulator(tensor);
+      }
+
+      if (!grad_fn) {
+        // NOTE [ Autograd Unreachable Input ]
+        // Since input has no grad_accumulator, its guaranteed to be unreachable.
+        // We initialize an edge pointing to a non-nullptr Node so nodes in the graph
+        // (e.g., mul when an operand is scalar) that have edges pointing to nullptr
+        // don't get erroneously assigned `needed = True` in exec_info.
+        // 说明是叶子节点
+        output_edges.emplace_back(std::make_shared<Identity>(), 0);
+      } else {
+        // 是中间节点
+        output_edges.emplace_back(grad_fn, output_nr);
+      }
+    }
+  }
+
+  // 现在，roots是包含有(前向传播输出节点的grad_fn_, 0)的vector。
+  // grads 是前向传播产生的梯度，如果没有配置，则初始化为(tensor(1.),)
+  // output_edges 是依据前向传播输入节点 input 构建的后向传播输出边
+  variable_list outputs;
+  {
+    pybind11::gil_scoped_release no_gil;
+    auto& engine = python::PythonEngine::get_python_engine();
+    // 进入引擎执行
+    outputs = engine.execute(roots, grads, keep_graph, create_graph, accumulate_grad, output_edges);
+  }
+
+  if (!backward_api_called && inputs != nullptr) {
+    int num_inputs = PyTuple_GET_SIZE(inputs);
+    THPObjectPtr py_outputs {PyTuple_New(num_inputs)};
+    if (!py_outputs) return nullptr;
+    for (int i = 0; i < num_inputs; i++) {
+      PyTuple_SET_ITEM(py_outputs.get(), i, THPVariable_Wrap(outputs[i]));
+    }
+    return py_outputs.release();
+  } else {
+    Py_RETURN_NONE;
+  }
+  END_HANDLE_TH_ERRORS
+}
+
+我们接下来分析 THPEngine_run_backward 用到的几个辅助函数。
+
+3.3.1 try_get_grad_accumulator
+上面代码之中，有 grad_fn = torch::autograd::impl::try_get_grad_accumulator(tensor) 来获取计算梯度的方法。
+其实是用它来判断是否是叶子节点，只有非叶子节点 grad_accumulator_才不为空。
+
+try_get_grad_accumulator 返回的是个指向Node对象的指针 : std::weak_ptr<Node> grad_accumulator_。
+就是如何计算梯度。
+
+具体逻辑是：
+
+    先通过函数get_autograd_meta返回一个AutogradMeta结构体。
+
+    然后访问结构体中的成员变量grad_accumulator_，而grad_accumulator_是一个指向类型为Node对象的std::weak_ptr指针。
+
+    最后通过lock()函数创建一个std::shared_ptr来管理对象。
+
+  std::shared_ptr<Node> try_get_grad_accumulator(const Variable& self) {
+    if (get_autograd_meta(self)) {
+      return get_autograd_meta(self)->grad_accumulator_.lock();
+    } else {
+      return nullptr;
+    }
+  }
+
+3.3.2 gradient_edge
+上面代码之中，gradient_edge 被用来在输入 tensor 基础之上构建一个 Edge。
+
+auto gradient_edge = torch::autograd::impl::gradient_edge(variable);
+roots.push_back(std::move(gradient_edge)); // root增加一个Edge
+
+gradient_edge 具体如下：
+
+Edge gradient_edge(const Variable& self) {
+  // If grad_fn is null (as is the case for a leaf node), we instead
+  // interpret the gradient function to be a gradient accumulator, which will
+  // accumulate its inputs into the grad property of the variable. These
+  // nodes get suppressed in some situations, see "suppress gradient
+  // accumulation" below. Note that only variables which have `requires_grad =
+  // True` can have gradient accumulators.
+  if (const auto& gradient = self.grad_fn()) {
+    return Edge(gradient, self.output_nr());
+  } else {
+    return Edge(grad_accumulator(self), 0);
+  }
+}
+
+3.3.3 output_edges
+上面代码之中， std::vector output_edges 构建一个输出Edge列表。
+
+在拿到 grad_accumulator_ 之后，会赋予为 grad_fn，这样就用来判断是否为叶子节点。然后分别构建叶子节点和中间节点，放到 output_edges 之中。
+
+      if (!grad_fn) {
+        // NOTE [ Autograd Unreachable Input ]
+        // Since input has no grad_accumulator, its guaranteed to be unreachable.
+        // We initialize an edge pointing to a non-nullptr Node so nodes in the graph
+        // (e.g., mul when an operand is scalar) that have edges pointing to nullptr
+        // don't get erroneously assigned `needed = True` in exec_info.
+        output_edges.emplace_back(std::make_shared<Identity>(), 0); // 叶子节点
+      } else {
+        output_edges.emplace_back(grad_fn, output_nr); // 非叶子节点
+      }
+
+我们看看构建output_edges的变量 grad_fn 和 output_nr，看看它们的由来。
+
+grad_fn是通过 try_get_grad_accumulator 方法得到的一个指向Node对象的std::shared_ptr指针，就是如何计算梯度的操作。
+
+output_pr 由如下设置，其最终得到的是结构体AutogradMeta中的成员变量uint32_t output_nr_。
+
+    const auto output_nr = tensor.output_nr();
+
+emplace_back()函数向容器中中加入临时对象， 临时对象原地构造，没有赋值或移动的操作。
+
+回忆一下 Edge 的定义。所以可以看出来，emplace_back()就是使用了这些输入生成了一个 Edge。
+
+/// Represents a particular input of a function.
+struct Edge {
+  Edge() noexcept : function(nullptr), input_nr(0) {}
+  Edge(std::shared_ptr<Node> function_, uint32_t input_nr_) noexcept
+      : function(std::move(function_)), input_nr(input_nr_) {}
+
+  /// The function this `Edge` points to.
+  std::shared_ptr<Node> function; // 指向的Node
+
+  /// The identifier of a particular input to the function.
+  uint32_t input_nr; //指定本Edge在后向传播之中是function的第几个输入
+};
+
+输入转换如下图，可以看出来输入从 Python 如何进行转换最终传入C++引擎，以如下变量为例：
+
+    Python 的 tensors 被转换为 C++ 的 root。
+
+    Python 的 grad_tensors 被转换为 C++ 的 grads。
+
+    Python 的 inputs 被转换为 C++ 的 output_edges。
+
+    最终把这三个变量传递给引擎：PythonEngine.execute(roots, grads, keep_graph, create_graph, accumulate_grad, output_edges)。
+
+                  backward(tensors, grad_tensors, inputs)
+                              +             +        +
+                              |             |        |
+Python                        |             |        |
+                              |             |        |
++------------------------------------------------------------------------------------------+
+                              |             |        |
+C++   THPEngine_run_backward  |             |        |
+                              |             |        +-----------------------------+
+                              |             |                                      |
+                              |             |                                      |
+                              |             +-----------------------------+        |
+                              v                                           |        |
+                                                                          |        |
++------root = [(tensor_1.grad_fn_, 0),...,(tensor_n.grad_fn_, 0)]         |        |
+|                                                                         |        |
+|                                                                         |        |
+|                                                                         |        |
+|   +--grads = [grad_tensor_1,...,grad_tensor_n  ] <----------------------+        |
+|   |                                                                              |
+|   |                                                                              |
+|   |                                                                              v
+|   |  output_edges = [(input_1.grad_fn_, output_nr_1),...,(input_n.grad_fn_, output_nr_n)]
+|   |                                                                              +
+|   +-------------------------+                                                    |
+|                             |                                                    |
+|                             |                                                    |
++----------------------+      |                                                    |
+                       |      |                                                    |
+                       v      v                                                    v
+
+PythonEngine.execute(roots, grads, keep_graph, create_graph, accumulate_grad, output_edges)
+
+3.4 PythonEngine
+前面 THPEngine_run_backward 代码有如下，我们可以看到，THPEngine_run_backward 最终调用到了 PythonEngine 的处理逻辑。
+
+    auto& engine = python::PythonEngine::get_python_engine();
+    // 进入引擎执行
+    outputs = engine.execute(roots, grads, keep_graph, create_graph, accumulate_grad, output_edges);
+
+3.4.1 获取引擎
+get_python_engine这里定义了一个静态变量。整个PyTorch程序全局只维护一个Engine实例，也就是PythonEngine实例。
+
+Engine& PythonEngine::get_python_engine() {
+  static PythonEngine engine;
+  // This is "probably" thread-safe because the flag is set in a fork handler
+  // before any threads are created, and this function is only called with the
+  // GIL held. However, using fork + threads is playing with fire so this is
+  // more of a "best effort" thing. For example, if the fork occurs while the
+  // backwards threads hold a lock, we'll probably deadlock in the engine
+  // destructor.
+  if (_reinitialize_engine) {
+    engine.release_workers();
+    engine.~PythonEngine();
+    new (&engine) torch::autograd::python::PythonEngine();
+    _reinitialize_engine = false;
+  }
+  return engine;
+}
+
+3.4.2 定义
+所以我们来看看PythonEngine 定义。PythonEngine 是 Engine 的派生类，相当于封装了一下。
+主要是针对python世界的特点做了一些定制，
+比如：PythonEngine子类重写了父类的execute，把C++异常翻译为Python异常的功能，核心工作还是由Engine基类来完成：
+
+struct PythonEngine : public Engine {
+  static Engine& get_python_engine();
+  ~PythonEngine() override;
+  void thread_init(int device,
+      const std::shared_ptr<ReadyQueue>& ready_queue,
+      bool should_increment) override;
+  void thread_on_exception(
+      std::shared_ptr<GraphTask> graph_task,
+      const std::shared_ptr<Node>& fn,
+      std::exception& e) override;
+  variable_list execute(
+      const edge_list& roots,
+      const variable_list& inputs,
+      bool keep_graph,
+      bool create_graph,
+      bool accumulate_grad,
+      const edge_list& outputs = {}) override;
+
+  std::shared_ptr<at::ivalue::Future> execute_with_graph_task(
+      const std::shared_ptr<GraphTask>& graph_task,
+      std::shared_ptr<Node> graph_root,
+      InputBuffer&& input_buffer) override;
+
+  std::unique_ptr<AnomalyMetadata> make_anomaly_metadata() override;
+  private:
+    PythonEngine();
+};
+
+execute 代码如下，于是从下文开始，我们要看看 Engine 是如何运作的。
+
+variable_list PythonEngine::execute(
+    const edge_list& roots,
+    const variable_list& inputs,
+    bool keep_graph,
+    bool create_graph,
+    bool accumulate_grad,
+    const edge_list& outputs) {
+  try {
+    return Engine::execute(roots, inputs, keep_graph, create_graph, accumulate_grad, outputs);
+  } catch (python_error& e) {
+    e.restore();
+    throw;
+  }
+}
+
+目前逻辑拓展如下：
+
+                  backward(tensors, grad_tensors, inputs)
+                              +             +        +
+                              |             |        |
+Python                        |             |        |
+                              |             |        |
++------------------------------------------------------------------------------------------+
+                              |             |        |
+C++   THPEngine_run_backward  |             |        |
+                              |             |        +-----------------------------+
+                              |             |                                      |
+                              |             |                                      |
+                              |             +-----------------------------+        |
+                              v                                           |        |
+                                                                          |        |
++------root = [(tensor_1.grad_fn_, 0),...,(tensor_n.grad_fn_, 0)]         |        |
+|                                                                         |        |
+|                                                                         |        |
+|                                                                         |        |
+|   +--grads = [grad_tensor_1,...,grad_tensor_n  ] <----------------------+        |
+|   |                                                                              |
+|   |                                                                              |
+|   |                                                                              v
+|   |  output_edges = [(input_1.grad_fn_, output_nr_1),...,(input_n.grad_fn_, output_nr_n)]
+|   |                                                                              +
+|   +-------------------------+                                                    |
+|                             |                                                    |
+|                             |                                                    |
++----------------------+      |                                                    |
+                       |      |                                                    |
+                       v      v                                                    v
+
+PythonEngine.execute(roots, grads, keep_graph, create_graph, accumulate_grad, output_edges)
+               +       +       +                                                   +
+               |       |       |                                                   |
+               |       |       |                                                   |
+               v       v       v                                                   v
+     Engine::execute(roots, inputs, keep_graph, create_graph, accumulate_grad, outputs)
+
+手机如下： 18.png
+
+
+3.5 另一调用途径
+最后，我们再插入一个 run_backward 进行分析。
+
+run_backward 位于 torch/csrc/autograd/autograd.cpp。这里应该是专门为了 C++ 世界直接调用的需要，与我们之前通过 Python 迂回调用不同。
+
+void backward(
+    const variable_list& tensors,
+    const variable_list& grad_tensors,
+    c10::optional<bool> retain_graph,
+    bool create_graph,
+    const variable_list& inputs) {
+  variable_list gradients = _make_grads(tensors, grad_tensors);
+  if (!retain_graph) {
+    retain_graph = create_graph;
+  }
+  run_backward(tensors, gradients, retain_graph.value(), create_graph, inputs, /*allow_unused=*/true, /*accumulate_grad=*/true);
+}
+
+variable_list grad(
+    const variable_list& outputs,
+    const variable_list& inputs,
+    const variable_list& grad_outputs,
+    c10::optional<bool> retain_graph,
+    bool create_graph,
+    bool allow_unused) {
+  variable_list gradients = _make_grads(outputs, grad_outputs);
+  if (!retain_graph) {
+    retain_graph = create_graph;
+  }
+  return run_backward(
+    outputs, gradients, retain_graph.value(), create_graph, inputs, allow_unused, /*accumulate_grad=*/false);
+}
+
+run_backward 最后也调用了 Engine::get_default_engine().execute。
+
+variable_list run_backward(
+    const variable_list& outputs,
+    const variable_list& grad_outputs,
+    bool keep_graph,
+    bool create_graph,
+    const variable_list& inputs,
+    bool allow_unused,
+    bool accumulate_grad) {
+  size_t num_tensors = outputs.size();
+  edge_list roots;
+  roots.reserve(num_tensors);
+  for (size_t i = 0; i < num_tensors; i++) {
+    const Variable& output = outputs[i];
+    auto gradient_edge = impl::gradient_edge(output);
+    roots.push_back(std::move(gradient_edge));
+  }
+
+  edge_list output_edges;
+  if (!inputs.empty()) {
+    size_t num_inputs = inputs.size();
+    output_edges.reserve(num_inputs);
+    for (size_t i = 0; i < num_inputs; ++i) {
+      const Variable& input = inputs[i];
+      const auto output_nr = input.output_nr();
+      auto grad_fn = input.grad_fn();
+      if (!grad_fn) {
+        grad_fn = impl::try_get_grad_accumulator(input);
+      }
+      if (!grad_fn) {
+        // See NOTE [ Autograd Unreachable Input ] for details
+        output_edges.emplace_back(std::make_shared<Identity>(), 0);
+      } else {
+        output_edges.emplace_back(grad_fn, output_nr);
+      }
+    }
+  }
+
+  // 调用了引擎代码
+  variable_list grad_inputs = Engine::get_default_engine().execute(
+      roots, grad_outputs, keep_graph, create_graph, accumulate_grad, output_edges);
+  // check if grad_inputs contains None or not base on the allow_unused flag
+  if (!inputs.empty() && !allow_unused) {
+    size_t num_inputs = inputs.size();
+    for (size_t i = 0; i < num_inputs; ++i) {
+      TORCH_CHECK(
+          grad_inputs[i].defined(),
+          "One of the "
+          "differentiated Tensors appears to not have been used "
+          "in the graph. Set allow_unused=True if this is the "
+          "desired behavior.");
+    }
+  }
+  return grad_inputs;
+}
+
+至此，调用过程分析完毕，其核心就是调用引擎函数进行处理，所以下一篇我们来开始分析引擎。
+
+0xFF 参考
+使用C写Python的模块

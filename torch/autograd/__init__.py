@@ -135,15 +135,18 @@ def backward(
     if inputs is not None and len(inputs) == 0:
         raise RuntimeError("'inputs' argument to backward() cannot be empty.")
 
+    # 利用输入参数来构建输入张量和梯度张量
     tensors = (tensors,) if isinstance(tensors, torch.Tensor) else tuple(tensors)
     inputs = (inputs,) if isinstance(inputs, torch.Tensor) else \
         tuple(inputs) if inputs is not None else tuple()
 
+    # _make_grads 把 grad_tensors 中的元素重新组织成tuple(list(torch.Tensor, ...))的形式
     grad_tensors_ = _tensor_or_tensors_to_tuple(grad_tensors, len(tensors))
     grad_tensors_ = _make_grads(tensors, grad_tensors_)
     if retain_graph is None:
         retain_graph = create_graph
 
+    # 执行后向传播
     Variable._execution_engine.run_backward(
         tensors, grad_tensors_, retain_graph, create_graph, inputs,
         allow_unreachable=True, accumulate_grad=True)  # allow_unreachable flag

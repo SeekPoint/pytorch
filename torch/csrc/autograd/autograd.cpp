@@ -112,6 +112,7 @@ variable_list run_backward(
     }
   }
 
+// 调用了引擎代码
   variable_list grad_inputs = Engine::get_default_engine().execute(
       roots, grad_outputs, keep_graph, create_graph, accumulate_grad, output_edges);
   // check if grad_inputs contains None or not base on the allow_unused flag

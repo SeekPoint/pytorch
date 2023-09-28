@@ -912,6 +912,7 @@ bool THPFunction_initModule(PyObject *module)
   if (PyType_Ready(&THPFunctionType) < 0)
     return false;
   Py_INCREF(&THPFunctionType);
+  // 创建了`torch._C._FunctionBase`
   PyModule_AddObject(module, "_FunctionBase", (PyObject *)&THPFunctionType);
   return true;
 }

@@ -239,7 +239,7 @@ namespace impl {
 
 // self.grad_fn() 这里触发了一个调用，得到了一个SubBackward0实例
     // self.grad_fn() 这里触发了一个调用，得到了一个Node实例
-    if (const auto& gradient = self.grad_fn()) {  // 这是一个中间节点，gradient 是一个Function
+    if (const auto& gradient = self.grad_fn()) {  // 这是一个中间节点，gradient 是一个Function 比如可以得到一个SubBackward0实例
       // self.output_nr() 表示本Edge是function的第n个输入。前向传播时候的第 n 个输出在反向传播时候就是第 n 个输入。
       return Edge(gradient, self.output_nr());
     } else {

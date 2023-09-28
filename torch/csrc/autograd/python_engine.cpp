@@ -158,6 +158,7 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
       "tensors", "grad_tensors", "keep_graph", "create_graph", "inputs",
       "allow_unreachable", "accumulate_grad", nullptr
   };
+  // 对输入的参数重新解析并赋值给新定义的变量tensors,grad_tensors等等，比如 inputs就是一个vector
   if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OObb|Obb", (char**)accepted_kwargs,
         &tensors, &grad_tensors, &keep_graph, &create_graph, &inputs, &allow_unreachable, &accumulate_grad))
     return nullptr;
@@ -166,6 +167,7 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
   THPUtils_assert(PyTuple_Check(grad_tensors), "grad_tensors argument is "
       "expected to be a tuple, but got %s", THPUtils_typename(grad_tensors));
 
+  // 从输入获取输入张量和梯度张量，主要是检查tensors和grad_tensors的变量类型以及tuple size是否一致。
   Py_ssize_t num_tensors = PyTuple_GET_SIZE(tensors);
   Py_ssize_t num_gradients = PyTuple_GET_SIZE(grad_tensors);
   THPUtils_assert(num_tensors == num_gradients, "got %ld tensors and %ld "
@@ -178,11 +180,15 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
       "please call backward() outside torch.vmap or instead use "
       "torch.autograd.grad inside torch.vmap");
 
-  edge_list roots;
+  // 我们回忆一下定义
+  edge_list roots;  // 就是反向传播的起点（根节点）
   roots.reserve(num_tensors);
-  variable_list grads;
+  variable_list grads; // 就是反向传播的梯度
   grads.reserve(num_tensors);
+
+  // 依据输入来配置roots和grads
   for (int i = 0; i < num_tensors; i++) {
+    // tensors是输入节点，即前向传播图的输出
     PyObject *_tensor = PyTuple_GET_ITEM(tensors, i);
     THPUtils_assert(THPVariable_Check(_tensor), "element %d of tensors "
         "tuple is not a Tensor", i);
@@ -193,10 +199,11 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
         "vmapped tensors (output ", i, " is being vmapped over). Please "
         "call autograd.grad() outside torch.vmap or file a bug report "
         "with your use case.")
+    // 得到 gradient_edge = Edge(grad_fn(), output_nr())
     auto gradient_edge = torch::autograd::impl::gradient_edge(variable);
     THPUtils_assert(gradient_edge.function,
         "element %d of tensors does not require grad and does not have a grad_fn", i);
-    roots.push_back(std::move(gradient_edge));
+    roots.push_back(std::move(gradient_edge));  // root增加一个Edge
 
     PyObject *grad = PyTuple_GET_ITEM(grad_tensors, i);
     if (THPVariable_Check(grad)) {
@@ -208,7 +215,7 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
             "will be ignored. In practice all computed gradients will still be correct "
             "according to regular tensor semantics.");
       }
-      grads.push_back(grad_var);
+      grads.push_back(grad_var); // 增加一个梯度
     } else {
       THPUtils_assert(grad == Py_None,
           "element %d of gradients tuple is not a Tensor or None", i);
@@ -217,10 +224,12 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
     }
   }
 
+  // 构建一个输出Edge列表
   std::vector<Edge> output_edges;
   if (inputs != nullptr) {
     int num_inputs = PyTuple_GET_SIZE(inputs);
     output_edges.reserve(num_inputs);
+    // 遍历输入列表
     for (int i = 0; i < num_inputs; ++i) {
       PyObject *input = PyTuple_GET_ITEM(inputs, i);
       THPUtils_assert(THPVariable_Check(input),
@@ -235,6 +244,7 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
       const auto output_nr = tensor.output_nr();
       auto grad_fn = tensor.grad_fn();
       if (!grad_fn) {
+        // 获取 grad_accumulator，用来判断是否是叶子节点
         grad_fn = torch::autograd::impl::try_get_grad_accumulator(tensor);
       }
       if (accumulate_grad) {
@@ -249,17 +259,23 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
         // We initialize an edge pointing to a non-nullptr Node so nodes in the graph
         // (e.g., mul when an operand is scalar) that have edges pointing to nullptr
         // don't get erroneously assigned `needed = True` in exec_info.
-        output_edges.emplace_back(std::make_shared<Identity>(), 0);
+        // 说明是叶子节点
+        output_edges.emplace_back(std::make_shared<Identity>(), 0); // 叶子节点
       } else {
-        output_edges.emplace_back(grad_fn, output_nr);
+        // 是中间节点
+        output_edges.emplace_back(grad_fn, output_nr); // 非叶子节点
       }
     }
   }
 
+  // 现在，roots是包含有(前向传播输出节点的grad_fn_, 0)的vector。
+  // grads 是前向传播产生的梯度，如果没有配置，则初始化为(tensor(1.),)
+  // output_edges 是依据前向传播输入节点 input 构建的后向传播输出边
   variable_list outputs;
   {
     pybind11::gil_scoped_release no_gil;
     auto& engine = python::PythonEngine::get_python_engine();
+    // 进入引擎执行
     outputs = engine.execute(roots, grads, keep_graph, create_graph, accumulate_grad, output_edges);
   }
 
@@ -314,7 +330,7 @@ PyObject *THPEngine_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
 static struct PyMethodDef THPEngine_methods[] = {
   {(char*)"run_backward",
-    castPyCFunctionWithKeywords(THPEngine_run_backward),
+    castPyCFunctionWithKeywords(THPEngine_run_backward), // 与Python对应
     METH_VARARGS | METH_KEYWORDS, nullptr},
   {(char*)"queue_callback", THPEngine_queue_callback, METH_O, nullptr},
   {(char*)"is_checkpoint_valid", THPEngine_is_checkpoint_valid, METH_NOARGS, nullptr},
@@ -379,6 +395,8 @@ bool THPEngine_initModule(PyObject *module)
   if (PyType_Ready(&THPEngineType) < 0)
     return false;
   Py_INCREF(&THPEngineType);
+
+  // 为 Python 注册了引擎
   PyModule_AddObject(module, "_ImperativeEngine", (PyObject *)&THPEngineType);
   set_default_engine_stub(python::PythonEngine::get_python_engine);
   return true;
