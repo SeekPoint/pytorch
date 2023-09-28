@@ -1,0 +1,984 @@
+PyTorch如何实现前向传播(1) --- 基础类(上)
+
+https://www.cnblogs.com/rossiXYZ/p/15421453.html
+
+目录
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+0x00 摘要
+0x01 总体逻辑
+0x02 废弃类
+2.1 Variable
+2.2 Function
+0x03 Tensor
+3.1 定义 in python
+3.2 查找定义
+3.2.1 Tensor
+3.2.2 _TensorBase
+3.3 转换
+3.3.1 Python 导入
+3.3.2 C++ 导出 & 初始化
+3.3.2.1 共享库入口
+3.3.2.2 initModule
+3.3.2.3 注册TensorBase
+3.4 next_functions 设置
+3.5 初始化autograd
+3.5.1 扩展
+3.5.2 addClass
+3.5.2.1 accumulate_grad_properties
+3.5.2.3 createForwardFunctionPyTypeObject
+3.5.2.4 next_functions
+3.5.3 next_functions 性质
+0xFF 参考
+
+
+0x00 摘要
+本系列将通过大概十篇左右文章来分析 PyTorch 的自动微分功能如何实现。
+本文是前向传播的第一篇，介绍自动微分（梯度计算）所涉及的部分 PyTorch 基础类。因为字数太多（1万两千字），所以拆分成上下两篇。
+
+系列前几篇连接如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+深度学习利器之自动微分(3) --- 示例解读
+
+0x01 总体逻辑
+为了行文完整，我们从前文结尾处摘取了总体逻辑关系如下。
+
+如果从计算图角度来看前向计算的过程，就是在构建图和执行图。"构建图"描述的是节点运算之间的关系。
+"执行图"则是在会话中执行这个运算关系，就是张量在计算图之中进行前向传播的过程。
+
+前向计算依赖一些基础类，在具体分析前向传播之前，我们先要看看这些基础类之间的逻辑关系。
+从DAG角度来分析 PyTorch 这个系统，其具体逻辑如下。
+
+    图表示计算任务。PyTorch把计算都当作是一种有向无环图，或者说是计算图，但这是一种虚拟的图，代码中没有真实的数据结构。
+
+    计算图由节点（Node）和边（Edge）组成。
+
+    节点（Node）代表了运算操作。
+
+        一个节点通过边来获得 0 个或多个 Tensor，节点执行计算之后会产生 0 个或多个 Tensor。
+
+        节点的成员变量 next_functions 是一个 tuple 列表，此列表就代表本节点要输出到哪些其他 Function。
+        列表个数就是这个 grad_fn 的 Edge 数目，列表之中每一个 tuple 对应一条 Edge 信息，
+        内容就是 (Edge.function, Edge.input_nr)。
+
+    边（Edge）就是运算操作之间的流向关系。
+
+        Edge.function ：表示此 Edge 需要输出到哪一个其他 Function。
+
+        Edge.input_nr ：指定本 Edge 是 Function 的第几个输入。
+
+    使用张量（ Tensor） 表示数据，就是在节点间流动的数据，如果没有数据，计算图就没有任何意义。
+
+具体可以参见下图：
+
++---------------------+              +----------------------+
+| SubBackward0        |              | PowBackward0         |
+|                     |      Edge    |                      |  Edge
+|   next_functions  +-----+--------> |     next_functions +----------> ...
+|                     |   |          |                      |
++---------------------+   |          +----------------------+
+                          |
+                          |
+                          |          +----------------------+
+                          |  Edge    | MulBackward0         |
+                          +--------> |                      |  Edge
+                                     |     next_functions +----------> ...
+                                     |                      |
+                                     +----------------------+
+0x02 废弃类
+我们先看看几个已经废弃的类，这些类虽然废弃了，但是代码中依然有大量使用，网上也有大量文章与之相关，
+所以我们有必要先研究一下，我们在文章中可能会混用，还希望大家谅解。
+
+2.1 Variable
+早期版本之中，
+有Tensor和Variable两种数据结构来存储数据，Tensor只负责多维数组的运算。
+自动微分的职责是Variable完成的。Variable包含了与autograd有关的属性，可以是计算图中的叶子节点，也可以是计算时候产生的中间变量。
+
+在0.4.0版本之后，Tensor和Variable 的功能进行了合并，自动微分的使用就更加简单了。
+现在，Variable 其实就是Tensor，只是为了向后兼容，才保留这个名字。
+
+Variable (deprecated)
+^^^^^^^^^^^^^^^^^^^^^
+
+.. warning::
+    The Variable API has been deprecated: Variables are no longer necessary to
+    use autograd with tensors. Autograd automatically supports Tensors with
+    ``requires_grad`` set to ``True``. Below please find a quick guide on what
+    has changed:
+
+    - ``Variable(tensor)`` and ``Variable(tensor, requires_grad)`` still work as expected,
+      but they return Tensors instead of Variables.
+    - ``var.data`` is the same thing as ``tensor.data``.
+
+Variable 的定义在：torch/csrc/autograd/variable.h，我们可以看看注释中 "Gradient Edges" 的相关部分。
+可以看出来，"Variable" 具有"gradient_edge"的概念，这是自动梯度计算图的边，在反向传播之中用来把变量和梯度函数的特定输入联系起来。
+
+更准确地说，这个梯度函数可以是两个函数之一：
+
+    grad_fn，如果variable 在图的内部。这是产生梯度变量的梯度函数。
+    grad_accumulator，如果变量是一个叶子节点，它将一个标量梯度值累加到它的'grad'变量之中。
+
+namespace torch { namespace autograd {
+
+/// `Variable` is exactly the same as `Tensor` (i.e. we have `using Variable = at::Tensor`).
+/// This means you can perform all the usual mathematical and other
+/// operations you can perform on `Tensor`s also on `Variable`s.
+///
+/// The only reason we are keeping the `Variable` class is backward compatibility
+/// with external user's legacy C++ frontend code. Our intention is to eliminate
+/// the `Variable` class in the near future.
+using Variable = at::Tensor;
+
+} // namespace autograd
+} // namespace torch
+
+///                              Gradient Edges
+///~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// Furthermore, `Variable`s have the notion of a `gradient_edge`, which is the
+/// edge in the autograd graph that connects the variable to a particular input
+/// of the gradient function that will be invoked with the variable during the
+/// backward pass. More precisely, this gradient function can be one of two
+/// things:
+/// 1. A `grad_fn`, if the variable is in the interior of the graph. This is the
+///    gradient of the function that produced the variable.
+/// 2. A `grad_accumulator`, if the variable is a leaf, which accumulates a
+///    scalar gradient value into its `grad` variable.
+
+2.2 Function
+我们结合前面 Variable 的概念来看，Function 指的是在计算图中某个节点所进行的运算，比如加减乘除卷积等等。
+每当对Tensor施加一个运算的时候，就会产生一个Function对象，它记录运算的输入，记录运算的发生，产生运算的结果。
+Tensor使用.grad_fn属性记录这个计算图的入口。
+
+Function 内部有 forward() 和 backward() 两个方法，分别应用于正向、反向传播。
+反向传播过程中，autograd引擎会按照逆序，通过Function的backward依次计算梯度。
+
+在最新的代码中，Function 已经被 Node 类替代，这样是为了更好的表达 节点 这个概念。
+但是因为旧代码中依然使用了 Function，所以我们可能会混用这两个概念。
+
+Function 定义如下：
+
+/// To use custom autograd operations, implement a Function subclass with
+/// static forward and backward functions:
+///
+/// `forward` can take as many arguments as you want and should return either a
+/// variable list or a Variable. Use of any direct Variable arguments will be
+/// registered in the graph but no vectors/sets or any other data structures
+/// will be traversed. You can use c10::optional<Tensor> as one of the arguments
+/// and it will be registered as a variable in the graph if the argument has a
+/// value. It should take a pointer to `torch::autograd::AutogradContext` as the
+/// first argument. Variables can be saved in the `ctx` using
+/// `ctx->save_for_backward`
+/// (see `torch::autograd::AutogradContext::save_for_backward`) and other data
+/// can be saved in the `ctx->saved_data` map
+/// (see `torch::autograd::AutogradContext::saved_data`)
+/// in the form of `<std::string, at::IValue>` pairs.
+///
+/// `backward` should take a pointer to `torch::autograd::AutogradContext`
+/// and a variable list containing as many Variables as there were outputs from
+/// `forward` as arguments. It should return as many Variables as there were
+/// inputs with each of them containing the gradient w.r.t. its corresponding
+/// input. Variables saved in `forward` can be accessed with
+/// `ctx->get_saved_variables` (see
+/// `torch::autograd::AutogradContext::get_saved_variables`) and other saved
+/// data can be accessed from `ctx->saved_data`.
+
+template <class T>
+struct TORCH_API Function {
+  // We need to use a different template parameter than T here because T will
+  // inherit from Function, and when Function<T> is instantiated, T::forward
+  // is not declared yet.
+  // The enable_if check is to ensure that the user doesn't explicitly provide
+  // the parameter X.
+  template<typename X=T, typename... Args>
+  static auto apply(Args&&... args) -> std::enable_if_t<std::is_same<X,T>::value, forward_t<X,Args...>>;
+};
+
+0x03 Tensor
+前面提到，计算图构成了前向/反向传播的结构基础，而Tensor张量 是 PyTorch 中构建计算图的基础之一。
+
+Tensor是PyTorch实现多维数组计算和自动微分的关键数据结构。
+
+Tensor类似于numpy的ndarray，可以对Tensor进行各种数学运算；
+当设置.requires_grad = True ，在Tensor之上进行的各种操作就会被记录下来，用于后续梯度计算。
+3.1 定义 in python
+我们看看第一个例子中运行时的Tensor，其中可以看到Tensor的成员变量。
+
+    Q = {Tensor}
+     data = {Tensor} tensor(-12.)
+     device = {device} cpu
+     dtype = {dtype} torch.float32
+     grad = {NoneType} None
+     grad_fn = {SubBackward0}
+      metadata = {dict: 0} {}
+      next_functions = {tuple: 2}
+       0 = {tuple: 2} (<MulBackward0 object at 0x000001F9547A5848>, 0)
+       1 = {tuple: 2} (<PowBackward0 object at 0x000001F9547A53C8>, 0)
+       __len__ = {int} 2
+      requires_grad = {bool} True
+     is_cuda = {bool} False
+     is_leaf = {bool} False
+     is_meta = {bool} False
+     is_mkldnn = {bool} False
+     is_mlc = {bool} False
+     is_quantized = {bool} False
+     is_sparse = {bool} False
+     is_sparse_csr = {bool} False
+     is_vulkan = {bool} False
+     is_xpu = {bool} False
+     layout = {layout} torch.strided
+     name = {NoneType} None
+     names = {tuple: 0} ()
+     ndim = {int} 0
+     output_nr = {int} 0
+     requires_grad = {bool} True
+     shape = {Size: 0} torch.Size([])
+
+我们看看其中的部分成员变量：
+
+    data：该张量的数据。
+
+    dtype ：该张量的数据类型。
+
+    device： 存放该张量的设备类型，比如 CPU 或者是 GPU。
+
+    grad：保存数据data对应的梯度，和数据data的形状一样。
+
+        PyTorch会自动追踪和记录对与张量的所有操作，当前向计算完成后调用.backward()方法会自动计算梯度并且将计算结果保存到grad属性中。
+
+        requires_grad = False时，grad为None。
+
+        梯度值不会自动清空，每次在backward计算时都需要将前一时刻的梯度归零，否则梯度值会一直累加。
+
+    grad_fn：指向一个Function对象。
+
+        这个Function对象用来在反向传播时候计算输入的梯度。
+
+        若本张量是非叶节点，则 Function 是向叶节点方向操作的反向传播函数，
+        比如例子里 O 节点对应的函数就是MulBackward，即乘法操作的反向函数；
+
+        若本张量是叶节点且requires_grad为True，则 grad_fn 是None。
+
+        grad_fn 有一个属性 next_functions，这是一个二维 tuple，
+        形式为( (函数1， 整数1)，(函数2，整数2), ..., (函数n，整数n) )。 后续我们会详细解释。
+
+    is_leaf：记录该张量是否是叶子节点 。
+
+        用户显式初始化的张量是叶子节点。
+
+        所有requires_grad=False的张量按照惯例也是叶子节点。
+
+        is_leaf 属性只有在需要求导的时候才有意义。
+        对于任意一个张量来说，我们可以用 tensor.is_leaf 来判断它是否是叶子张量（leaf tensor）。
+        在反向传播过程中，只有 is_leaf=True 的时候，需要求导张量的导数结果才会被保留下来。
+
+        对于叶子节点来说，其 grad_fn 属性都为空；
+        而对于非叶子结点来说，因为它们是通过一些操作生成的，所以其 grad_fn 不为空。
+
+    requires_grad : 设置为True则表示该Tensor需要求导，用于判断该tensor是否需要被跟踪并计算梯度。
+
+        requires_grad属性默认为False，也就是Tensor变量默认是不需要求导的。
+
+        如果一个节点的requires_grad是True，那么所有依赖它的节点的requires_grad也会是True。
+        换言之，如果一个节点依赖的所有节点都不需要求导，那么它的requires_grad也会是False。
+        因此在反向传播过程中，该节点所在的子图会被排除在计算过程之外。
+
+Python的定义其实只是C++世界定义的一个映射，我们接下来就看看在C++如何定义。
+
+3.2 查找定义
+我们逐级找找 Tensor的定义。
+
+首先来到：torch_C_VariableFunctions.pyi
+
+    def tensor(data: Any, dtype:
+        Optional[_dtype]=None, device: Union[_device, str, None]=None, requires_grad: _bool=False) -> Tensor: ...
+
+然后来到: torch/_tensor.py
+
+3.2.1 Tensor
+可以看到Tensor 的基类是 torch._C._TensorBase。
+
+    class Tensor(torch._C._TensorBase):
+
+3.2.2 _TensorBase
+_TensorBase 是动态生成的，代码在比如python_stubs\xxx\torch\_C\_TensorBase.py
+
+    class _TensorBase(object):
+
+我们在 torch/_C/__init__.pyi.in可以看到，torch._C._TensorBase 其实就是在 C++世界中定义的，但是需要导出到 python世界。
+
+    # Defined in torch/csrc/autograd/python_variable.cpp
+    class _TensorBase(metaclass=_TensorMeta):
+        requires_grad: _bool
+        shape: Size
+        data: Tensor
+        names: List[str]
+        device: _device
+        dtype: _dtype
+        layout: _layout
+        real: Tensor
+        imag: Tensor
+        T: Tensor
+        ndim: _int
+        output_nr: _int
+        _version: _int
+        _base: Optional[Tensor]
+        _cdata: _int
+        grad_fn: Any
+        _grad_fn: Any
+        _grad: Optional[Tensor]
+        _backward_hooks: Optional[Dict[_int, Callable[[Tensor], Optional[Tensor]]]]
+        ${tensor_method_hints}
+
+3.3 转换
+本文只是简略看看如何从C++世界转换到Python世界，在此处不做深入研究。
+
+3.3.1 Python 导入
+代码中引入 PyTorch 是通过 import torch 完成的。
+Import torch 的时候，按照Python规范，位于torch/__init__.py中的逻辑就会被执行，torch/__init__.py 的关键就是torch._C，
+代码如下：
+
+    from torch._C import *
+
+torch._C是C++编译出来的共享库文件，比如linux下的so文件。
+
+Tensor类就是继承自torch._C._TensorBase。导入了 torch._C就导入了torch._C._TensorBase，然后 torch.Tensor 就有了继承的基础。
+具体如下：
+
++---------------------------+
+|      import torch         |
++------------+--------------+
+             |
+             |
+             v
++------------+--------------+
+| torch/__init__.py         |
+|                           |
+|    from torch._C impor *  |
+|                           |
++------------+--------------+
+             |
+             |
+             v
++------------+--------------+
+|  torch._C._TensorBase     |
++---------------------------+
+所以我们接下来要看看 torch._C 是怎么来从 C++ 世界中导出到 python的。
+
+3.3.2 C++ 导出 & 初始化
+接下来我们看看C++世界如何导出了TensorBase。
+要在Python中能够import torch._C，则必须要使用Python的扩展规范来导出这个符号。
+
+3.3.2.1 共享库入口
+对于一个 Python module，共享库需要实现 PyInit_modulename 符号来作为import时候的逻辑入口。
+对于PyTorch来说这个modulename 是_C。
+在torch/csrc/stub.cpp中 实现了PyInit__C这个函数。
+
+    #include <Python.h>
+    extern PyObject* initModule();
+    PyMODINIT_FUNC PyInit__C()
+    {
+      return initModule();
+    }
+
+如果使用 JIT，则我们直接看 torch/csrc/deploy/interpreter/interpreter_impl.cpp，这里省略了众多代码。
+
+    struct ConcreteInterpreterImpl : public torch::deploy::InterpreterImpl {
+      ConcreteInterpreterImpl() {
+        PyImport_AppendInittab("torch._C", initModule);
+    }
+这就是解释器的代码，里面也调用了 initModule。
+
+3.3.2.2 initModule
+initModule函数是对python环境中的torch module进行初始化。其定义在 torch/csrc/Module.cpp，此处省略了众多代码。
+
+PyObject* initModule() {
+  THPSize_init(module);
+  THPDtype_init(module);
+  THPDTypeInfo_init(module);
+  THPLayout_init(module);
+  THPMemoryFormat_init(module);
+  THPQScheme_init(module);
+  THPDevice_init(module);
+  THPStream_init(module);
+  ASSERT_TRUE(THPVariable_initModule(module)); // 继续分析这里，其中会设定_TensorBase
+  ASSERT_TRUE(THPFunction_initModule(module));
+  ASSERT_TRUE(THPEngine_initModule(module));
+}
+
+initModule 调用 THPVariable_initModule，代码在 torch/csrc/autograd/python_variable.cpp，这里会设定_TensorBase。
+
+bool THPVariable_initModule(PyObject *module)
+{
+  THPVariableMetaType.tp_base = &PyType_Type;
+  if (PyType_Ready(&THPVariableMetaType) < 0)
+    return false;
+  Py_INCREF(&THPVariableMetaType);
+  PyModule_AddObject(module, "_TensorMeta",   (PyObject *)&THPVariableMetaType);
+
+  static std::vector<PyMethodDef> methods;
+  THPUtils_addPyMethodDefs(methods, torch::autograd::variable_methods);
+  THPUtils_addPyMethodDefs(methods, extra_methods);
+  THPVariableType.tp_methods = methods.data();
+  if (PyType_Ready(&THPVariableType) < 0)
+    return false;
+  Py_INCREF(&THPVariableType);
+
+  // 设定_TensorBase
+  PyModule_AddObject(module, "_TensorBase",   (PyObject *)&THPVariableType);
+  torch::autograd::initTorchFunctions(module);
+  torch::autograd::initTensorImplConversion(module);
+  return true;
+}
+
+3.3.2.3 注册TensorBase
+执行THPVariable_initModule的时候，使用如下代码来将 THPVariableType 注册成为torch._C._TensorBase。
+所以torch._C._TensorBase就是c++中的 THPVariableType。
+
+    PyModule_AddObject(module, "_TensorBase",   (PyObject *)&THPVariableType);
+
+我们来看看 THPVariableType。里面定义了很多函数。
+
+PyTypeObject THPVariableType = {
+  PyVarObject_HEAD_INIT(&THPVariableMetaType, 0)
+  "torch._C._TensorBase",                      /* tp_name */
+  sizeof(THPVariable),                         /* tp_basicsize */
+  0,                                           /* tp_itemsize */
+  (destructor)THPVariable_dealloc,             /* tp_dealloc */
+  // 省略......
+  nullptr,                                     /* tp_methods */
+  nullptr,                                     /* tp_members */
+
+  THPVariable_properties,                      /* tp_getset */  // 重点在这里，注册了函数
+
+  // 省略......
+  THPVariable_pynew,                           /* tp_new */
+};
+
+现在我们注册了torch._C._TensorBase这个Python类，下面就要往这个类上注册一些函数。
+
+tp_getset 是Python虚拟机类机制里面的一个函数集，就是一个 THPVariable_properties。
+以下是 _TenseBase 的函数集，我们可以看到 grad_fn 和 grad 这两个熟悉的面孔。
+
+static struct PyGetSetDef THPVariable_properties[] = {
+  {"T", (getter)THPVariable_get_T, nullptr, nullptr, nullptr},
+  {"_cdata", (getter)THPVariable_get_cdata, nullptr, nullptr, nullptr},
+  {"_version", (getter)THPVariable_get_version, nullptr, nullptr, nullptr},
+  {"grad_fn", (getter)THPVariable_get_grad_fn, nullptr, nullptr, nullptr},
+  {"_grad_fn", (getter)THPVariable_get_grad_fn, (setter)THPVariable_set_grad_fn, nullptr, nullptr},
+  {"is_leaf", (getter)THPVariable_is_leaf, nullptr, nullptr, nullptr},
+  {"data", (getter)THPVariable_get_data, (setter)THPVariable_set_data, nullptr, nullptr},
+  {"_grad", (getter)THPVariable_get_grad, (setter)THPVariable_set_grad, nullptr, nullptr}, // Allows the python class to override .grad
+  {"grad", (getter)THPVariable_get_grad, (setter)THPVariable_set_grad, nullptr, nullptr},
+  {"_base", (getter)THPVariable_get_base, nullptr, nullptr, nullptr},
+  {"volatile", (getter)THPVariable_get_volatile, (setter)THPVariable_set_volatile, nullptr, nullptr},
+  {"output_nr", (getter)THPVariable_get_output_nr, nullptr, nullptr, nullptr},
+  {"requires_grad", (getter)THPVariable_get_requires_grad, (setter)THPVariable_set_requires_grad, nullptr, nullptr},
+  {"_backward_hooks", (getter)THPVariable_get_backwards_hooks, (setter)THPVariable_set_backwards_hooks, nullptr, nullptr},
+  {"name", (getter)THPVariable_get_name, nullptr, nullptr, nullptr},
+  {"shape", (getter)THPVariable_get_shape, nullptr, nullptr, nullptr},
+  {"is_cuda", (getter)THPVariable_is_cuda, nullptr, nullptr, nullptr},
+  {"is_xpu", (getter)THPVariable_is_xpu, nullptr, nullptr, nullptr},
+  {"is_sparse", (getter)THPVariable_is_sparse, nullptr, nullptr, nullptr},
+  {"is_sparse_csr", (getter)THPVariable_is_sparse_csr, nullptr, nullptr, nullptr},
+  {"is_mkldnn", (getter)THPVariable_is_mkldnn, nullptr, nullptr, nullptr},
+  {"is_mlc", (getter)THPVariable_is_mlc, nullptr, nullptr, nullptr},
+  {"is_vulkan", (getter)THPVariable_is_vulkan, nullptr, nullptr, nullptr},
+  {"is_complex", (getter)THPVariable_is_complex, nullptr, nullptr, nullptr},
+  {"is_quantized", (getter)THPVariable_is_quantized, nullptr, nullptr, nullptr},
+  {"is_meta", (getter)THPVariable_is_meta, nullptr, nullptr, nullptr},
+  {"dtype", (getter)THPVariable_dtype, nullptr, nullptr, nullptr},
+  {"layout", (getter)THPVariable_layout, nullptr, nullptr, nullptr},
+  {"device", (getter)THPVariable_device, nullptr, nullptr, nullptr},
+  {"ndim", (getter)THPVariable_get_ndim, nullptr, nullptr, nullptr},
+  {"names", (getter)THPVariable_get_names, (setter)THPVariable_set_names, nullptr, nullptr},
+  {"real", (getter)THPVariable_get_real, (setter)THPVariable_set_real, nullptr, nullptr},
+  {"imag", (getter)THPVariable_get_imag, (setter)THPVariable_set_imag, nullptr, nullptr},
+  {nullptr}
+};
+
+这个初始化逻辑和映射逻辑如下：
+
+                       Python     +     C++                    +---------------+
+                                  |                            |               |
++---------------------------+     |                            |   PyInit__C   |
+|      import torch         |     |                            |               |
++------------+--------------+     |                            +-------+-------+
+             |                    |                                    |
+             |                    |                                    |
+             v                    |                                    |
++------------+--------------+     |                                    v
+| torch/__init__.py         |     |                            +-------+-------+
+|                           |     |                            |  initModule   |
+|    from torch._C impor *  |     |                            +-------+-------+
+|                           |     |                                    |
++------------+--------------+     |                                    |
+             |                    |                                    |
+             |                    |                                    v
+             |                    |                     +--------------+----------------+
+             |                    |                     |                               |
+             |                    |                     | THPVariable_initModule(module)|
+             |                    |                     |                               |
+             |                    |                     +--------------+----------------+
+             |                    |                                    |
+             |                    |                                    |
+             |                    |                                    |
+             |                    |                                    v
+             |                    |    +-------------------------------+---------------------------------------+
+             |                    |    |                                                                       |
+             |                    |    | PyModule_AddObject(module, "_TensorBase",(PyObject *)&THPVariableType)|
+             |                    |    |                                                                       |
+             |                    |    +-------------------------------+---------------------------------------+
+             |                    |                                    |
+             |                    |                                    |
+             |                    |                                    |
+             |                    |                                    v
+             |                    |                        +-----------+--------------+    +------------------------------------------------------+
+             |                    |                        | THPVariableType          |    | THPVariable_properties+                              |
+             v                    |                        |                          |    |                                                      |
++------------+--------------+     |                        |                          |    |                                                      |
+|  torch._C._TensorBase     | <----------------------->    |              tp_getset -----> |  { grad, grad_fn, T, _cdata, is_leaf, output_nr ...} |
++---------------------------+     |                        |                          |    |                                                      |
+                                  |                        +--------------------------+    +------------------------------------------------------+
+                                  +
+
+手机如下：01.png
+
+
+
+3.4 next_functions 设置
+因为 next_functions 是精髓，而 next_functions 是在 autograd 之中设置，于是我们需要看看初始化autograd 过程。
+然后才能知道如何设置 next_functions。
+
+3.5 初始化autograd
+我们以 AccumulateGrad 为例来看看如何初始化。
+
+首先看看 AccumulateGrad 的定义，这里省略了 AccumulateGrad 部分成员函数。
+从构建函数可看出来，一个AccumulateGrad实例必须用一个Variable构建，内部成员变量就是Variable variable。
+apply调用接收一个Variable list 实例，这和Variable grad_accumulator_相关。
+
+struct TORCH_API AccumulateGrad : public Node {
+  explicit AccumulateGrad(Variable variable_);
+  variable_list apply(variable_list&& grads) override;
+  Variable variable;
+};
+
+旧版本之中，定义如下：
+
+struct AccumulateGrad : public Function {
+  explicit AccumulateGrad(Variable variable_);
+  variable_list apply(variable_list&& grads) override;
+  Variable variable;
+};
+
+接下来看看如何初始化 AccumulateGrad。
+
+3.5.1 扩展
+在initModule()函数初始化完毕之后，import torch 的初始化工作还没有结束。
+python的初始化脚本还要继续处理很多模块，比如torch/__init__.py 文件中有：
+
+# Check to see if we can load C extensions, and if not provide some guidance
+# on what the problem might be.
+try:
+    # _initExtension is chosen (arbitrarily) as a sentinel.
+    from torch._C import _initExtension
+_initExtension 会调用到 _C._initExtension(manager_path())。_C._initExtension对应的是 THPModule_initExtension。
+
+static PyMethodDef TorchMethods[] = {
+  {"_initExtension",  THPModule_initExtension, METH_O, nullptr},
+  // ....
+}
+
+THPModule_initExtension 函数会调用THPAutograd_initFunctions，该方法初始化了自动微分系统。
+
+// Callback for python part. Used for additional initialization of python classes
+static PyObject * THPModule_initExtension(PyObject *_unused, PyObject *shm_manager_path)
+{
+  // 省略代码
+
+  THPQInt8Storage_postInit(module);
+  THPQInt32Storage_postInit(module);
+  THPBFloat16Storage_postInit(module);
+  THPComplexDoubleStorage_postInit(module);
+  THPComplexFloatStorage_postInit(module);
+
+  THPAutograd_initFunctions();  // 这里调用,初始化了微分系统
+
+  // 省略代码
+}
+
+THPAutograd_initFunctions 就是在 _TensorBase 基础之上，再加入新的属性或者函数集。
+**这里会调用了addClass 方法，把 AccumulateGrad 和 accumulate_grad_properties 联系在一起 **。
+
+void THPAutograd_initFunctions()
+{
+  THPObjectPtr module(PyModule_New("torch._C._functions"));
+  if (!module) throw python_error();
+
+  static PyTypeObject AccumulateGradClass;
+  addClass<AccumulateGrad, NoCtor>(module, AccumulateGradClass, "AccumulateGrad", accumulate_grad_properties); // AccumulateGrad 相关
+
+  static PyTypeObject CopyBackwardsClass;
+  addClass<CopyBackwards, NoCtor>(module, CopyBackwardsClass, "CopyBackwards");
+
+  // 省略其他
+}
+
+3.5.2 addClass
+addClass 会调用到 registerCppFunction 注册 type（ function_properties），
+我们这里参数 function_properties 就是 accumulate_grad_properties，type 就是 AccumulateGradClass。
+
+template<typename C, typename T>
+static void addClass(PyObject* module, PyTypeObject& type, const char* name,
+  PyGetSetDef* function_properties=nullptr, PyMethodDef* function_methods=nullptr)
+{
+  // 这里设置了 accumulate_grad_properties
+  createForwardFunctionPyTypeObject<T>(type, name, function_properties, function_methods);
+  Py_INCREF(&type);
+  PyModule_AddObject(module, name, (PyObject*)&type);
+  // 注册了 type
+  registerCppFunction(typeid(C), &type);
+}
+
+这里有两组操作，一个是 createForwardFunctionPyTypeObject，一个是 registerCppFunction。
+我们逐一看看。我们先看 registerCppFunction，然后看 createForwardFunctionPyTypeObject。
+
+3.5.2.1 accumulate_grad_properties
+前面提到，addClass 方法，把 AccumulateGrad 和 accumulate_grad_properties 联系在一起。
+具体来说，就是通过 createForwardFunctionPyTypeObject 把 accumulate_grad_properties 联系起来。
+
+accumulate_grad_properties 定义在 torch/csrc/autograd/functions/init.cpp
+
+static struct PyGetSetDef accumulate_grad_properties[] = {
+  THP_FUNCTION_DEFAULT_PROPERTIES,
+  {(char*)"variable", accumulateGradVar, nullptr, nullptr, nullptr},
+  {nullptr}
+};
+
+THP_FUNCTION_DEFAULT_PROPERTIES 的定义在 torch/csrc/autograd/python_cpp_function.h
+
+#define THP_FUNCTION_DEFAULT_PROPERTIES \
+  {(char*)"next_functions", (getter)THPCppFunction_next_functions, nullptr, nullptr, nullptr}, \
+  {(char*)"requires_grad", (getter)THPCppFunction_requires_grad, nullptr, nullptr, nullptr}, \
+  {(char*)"metadata", (getter)THPCppFunction_metadata, nullptr, nullptr, nullptr}
+
+PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook);
+PyObject* THPCppFunction_metadata(THPCppFunction *self, void *_unused);
+PyObject* THPCppFunction_requires_grad(THPCppFunction* self, void *_unused);
+
+所以，accumulate_grad_properties 就是拓展了 THP_FUNCTION_DEFAULT_PROPERTIES 和 accumulateGradVar。
+
+static struct PyGetSetDef accumulate_grad_properties[] = {
+  // 这里是我们关注的
+  {(char*)"next_functions", (getter)THPCppFunction_next_functions, nullptr, nullptr, nullptr},
+  {(char*)"requires_grad", (getter)THPCppFunction_requires_grad, nullptr, nullptr, nullptr},
+  {(char*)"metadata", (getter)THPCppFunction_metadata, nullptr, nullptr, nullptr}
+  {(char*)"variable", accumulateGradVar, nullptr, nullptr, nullptr},
+  {nullptr}
+};
+
+具体逻辑如下，这里面就有 THPCppFunction_next_functions:
+
++-----------------------------------------------------------------------+
+|accumulate_grad_properties                                             |
+|                                                                       |
+|                                                                       |
+|                                                                       |
+|              "variable", accumulateGradVar                            |
+|                                                                       |
+|                                                                       |
+|              "next_functions", (getter)THPCppFunction_next_functions  |
+|                                                                       |
+|                                                                       |
+|              "requires_grad", (getter)THPCppFunction_requires_grad    |
+|                                                                       |
+|                                                                       |
+|              "metadata", (getter)THPCppFunction_metadata              |
+|                                                                       |
++-----------------------------------------------------------------------+
+
+3.5.2.3 createForwardFunctionPyTypeObject
+createForwardFunctionPyTypeObject 是用来设置accumulate_grad_properties，具体函数如下：
+
+template<typename Ctor>
+PyTypeObject* createForwardFunctionPyTypeObject(PyTypeObject& type, const char* name,
+  PyGetSetDef* function_properties=nullptr, PyMethodDef* function_methods=nullptr)
+{
+  type.tp_new = &CppFunction_pynew<Ctor>;
+  return _initFunctionPyTypeObject(type, name, function_properties, function_methods);
+}
+_initFunctionPyTypeObject 就是把 function_properties 设置到 tp_getset 之上。
+
+PyTypeObject* _initFunctionPyTypeObject(PyTypeObject& type, const char* name,
+  PyGetSetDef* function_properties, PyMethodDef* function_methods)
+{
+  type.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC;
+  type.tp_name = name;
+  type.tp_basicsize = sizeof(THPCppFunction);
+  type.tp_call = THPCppFunction_call;
+  type.tp_methods = function_methods ? function_methods : default_methods;
+  // 这里把 function_properties 设置到 tp_getset 之上
+  type.tp_getset = function_properties ? function_properties : default_properties;
+  type.tp_dealloc = THPCppFunction_dealloc;
+  type.tp_traverse = THPCppFunction_traverse;
+  type.tp_clear = THPCppFunction_clear;
+  if (PyType_Ready(&type) < 0) {
+    auto msg = std::string("Unable to instantiate PyTypeObject for ") + name;
+    throw std::runtime_error(msg);
+  }
+  return &type;
+}
+
+所以就把 THPCppFunction_next_functions 添加到了 AccumulateGradClass 的 next_functions 之上。
+即 AccumulateGradClass 有一个函数集，其中 next_functions 对应了 THPCppFunction_next_functions。
+
++---------------------+
+| AccumulateGradClass |
+|                     |
+|       tp_getset     |
+|           +         |
+|           |         |
++---------------------+
+            |
+            |
+            v
++-----------+-----------------------------------------------------------+
+|accumulate_grad_properties                                             |
+|                                                                       |
+|                                                                       |
+|                                                                       |
+|              "variable", accumulateGradVar                            |
+|                                                                       |
+|                                                                       |
+|              "next_functions", (getter)THPCppFunction_next_functions  |
+|                                                                       |
+|                                                                       |
+|              "requires_grad", (getter)THPCppFunction_requires_grad    |
+|                                                                       |
+|                                                                       |
+|              "metadata", (getter)THPCppFunction_metadata              |
+|                                                                       |
++-----------------------------------------------------------------------+
+我们回忆一下前面提到的 _TenseBase 来对比：
+
+tp_getset 是Python虚拟机类机制里面的一个函数集，就是一个 THPVariable_properties。
+
+    AccumulateGradClass 设置的是 accumulate_grad_properties。
+
+    _TenseBase 设置的是 THPVariable_properties。
+
+以下是 _TenseBase 的函数集（我们省略了很多）。
+
+static struct PyGetSetDef THPVariable_properties[] = {
+  {"grad_fn", (getter)THPVariable_get_grad_fn, nullptr, nullptr, nullptr},
+  {"_grad_fn", (getter)THPVariable_get_grad_fn, (setter)THPVariable_set_grad_fn, nullptr, nullptr},
+  {"is_leaf", (getter)THPVariable_is_leaf, nullptr, nullptr, nullptr},
+  {"data", (getter)THPVariable_get_data, (setter)THPVariable_set_data, nullptr, nullptr},
+  {"_grad", (getter)THPVariable_get_grad, (setter)THPVariable_set_grad, nullptr, nullptr}, // Allows the python class to override .grad
+  {"grad", (getter)THPVariable_get_grad, (setter)THPVariable_set_grad, nullptr, nullptr},
+  {"_base", (getter)THPVariable_get_base, nullptr, nullptr, nullptr},
+  {"output_nr", (getter)THPVariable_get_output_nr, nullptr, nullptr, nullptr},
+  {"requires_grad", (getter)THPVariable_get_requires_grad, (setter)THPVariable_set_requires_grad, nullptr, nullptr},
+  {"_backward_hooks", (getter)THPVariable_get_backwards_hooks,
+  .....
+};
+
+至此，业务逻辑如下：
+
+                                Python    +   C++
+                                          |
++--------------------------------------+  |   +---------------------------+
+| torch/__init__.py                    |  |   |                           |
+|                                      |  |   |  THPModule_initExtension  |
+|  from torch._C import _initExtension |  |   |                           |
+|                                      |  |   +--------------+------------+
++-------------------+------------------+  |                  |
+                    |                     |                  |
+                    |                     |                  v
+                    |                     |  +---------------+--------------+
+                    |                     |  |                              |
+                    |                     |  |  THPAutograd_initFunctions() |
+                    |                     |  |                              |
+                    |                     |  +---------------+--------------+
+                    |                     |                  |
+                    |                     |                  |
+                    |                     |                  v
+                    |                     |  +---------------+-------------------------------------------+
+                    |                     |  |                                                           |
+                    |                     |  | addClass<AccumulateGrad, NoCtor>(module,                  |
+                    |  import             |  | 	                             AccumulateGradClass,        |
+                    |                     |  | 	                             "AccumulateGrad",           |
+                    |                     |  | 	                             accumulate_grad_properties) |
+                    |                     |  |                                                           |
+                    |                     |  +--------------+--------------------------------------------+
+                    |                     |                 |
+                    |                     |                 |  register
+                    v                     |                 v
+                                          |                                                               +----------------------------------------------------------+
+        +----------------------+          |     +--------------------+       +---------------------+      |accumulate_grad_properties                                |
+        |                      |          |     |                    |       | AccumulateGradClass |      |                                                          |
+        |   AccumulateGrad     | <------------> |   AccumulateGrad   +-----> |                     |      |  "variable", accumulateGradVar                           |
+        |                      |          |     |                    |       |       tp_getset +------->  |                                                          |
+        |                      |          |     |                    |       |                     |      |  "next_functions", (getter)THPCppFunction_next_functions |
+        +----------------------+          |     +--------------------+       |                     |      |                                                          |
+                                          |                                  +---------------------+      |  "requires_grad", (getter)THPCppFunction_requires_grad   |
+                                          |                                                               |                                                          |
+                                          |                                                               |  "metadata", (getter)THPCppFunction_metadata             |
+                                          |                                                               |                                                          |
+                                          |                                                               +----------------------------------------------------------+
+
+手机如下：02.png
+
+
+
+3.5.2.4 next_functions
+THPCppFunction_next_functions 定义在 torch/csrc/autograd/python_cpp_function.cpp，
+其就是遍历 next_edges_，然后提取出一个tuple列表，每个tuple 内容就是 (Edge.function, Edge.input_nr)，
+最后作为 next_functions 进行返回。
+
+PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook)
+{
+  const auto num_next = self->cdata->num_outputs();
+  THPObjectPtr py_functions(PyTuple_New(num_next));
+  if (!py_functions) return nullptr;
+  for (size_t i = 0; i < num_next; ++i) { // 遍历
+    auto& c_tuple = self->cdata->next_edge(i); // 获取 Edge
+    THPObjectPtr tuple(PyTuple_New(2));
+    if (!tuple) return nullptr;
+    PyObject *py_fn = functionToPyObject(c_tuple.function); // py_fn 就是 Edge.function
+    if (!py_fn) return nullptr;
+    PyTuple_SET_ITEM(tuple.get(), 0, py_fn);
+    PyObject *py_idx = THPUtils_packUInt32(c_tuple.input_nr); // py_idx 就是 Edge.input_nr
+    if (!py_idx) return nullptr;
+    PyTuple_SET_ITEM(tuple.get(), 1, py_idx);
+    // tuple 就是 (py_fn, py_idx)，就是 (Edge.function, Edge.input_nr)
+    PyTuple_SET_ITEM(py_functions.get(), i, tuple.release()); // 设置 py_functions的第几个item
+  }
+  return py_functions.release(); // 返回tuple
+}
+
+next_edge 定义在 torch/csrc/autograd/function.h，
+其是 Node 的成员函数，而 返回的是 Edge 列表，而 AccumulateGrad 就是 Node 的派生类。
+
+struct TORCH_API Node : std::enable_shared_from_this<Node> {
+
+  const Edge& next_edge(size_t index) const noexcept {
+    return next_edges_[index];
+  }
+
+  edge_list next_edges_;   // 前向过程中的输入variable，在前向过程中与该算子相关联的边
+}
+
+Edge 定义如下：
+
+struct Edge {
+  /// The function this `Edge` points to.
+  std::shared_ptr<Node> function; // 指向目标的Node
+
+  /// The identifier of a particular input to the function.
+  uint32_t input_nr; //指定本Edge是function的第几个输入
+};
+
+3.5.3 next_functions 性质
+所以我们以 AccumulateGrad 为例总结以下。
+
+    grad_fn 有一个属性 next_functions ，这是一个二维的tuple，
+    形式为( (函数1， 整数1)，(函数2，整数2), ..., (函数N，整数N) )。
+
+    next_functions 是一个 tuple 列表，列表个数就是这个 grad_fn 的 Edge 数目，列表之中每一个 tuple 对应一条 Edge 信息，
+    内容就是 (Edge.function, Edge.input_nr)。这个列表是由 THPCppFunction_next_functions 生成的。
+
+    AccumulateGrad 的 next_functions 指向的就是一个 tuple 列表（就是下图中的 2），
+    这个列表来自 AccumulateGradClass（就是下图中的 1）。
+    反向传播时候，顺着这个 next_functions 就可以逐次计算梯度。
+
+大致如下：
+
++-----------------+   +-----------------------+        +----------------------+    +---------------------+
+|  Tensor         |   | SubBackward0          |        | PowBackward0         |    | AccumulateGrad      |
+|                 |   |                       |        |                      |    |                     |
+|       grad_fn +---->+     next_functions  +-----+--> |     next_functions +----> |    next_functions +----> {}
+|                 |   |                       |   |    |                      |    |                     |
++-----------------+   +-----------------------+   |    +----------------------+    +---------------------+
+                                                  |
+                                                  |
+                                                  |    +----------------------+    +----------------------+    +---------------------+
+                                                  |    | MulBackward0         |    | PermuteBackward      |    | AccumulateGrad      |
+                                                  +--> |                      |    |                      |    |                     |
+                                                       |     next_functions +----> |     next_functions +----> |    next_functions +-----+
+                                                       |                      |    |                      |    |                     |   |
++---------------------+                               ++-------------------- -+    +----------------------+    +---------------------+   |
+| AccumulateGradClass |                                                                                                                  |
+|                     |                                                                                                                  |
+|       tp_getset     |                                                                                                 2. point to the tuple list
+|           +         |                                                                                                                  |
+|           |         |                                                                                                                  |
++---------------------+                                                                                                                  |
+            |                                                                                                                            v
+            |
+            v                                                            +-----> { (function 1, int 1), (function 2, int 2) ... (function n, int n) }
++-----------+-----------------------------------------------------+      |
+|accumulate_grad_properties                                       |      |
+|                                                                 |      |
+|       "variable", accumulateGradVar                             |      |
+|                                                                 |      |
+|       "next_functions", (getter)THPCppFunction_next_functions +--------+
+|                                                                 |  1. generate the tuple list
+|       "requires_grad", (getter)THPCppFunction_requires_grad     |
+|                                                                 |
+|       "metadata", (getter)THPCppFunction_metadata               |
+|                                                                 |
++-----------------------------------------------------------------+
+
+手机如下： 03.png
+
+
+
+至此，部分基础类解析完毕，因为文字所限，我们将在下一篇继续分析其他基础类。
+
+0xFF 参考
+https://github.com/KeithYin/read-pytorch-source-code/
+
+pytorch学习笔记（十三）：backward过程的底层实现解析
+
+PyTorch的初始化
+
+pytorch的自动求导机制 - 计算图的建立
+
+How autograd encodes the history
+
+https://pytorch.org/tutorials/beginner/blitz/autograd_tutorial.html
+
+pytorch笔记(计算图+autograd)-Node(1)
+
+详解Pytorch中的网络构造
+
+PyTorch的优化器
+
+PyTorch的分布式
+
+PyTorch的Tensor（下）
+
+PyTorch的Tensor(中)
+
+PyTorch的Tensor（上）
+
+PyTorch的动态图(下)
+
+PyTorch的动态图(上)
+
+计算图——用Pytorch解释李宏毅老师PPT中的实例
+
+如何使用pytorch自动求梯度
+
+PyTorch自动求导（Autograd）原理解析
+
+pytorch自动求导Autograd系列教程（一）
+
+PyTorch核心开发者亲自揭秘其内部机制
+
+PyTorch自动微分基本原理
+
+https://towardsdatascience.com/pytorch-autograd-understanding-the-heart-of-pytorchs-magic-2686cd94ec95

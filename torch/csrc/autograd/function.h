@@ -519,7 +519,7 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
   std::mutex mutex_;
 
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  edge_list next_edges_;
+  edge_list next_edges_;  // 前向过程中的输入variable，在前向过程中与该算子相关联的边
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PyObject* pyobj_ = nullptr; // weak reference
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)

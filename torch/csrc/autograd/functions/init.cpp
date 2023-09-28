@@ -46,9 +46,11 @@ template<typename C, typename T>
 static void addClass(PyObject* module, PyTypeObject& type, const char* name,
   PyGetSetDef* function_properties=nullptr, PyMethodDef* function_methods=nullptr)
 {
+// 这里设置了 accumulate_grad_properties
   createForwardFunctionPyTypeObject<T>(type, name, function_properties, function_methods);
   Py_INCREF(&type);
   PyModule_AddObject(module, name, (PyObject*)&type);
+  // 注册了 type
   registerCppFunction(typeid(C), &type);
 }
 
@@ -100,6 +102,7 @@ void THPAutograd_initFunctions()
   if (!module) throw python_error();
 
   static PyTypeObject AccumulateGradClass;
+  // // AccumulateGrad 相关
   addClass<AccumulateGrad, NoCtor>(module, AccumulateGradClass, "AccumulateGrad", accumulate_grad_properties);
 
   static PyTypeObject ErrorClass;

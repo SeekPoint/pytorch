@@ -932,7 +932,7 @@ PyTypeObject THPVariableType = {
   nullptr,                                     /* tp_iternext */
   nullptr,                                     /* tp_methods */
   nullptr,                                     /* tp_members */
-  THPVariable_properties,                      /* tp_getset */
+  THPVariable_properties,                      /* tp_getset */ // 重点在这里，注册了函数
   nullptr,                                     /* tp_base */
   nullptr,                                     /* tp_dict */
   nullptr,                                     /* tp_descr_get */
@@ -1004,6 +1004,8 @@ bool THPVariable_initModule(PyObject *module)
   if (PyType_Ready(&THPVariableType) < 0)
     return false;
   Py_INCREF(&THPVariableType);
+
+  // 设定_TensorBase
   PyModule_AddObject(module, "_TensorBase",   (PyObject *)&THPVariableType);
   torch::autograd::initTorchFunctions(module);
   torch::autograd::initTensorImplConversion(module);

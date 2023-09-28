@@ -32,10 +32,10 @@ struct Edge {
   }
 
   /// The function this `Edge` points to.
-  std::shared_ptr<Node> function;
+  std::shared_ptr<Node> function;  // 指向目标的Node
 
   /// The identifier of a particular input to the function.
-  uint32_t input_nr;
+  uint32_t input_nr; //指定本Edge是function的第几个输入
 };
 }} // namespace torch::autograd
 

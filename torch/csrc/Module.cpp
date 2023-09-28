@@ -148,7 +148,7 @@ static PyObject * THPModule_initExtension(PyObject *_unused, PyObject *shm_manag
   THPBFloat16Storage_postInit(module);
   THPComplexDoubleStorage_postInit(module);
   THPComplexFloatStorage_postInit(module);
-  THPAutograd_initFunctions();
+  THPAutograd_initFunctions();  // 这里调用,初始化了微分系统
   Py_RETURN_NONE;
   END_HANDLE_TH_ERRORS
 }
@@ -848,7 +848,7 @@ PyObject* initModule() {
   THPQScheme_init(module);
   THPDevice_init(module);
   THPStream_init(module);
-  ASSERT_TRUE(THPVariable_initModule(module));
+  ASSERT_TRUE(THPVariable_initModule(module)); // 继续分析这里，其中会设定_TensorBase
   ASSERT_TRUE(THPFunction_initModule(module));
   ASSERT_TRUE(THPEngine_initModule(module));
   // NOTE: We need to be able to access OperatorExportTypes from ONNX for use in

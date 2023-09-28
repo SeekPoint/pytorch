@@ -108,19 +108,20 @@ PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook)
   const auto num_next = self->cdata->num_outputs();
   THPObjectPtr py_functions(PyTuple_New(num_next));
   if (!py_functions) return nullptr;
-  for (size_t i = 0; i < num_next; ++i) {
-    auto& c_tuple = self->cdata->next_edge(i);
+  for (size_t i = 0; i < num_next; ++i) { // 遍历
+    auto& c_tuple = self->cdata->next_edge(i); // 获取 Edge
     THPObjectPtr tuple(PyTuple_New(2));
     if (!tuple) return nullptr;
-    PyObject *py_fn = functionToPyObject(c_tuple.function);
+    PyObject *py_fn = functionToPyObject(c_tuple.function); // py_fn 就是 Edge.function
     if (!py_fn) return nullptr;
     PyTuple_SET_ITEM(tuple.get(), 0, py_fn);
-    PyObject *py_idx = THPUtils_packUInt32(c_tuple.input_nr);
+    PyObject *py_idx = THPUtils_packUInt32(c_tuple.input_nr);  // py_idx 就是 Edge.input_nr
     if (!py_idx) return nullptr;
     PyTuple_SET_ITEM(tuple.get(), 1, py_idx);
-    PyTuple_SET_ITEM(py_functions.get(), i, tuple.release());
+    // tuple 就是 (py_fn, py_idx)，就是 (Edge.function, Edge.input_nr)
+    PyTuple_SET_ITEM(py_functions.get(), i, tuple.release()); // 设置 py_functions的第几个item
   }
-  return py_functions.release();
+  return py_functions.release(); // 返回tuple
 }
 
 PyObject* THPCppFunction_metadata(THPCppFunction *self, void *_unused)
@@ -179,6 +180,7 @@ PyTypeObject* _initFunctionPyTypeObject(PyTypeObject& type, const char* name,
   type.tp_basicsize = sizeof(THPCppFunction);
   type.tp_call = THPCppFunction_call;
   type.tp_methods = function_methods ? function_methods : default_methods;
+  // 这里把 function_properties 设置到 tp_getset 之上
   type.tp_getset = function_properties ? function_properties : default_properties;
   type.tp_dealloc = THPCppFunction_dealloc;
   type.tp_traverse = THPCppFunction_traverse;
