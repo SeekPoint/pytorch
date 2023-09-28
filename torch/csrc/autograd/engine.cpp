@@ -475,7 +475,7 @@ void Engine::reentrant_thread_init() {
     // set the local_ready_queue to the ready queue on the graph_task->owner_ device
     local_ready_queue = ready_queue_by_index(graph_task->cpu_ready_queue_, graph_task->owner_);
     total_depth = graph_task->reentrant_depth_;
-    thread_main(graph_task);
+    thread_main(graph_task);  // 这里调用了线程函数
   }
 }
 
@@ -923,47 +923,56 @@ auto Engine::execute(const edge_list& roots, // 反向传播的根节点
   // a new thread local ready queue on CPU or reuse the existing one (if there is one
   // allocated already, i.e. consecutive backward calls, re-entrant backward calls),
   // then memoize the local_ready_queue in GraphTask
-  init_local_ready_queue();
+  init_local_ready_queue(); // 初始化local ready_queue
   bool not_reentrant_backward_call = worker_device == NO_DEVICE;
 
+  // 构建一个GraphTask
   auto graph_task = std::make_shared<GraphTask>(
       /* keep_graph */ keep_graph,
       /* create_graph */ create_graph,
       /* depth */ not_reentrant_backward_call ? 0 : total_depth + 1,
       /* cpu_ready_queue */ local_ready_queue);
 
+  // 构建GraphRoot
   // If we receive a single root, skip creating extra root node
   bool skip_dummy_node = roots.size() == 1;
   auto graph_root = skip_dummy_node ?
-    roots.at(0).function : // 如果只有一个root，就直接使用root作为 GraphRoot
-    std::make_shared<GraphRoot>(roots, inputs); // 如果多个root，就构造一个GraphRoot
+    roots.at(0).function : // 如果只有一个root，就直接使用root作为 GraphRoot     // 单个root，直接使用
+    std::make_shared<GraphRoot>(roots, inputs); // 如果多个root，就构造一个GraphRoot // 多个root输入根，就构造一个GraphRoot，用它来驱动后向传播
+
+  // 计算最小拓扑数
   auto min_topo_nr = compute_min_topological_nr(outputs);
   // Now compute the dependencies for all executable functions
+  // 计算依赖
   compute_dependencies(graph_root.get(), *graph_task, min_topo_nr);
 
+  // 如果输出不为空，则调用 *graph_root, outputs 将graph_task初始化
   if (!outputs.empty()) {
     graph_task->init_to_execute(*graph_root, outputs, accumulate_grad, min_topo_nr);
   }
 
   // Queue the root
   if (skip_dummy_node) {
+    // 配置工作进程的各种输入  // 如果是单节点，则直接使用 CUDA queue
     InputBuffer input_buffer(roots.at(0).function->num_inputs());
     auto input = inputs.at(0);
-
+    // 构建InputMetadata
     const auto input_stream = InputMetadata(input).stream();
     const auto opt_next_stream = roots.at(0).function->stream(c10::DeviceType::CUDA);
     input_buffer.add(roots.at(0).input_nr,
                       std::move(input),
                       input_stream,
                       opt_next_stream);
-
+    // 启动工作进程
     execute_with_graph_task(graph_task, graph_root, std::move(input_buffer));
   } else {
+    // 启动工作进程  // 如果是多输入根节点，之前构建了虚拟根节点，后续就对应了 CPU queue
     execute_with_graph_task(graph_task, graph_root, InputBuffer(variable_list()));
   }
   // Avoid a refcount bump for the Future, since we check for refcount in
   // DistEngine (see TORCH_INTERNAL_ASSERT(futureGrads.use_count() == 1)
   // in dist_engine.cpp).
+  // 主进程进行阻塞等待，等待 graph_task->future_result_。
   auto& fut = graph_task->future_result_;
   fut->wait();
   return fut->value().toTensorVector();
@@ -981,52 +990,71 @@ std::shared_ptr<at::ivalue::Future> Engine::execute_with_graph_task(
     const std::shared_ptr<GraphTask>& graph_task,
     std::shared_ptr<Node> graph_root,
     InputBuffer&& input_buffer) {
-  initialize_device_threads_pool();
+
+  // 这里首先会启动工作线程
+  initialize_device_threads_pool();  // 启动设备工作线程  // 这里生成了设备线程
   // Lock mutex for GraphTask.
   std::unique_lock<std::mutex> lock(graph_task->mutex_);
 
+  // 这里指定了后续究竟是GPU还是CPU上运行，因为 input_buffer.device() 里面指定了运行的设备，所以依据这个设备，获取到了对应的 queue
+  // 获取到相关queue，具体是利用 input_buffer.device() 获得的。
   auto queue = ready_queue(graph_task->cpu_ready_queue_, input_buffer.device());
 
   // worker_device == NO_DEVICE it's a CPU thread and it's trying to drive the
   // autograd engine with corresponding GraphTask, and its NOT a re-entrant call
-  if (worker_device == NO_DEVICE) {
+  if (worker_device == NO_DEVICE) {  // 判断是否已经运行了反向传播
+    // 如果到了这里，必然是没有活跃工作设备
+
+    // 主线程
     // We set the worker_device to CPU_DEVICE only if worker_device was previously
     // NO_DEVICE. Setting it to CPU afterwards allow us to detect whether this is
     // a re-entrant call or not.
     set_device(CPU_DEVICE);
 
     // set the graph_task owner to the current device
-    graph_task->owner_ = worker_device;
+    graph_task->owner_ = worker_device; // 就是 CPU 设备
 
     // Now that all the non-thread safe fields of the graph_task have been populated,
     // we can enqueue it.
-    // 主线程之中
+    // 主线程之中  // 给 queue 之上插入 NodeTask，这样就会唤醒对应线程开始工作
     queue->push(NodeTask(graph_task, std::move(graph_root), std::move(input_buffer)));
 
     // The owning thread start to drive the engine execution for any CPU task that
     // was just pushed or will be added later from other worker threads
     lock.unlock();
-    thread_main(graph_task);
+    thread_main(graph_task);  // 在主线程运行，这里会在queue之上阻塞  // thread_main 依然是被主线程执行，内部通过 pop 阻塞等待
+
     TORCH_INTERNAL_ASSERT(graph_task->future_result_->completed());
     // reset the worker_device after the completion of the graph_task, this is so
     // that the initial state of the engine remains the same across every backward()
     // or grad() call, we don't need to reset local_ready_queue as we could possibly
     // reuse it for new backward calls.
+    // 主线程
     worker_device = NO_DEVICE;
+
+    // 如果到了这里，必然是没有活跃工作设备，就是所有 GraphTask都结束了，如果没有结束，就是reentrant，必须走下面的case
+
+    // 主线程
   } else {
+    // 主线程，可重入的反向传播
+
+    // 重入后向传播状况下的主线程
+
     // If worker_device is any devices (i.e. CPU, CUDA): this is a re-entrant
     //    backward call from that device.
-    graph_task->owner_ = worker_device;
+    graph_task->owner_ = worker_device;  // 指定是哪个设备，是 GPU 或者 CPU
 
     // Now that all the non-thread safe fields of the graph_task have been populated,
     // we can enqueue it.
-    // 主线程之中
+    // 主线程之中   // 向 queue 插入第一个NodeTrask，就是 graph_root
     queue->push(NodeTask(graph_task, std::move(graph_root), std::move(input_buffer)));
 
     if (current_depth >= max_recursion_depth_) {
       // See Note [Reentrant backwards]
       // If reached the max depth, switch to a different thread
-      add_thread_pool_task(graph_task);
+      // 达到最大重入深度，这里会启动一个新的线程
+      // add_thread_pool_task 里面是GPU线程 或者 CPU线程取决于 worker_device
+      add_thread_pool_task(graph_task);  // 启动GPU或者CPU线程
     } else {
       // Total depth needs to be updated only in this codepath, since it is
       // not used in the block above (when we call add_thread_pool_task).
@@ -1038,7 +1066,8 @@ std::shared_ptr<at::ivalue::Future> Engine::execute_with_graph_task(
       // complete!
       ++current_depth;
       lock.unlock();
-      thread_main(graph_task);
+      // thread_main 依然是被主线程执行，内部通过 pop 阻塞等待
+      thread_main(graph_task);  // 在主线程运行，这里会在queue之上阻塞
       --current_depth;
       --total_depth;
 
@@ -1047,6 +1076,8 @@ std::shared_ptr<at::ivalue::Future> Engine::execute_with_graph_task(
       // blocking an autograd engine thread.
       TORCH_INTERNAL_ASSERT(graph_task->future_result_->completed());
     }
+    // 重入后向传播状况下的主线程
+    // 主线程，可重入的反向传播
   }
   // graph_task_exec_post_processing is done when the Future is marked as
   // completed in mark_as_completed_and_run_post_processing.
@@ -1088,9 +1119,11 @@ bool Engine::is_checkpoint_valid() {
 
 void Engine::init_local_ready_queue(std::shared_ptr<ReadyQueue> ready_queue) {
   if (ready_queue) {
+    // 工作线程执行路径
     // if ready_queue provided in the caller, use the caller's ready_queue to initialize local_ready_queue
     local_ready_queue = std::move(ready_queue);
   } else if (!local_ready_queue){
+    // 主线程执行路径。
     // otherwise if local_ready_queue not allocated, allocate a new ready_queue
     local_ready_queue = std::make_shared<ReadyQueue>();
   }
@@ -1135,18 +1168,20 @@ auto Engine::ready_queue_by_index(std::shared_ptr<ReadyQueue> cpu_ready_queue, i
 
 auto Engine::start_device_threads() -> void {
   // See Note [Allocating GPUs to autograd threads]
+  // 使用deviceCount得到 设备数量 num_devices。
   c10::DeviceIndex num_devices = 0;
   // 得到设备数量
-  for (const auto& impl_atomic : c10::impl::device_guard_impl_registry) {
-    auto* impl = impl_atomic.load();
-    if (impl) {
       num_devices = std::max(num_devices, impl->deviceCount());
     }
   }
 
   // 确定queue数量，并且生成queue
+  for (const auto& impl_atomic : c10::impl::device_guard_impl_registry) {
+    auto* impl = impl_atomic.load();
+    if (impl) {
   // allocate one thread for every GPU device (but colocate GPUs of different
   // types), and pre-allocate the device_ready_queues_ to ensure safe reading on it.
+  // 创建多个ReadyQueue，ReadyQueue数目和工作线程数目一样
   device_ready_queues_ = std::vector<std::shared_ptr<ReadyQueue>>(num_devices);
   for (auto& queue : device_ready_queues_)    {
     // NOLINTNEXTLINE(modernize-make-shared)
@@ -1156,9 +1191,10 @@ auto Engine::start_device_threads() -> void {
   // 生成线程
   thread_pool_shared_ = std::make_shared<ThreadPoolShared>();
 
+  // 创建设备线程
   for (int i = 0; i < num_devices; ++i) {
     std::thread t(&Engine::thread_init, this, i, device_ready_queues_[i], true);
-    t.detach();
+    t.detach(); // 让工作线程独立运行
   }
   // Wait for the threads to start
   {

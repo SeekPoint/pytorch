@@ -78,9 +78,11 @@ struct TORCH_API GraphRoot : public Node {
   }
 
   variable_list apply(variable_list&& inputs) override {
+    // 直接把梯度透传给后续节点
     return outputs; // apply 方法仅仅返回它的输入，就是梯度。Node 的其他派生类会有自己不同的实现。
   }
 
+  // 这个是梯度
   variable_list outputs; // 梯度。其只是通过 apply() 来进行使用，就是 apply 方法返回这个outputs。
 };
 
