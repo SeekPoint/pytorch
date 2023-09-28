@@ -97,9 +97,11 @@ Tensor _fw_primal(c10::DispatchKeySet ks, const Tensor & self, int64_t level) {
     return at::redispatch::_fw_primal(ks & c10::after_autograd_keyset, self_, level);
   })();
 
-  if (grad_fn) {
+  if (grad_fn) { // grad_fn 就是 std::shared_ptr<SubBackward0>
+      // 将输出variable与grad_fn绑定，grad_fn之中包含了计算梯度的function
       set_history(flatten_tensor_args( result ), grad_fn);
   }
+
   if (generated::details::isFwGradDefined(self)) {
     // Modified from original codegen
     // We explicitly want to ignore the forward grad at the given level

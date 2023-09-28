@@ -63,10 +63,14 @@ inline void set_history(
     // If the codegen triggers this, you most likely want to add your newly added function
     // to the DONT_REQUIRE_DERIVATIVE list in tools/autograd/gen_variable_type.py
     TORCH_INTERNAL_ASSERT(isDifferentiableType(variable.scalar_type()));
+    // grad_fn 的 input_metadata 之中添加了输出实例，输出实例在反向传播时候就是输入
     auto output_nr =
         grad_fn->add_input_metadata(variable);
+    // 输出实例 result 中设置上了grad_fn，这里配置了边，边就是 {grad_fn, output_nr}。
+    // output_nr_被赋值成了"当前Variable信息在input_metadata_中的index"。
     impl::set_gradient_edge(variable, {grad_fn, output_nr});
   } else {
+    // 设置成未定义
     grad_fn->add_input_metadata(Node::undefined_input());
   }
 }
@@ -75,7 +79,7 @@ inline void set_history(
     std::vector<Variable>&& variables,
     const std::shared_ptr<Node>& grad_fn) {
   for (auto& variable : variables) {
-    set_history(variable, grad_fn);
+    set_history(variable, grad_fn); // 调用到上面的函数
   }
 }
 

@@ -23,9 +23,9 @@ namespace torch { namespace autograd {
   }
 
 struct TORCH_API AccumulateGrad : public Node {
-  explicit AccumulateGrad(Variable variable_);
+  explicit AccumulateGrad(Variable variable_); // 必须用一个Variable构建
 
-  variable_list apply(variable_list&& grads) override;
+  variable_list apply(variable_list&& grads) override; // 接收一个list的Variable的实例
 
   static at::Tensor callHooks(
       const Variable& variable,

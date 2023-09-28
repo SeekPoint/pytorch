@@ -137,6 +137,7 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
 
   /// Evaluates the function on the given inputs and returns the result of the
   /// function call.
+  // 这里对运算符()进行重载，核心其实就是调用apply()
   variable_list operator()(variable_list&& inputs) {
     // In the first iteration of named tensors, autograd ignores names and
     // operates on unnamed tensors. In the long term, autograd should
@@ -256,7 +257,7 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
   }
 
   void set_next_edges(edge_list&& next_edges) {
-    next_edges_ = std::move(next_edges);
+    next_edges_ = std::move(next_edges); // 这里设置了边
     for(const auto& next_edge : next_edges_) {
       update_topological_nr(next_edge);
     }
@@ -551,14 +552,14 @@ struct MakeNextFunctionList : IterArgs<MakeNextFunctionList> {
   using IterArgs<MakeNextFunctionList>::operator();
   void operator()(const Variable& variable) {
     if (variable.defined()) {
-      next_edges.push_back(impl::gradient_edge(variable));
+      next_edges.push_back(impl::gradient_edge(variable)); // 调用gradient_edge
     } else {
       next_edges.emplace_back();
     }
   }
   void operator()(const c10::optional<Variable>& variable) {
     if (variable.has_value() && variable->defined()) {
-      next_edges.push_back(impl::gradient_edge(*variable));
+      next_edges.push_back(impl::gradient_edge(*variable)); // 调用gradient_edge
     } else {
       next_edges.emplace_back();
     }
@@ -596,7 +597,8 @@ inline bool any_variable_requires_grad(const variable_list& variables) {
 /// Return the next edges of all the given variables, or tuples of variables.
 template <typename... Variables>
 edge_list collect_next_edges(Variables&&... variables) {
-  detail::MakeNextFunctionList make;
+  detail::MakeNextFunctionList make; // 这里将调用gradient_edge
+  // next_edges_成员的值来自前向时候的输入参数
   make.apply(std::forward<Variables>(variables)...);
   return std::move(make.next_edges);
 }

@@ -223,6 +223,7 @@ namespace impl {
 
     c10::raw::intrusive_ptr::incref(self.unsafeGetTensorImpl());
     auto intrusive_from_this = c10::intrusive_ptr<at::TensorImpl>::reclaim(self.unsafeGetTensorImpl());
+    // 这里会初始化一个AccumulateGrad，配置给grad_accumulator_
     result = std::make_shared<AccumulateGrad>(Variable(std::move(intrusive_from_this)));
     autograd_meta->grad_accumulator_ = result; // 获取 autograd_meta->grad_accumulator_
     return result;
@@ -236,19 +237,21 @@ namespace impl {
     // accumulation" below. Note that only variables which have `requires_grad =
     // True` can have gradient accumulators.
 
+// self.grad_fn() 这里触发了一个调用，得到了一个SubBackward0实例
     // self.grad_fn() 这里触发了一个调用，得到了一个Node实例
-    if (const auto& gradient = self.grad_fn()) {
-      //  // self.output_nr() 表示本Edge是function的第n个输入。前向传播时候的第 n 个输出在反向传播时候就是第 n 个输入。
+    if (const auto& gradient = self.grad_fn()) {  // 这是一个中间节点，gradient 是一个Function
+      // self.output_nr() 表示本Edge是function的第n个输入。前向传播时候的第 n 个输出在反向传播时候就是第 n 个输入。
       return Edge(gradient, self.output_nr());
     } else {
+      // 这是一个叶子节点，所以生成一个AccumulateGrad，0表示本Edge是function的第一个输入
       return Edge(grad_accumulator(self), 0); // 0表示本Edge是function的第一个输入
     }
   }
 
   void set_gradient_edge(const Variable& self, Edge edge) {
     auto* meta = materialize_autograd_meta(self);
-    meta->grad_fn_ = std::move(edge.function);
-    meta->output_nr_ = edge.input_nr;
+    meta->grad_fn_ = std::move(edge.function); // 配置梯度函数
+    meta->output_nr_ = edge.input_nr; // 配置梯度函数的第几个输出
     // For views, make sure this new grad_fn_ is not overwritten unless it is necessary
     // in the VariableHooks::grad_fn below.
     // This logic is only relevant for custom autograd Functions for which multiple

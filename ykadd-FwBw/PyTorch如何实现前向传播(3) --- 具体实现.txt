@@ -1,0 +1,1233 @@
+PyTorch如何实现前向传播(3) --- 具体实现
+https://www.cnblogs.com/rossiXYZ/p/15436868.html
+
+
+目录
+[源码解析] PyTorch如何实现前向传播(3) --- 具体实现
+0x00 摘要
+0x01 计算图
+1.1 图的相关类
+1.2 动态图
+1.3 动态展示
+0x02 总体分析
+0x03 Node 继承体系
+3.1 继承体系
+3.2 Node
+3.3 SubBackward0
+3.4 PowBackward0
+3.5 MulBackward0
+3.6 PermuteBackward
+0x04 前向计算
+4.1 减法实现
+4.3 边基础函数
+4.3.1 create_gradient_edge
+4.3.2 set_gradient_edge
+4.4 构建网络
+4.5 构建边
+4.5.1 获取边
+4.5.1.1 gradient_edge
+4.5.1.2 gradient accumulator
+4.5.1.3 AccumulateGrad
+4.5.1.4 收集边
+4.5.2 配置边
+4.6 配置历史
+4.6.1 配置meta
+4.6.1.1 input_metadata_
+4.6.1.2 配置meta
+4.7 印证
+0xFF 参考
+0x00 摘要
+本系列将通过大概十篇左右文章来分析 PyTorch 的自动微分功能如何实现。本文是前向传播的第三篇，介绍具体实现机制。
+
+在反向传播时候，当拿到了一个张量，引擎需要知道：
+
+如何对此张量调用梯度计算，即从哪里找到计算梯度的函数 F。
+拿到函数 F 之后，这个函数的输入就是此张量本身，但是函数 F 需要知道输入参数（本张量）的一些元信息，比如类型，shape，device。
+F 计算出梯度之后，需要知道 F 的输出应该传播到哪里，就是怎么在反向传播计算图上继续进行下一步。
+本文就是具体分析，在前向传播之中这些信息如何设置。
+
+本系列前几篇连接如下：
+
+深度学习利器之自动微分(1)
+
+深度学习利器之自动微分(2)
+
+[源码解析]深度学习利器之自动微分(3) --- 示例解读
+
+[源码解析]PyTorch如何实现前向传播(1) --- 基础类(上)
+
+[源码解析]PyTorch如何实现前向传播(2) --- 基础类(下)
+
+0x01 计算图
+1.1 图的相关类
+计算图是一个有向图，它的节点为已经实现的算子或者数据（叶子结点），箭头的方向表示数据流动的方向，从输入节点指向输出节点。
+由前面章节可知，图相关有三个基本类：Node，Edge，Engine（我们后续会分析Engine）。
+
+    节点是 Node 类，代表一个操作（operation）。
+
+        每个 Node 接收0个或者多个 Variable，输出0个或者多个 Variable。Node 之间由 Edge 连接在一起，
+        其实就是通过 Node 的成员变量next_edges_连接在一起。
+
+        反向传播的函数都继承自 Node，比如 SubBackward0就继承自 Node。
+
+    边 Edge 其实本质是 (Node, input_nr)
+
+        Edge 的成员变量 std::shared_ptr function ：指定本边指向的Node。
+
+        Edge 的成员变量 uint32_t input_nr ： 指定本边是function的第几个输入 。
+
+    Node 的成员 next_edges_ 是一组 Edge实例，
+    代表此 Node 实例的返回值要输出到的（另外）Node，即 next_edges_是 Node 和Node 之间的纽带。
+    当计算图被执行时候，Variable 在这些边之间流动。
+
+    Engine 是执行引擎。
+
+1.2 动态图
+pytorch在设计中采取了动态计算图的方式。
+动态的意思是：反向传播的计算图是动态更新的。
+每一轮反向传播开始时（前向传播结束后）都会动态的重新构建一个计算图，当本次反向传播完成后，图会销毁计算图，在内存中被释放了。
+如果在新一轮中想再次使用，只能从头再搭建一遍。
+这种动态更新的方式允许用户在迭代过程中更改网络的形状和大小。
+
+下面代码可以看出来动态图的特质。
+
+# 第一遍，生成动态图
+a = torch.tensor(2., requires_grad=True)
+b = torch.tensor(6., requires_grad=True)
+Q = 3*a**3 - b**2
+external_grad = torch.tensor(1.)
+Q.backward(gradient=external_grad) # 正常
+Q.backward(gradient=external_grad) # RuntimeError
+
+# 第二次：再来一遍
+a = torch.tensor(2., requires_grad=True)
+b = torch.tensor(6., requires_grad=True)
+Q = 3*a**3 - b**2
+external_grad = torch.tensor(1.)
+Q.backward(gradient=external_grad) # 正常
+
+1.3 动态展示
+下面是PyTorch 官方的动态图，大家可以有一个形象的理解。
+05.gif
+为了更好的展示，我们把动图分解开来看。
+首先是声明了一些张量。
+06.png
+其次让两个矩阵相乘。
+07.png
+让另外两个矩阵相乘
+08.png
+然后把两个相乘结果相加。
+09.png
+加入 Tanh 激活函数。
+10.png
+加入损失函数。
+11.png
+反向传播，计算梯度。
+12.png
+由此可以看出来，动态图关系是在前向计算过程中构建出来的。
+
+0x02 总体分析
+我们把前文提到的示例代码继续细化，目的是为了看看计算图中各个张量：
+
+    a = torch.tensor(2., requires_grad=True)
+    b = torch.tensor(6., requires_grad=True)
+    X = a ** 3
+    Y = 3 * X
+    Z = b ** 2
+    Q = X - Z
+    external_grad = torch.tensor(1.)
+    Q.backward(gradient=external_grad)
+    print(a.grad)
+
+看看运行时变量如下，因为 Q = X - Z 是减法，所以对应的反向操作就是 SubBackward0：
+
+    Q = {Tensor} tensor(-28., grad_fn=<SubBackward0>)
+    X = {Tensor} tensor(8., grad_fn=<PowBackward0>)
+    Y = {Tensor} tensor(24., grad_fn=<MulBackward0>)
+    Z = {Tensor} tensor(36., grad_fn=<PowBackward0>)
+    a = {Tensor} tensor(2., requires_grad=True)
+    b = {Tensor} tensor(6., requires_grad=True)
+
+我们可以和DAG 的可视化表示比对一下。
+在图中，箭头指向前向传递的方向，节点代表前向传递中每个操作的后向函数。
+蓝色的叶子节点 (2) 代表我们的叶子张量a和b。
+13.png
+
+
+在代码层面，在正向传播过程中，PyTorch 并没有显式构造出一个反向传播的计算图，而是建立了若干所需的数据结构，
+可以认为是一个虚拟图关系，但是没有真实的图数据结构。在每次迭代的前向传播中，针对 Q = X - Z，都会执行如下操作：
+
+    1）进入减法操作 ：减法操作会派发到某一个device之上，其中会进行 Q 的构建。
+
+    2）先构建如何反向传播 ：派发到 VariableType上时，会先进行 Q 的 autograd 信息的构建；
+
+        构建一个减法的反向计算函数 SubBackward0 实例。
+
+        初始化SubBackward0实例的next_edges_和其它相关成员，next_edges_成员的值来自前向传播的输入参数 X 和 Z。
+
+            如果输入Variable是leaf节点，则next_edges_ 来自输入Variable的 grad_accumulator_
+
+            如果输入 Varaible是 非leaf节点，则next_edges_来自输入Variable的 grad_fn_。
+
+        使用步骤 3 中的新Variable实例（就是前向计算的结果 Q）来初始化 SubBackward0 实例的 input_metadata_，
+
+        这样，就得到了如何进行 Q 的反向传播，但此时只是得到了如何计算，还没有和 Q 联系起来。
+
+    3）再将 前向计算 & 与反向传播 联系起来 ：
+    前向运算之后得到新的Variable，这个就是 Q，使用步骤2) 中的 SubBackward0 实例初始化 Q 的 autograd_meta_->grad_fn_ 成员。
+    当对 Q 反向计算时候，就知道使用 Q 的 autograd_meta_->grad_fn_ 成员来进行，就是 2) 之中的 SubBackward0。
+
+大致如下图所示：
+
++-----------------------+       +---------------------------------------+
+| Q                     |       | DifferentiableViewMeta                |
+|                       |       |                                       |
+|    autograd_meta_ +---------> |       grad_        grad_accumulator_  |
+|                       |       |                                       |
++-----------------------+       |                                       |
+              +----------------------+  grad_fn_     output_nr_         | Q 找到如何计算梯度
+              |                 |                                       |
+              |                 +---------------------------------------+
+              v
++-------------+------------+    +----------------------+
+|SubBackward0              |    |                      |
+|                          |    | Compute the gradient | 如何计算梯度
+|      apply  +---------------> |                      |
+|                          |    +----------------------+
+|                          |
+|                          |    +-----------------------------------------------------+
+|      next_edges_  +---------> | edge_list                                           |
+|                          |    |                                                     |
+|      other_scalar_type   |    | [(PowBackward0(self), 0), (PowBackward0(other), 0)] | 输出
+|                          |    |                                                     |
+|      alpha               |    +-----------------------------------------------------+
+|                          |
+|      self_scalar_type    |    +----------------------------------------+
+|                          |    |                                        |
+|      input_metadata_  +-----> | [(type of Q, shape of Q, device of Q)] | 输入
+|                          |    |                                        |
++--------------------------+    +----------------------------------------+
+
+
+
+因为前向计算中会生成计算图中的一系例节点，所以我们接下来就先分析这些节点。
+
+0x03 Node 继承体系
+我们先从上图中最下面的节点 SubBackward0 开始分析。
+
+3.1 继承体系
+SubBackward0 定义位于：torch/include/torch/csrc/autograd/generated/Functions.h。
+
+struct TORCH_API SubBackward0 : public TraceableFunction {
+  using TraceableFunction::TraceableFunction;
+  variable_list apply(variable_list&& grads) override;
+  std::string name() const override { return "SubBackward0"; }
+  void release_variables() override {
+  }
+
+  at::ScalarType other_scalar_type;
+  at::Scalar alpha;
+  at::ScalarType self_scalar_type;
+};
+
+我们再看看 SubBackward0 的继承体系。
+
+class SubBackward0 : public TraceableFunction
+class TraceableFunction : public Node
+
+/// See Node::is_traceable() for definition.
+struct TraceableFunction : public Node {
+  using Node::Node;
+  bool is_traceable() final {
+    return true;
+  }
+};
+
+因此，SubBackward0 就是一个 Node 类型。
+
+3.2 Node
+前文我们已经介绍了 Node。Node 类，代表一个操作（operation）。
+每个 Node 接收0个或者多个 Variable，输出0个或者多个 Variable。
+Node 之间由 Edge 连接在一起，其实就是通过 Node 的成员变量next_edges_连接在一起。反向传播的函数都继承自 Node。
+
+我们提取部分 Node 代码如下：
+
+struct TORCH_API Node : std::enable_shared_from_this<Node> {
+
+  /// Performs the `Node`'s actual operation.
+  virtual variable_list apply(variable_list&& inputs) = 0;
+  const uint64_t sequence_nr_;
+  uint64_t topological_nr_ = 0;
+
+  // 在前向过程中与该算子相关联的边，对应了前向过程中的输入variable。
+  edge_list next_edges_;
+  std::vector<std::unique_ptr<FunctionPreHook>> pre_hooks_;
+  std::vector<std::unique_ptr<FunctionPostHook>> post_hooks_;
+  at::SmallVector<InputMetadata, 2> input_metadata_;
+
+  // 这里对运算符()进行重载，核心其实就是调用apply()
+  variable_list operator()(variable_list&& inputs) {
+    bool pre_sampled = false;
+    if (at::shouldRunRecordFunction(&pre_sampled)) {
+      return apply(std::move(inputs));
+    } else {
+      return apply(std::move(inputs));
+    }
+  }
+};
+
+可以看到，apply(variable_list&& inputs) 是纯虚函数，需要其派生类实现。
+apply函数是Function的灵魂，是反向传播计算时候的核心执行逻辑，通过 C++ 的多态功能就可以调用到各个派生类的 apply 函数。
+
+3.3 SubBackward0
+SubBackward0 的 apply函数代码如下，可以看到其求导过程。代码位于 torch/csrc/autograd/generated/Functions.cpp。
+
+yknote---代码找不到！
+
+variable_list SubBackward0::apply(variable_list&& grads) {
+  IndexRangeGenerator gen;
+  auto self_ix = gen.range(1);
+  auto other_ix = gen.range(1);
+  variable_list grad_inputs(gen.size());
+  auto& grad = grads[0];
+  bool any_grad_defined = any_variable_defined(grads);
+  if (should_compute_output({ other_ix })) {
+    // 进行计算
+    auto grad_result = any_grad_defined ? (handle_r_to_c(other_scalar_type, -grad * alpha.conj())) : Tensor();
+    copy_range(grad_inputs, other_ix, grad_result); // 拷贝结果到grad_inputs
+  }
+  if (should_compute_output({ self_ix })) {
+    // 进行计算
+    auto grad_result = any_grad_defined ? (handle_r_to_c(self_scalar_type, grad)) : Tensor();
+    copy_range(grad_inputs, self_ix, grad_result); // 拷贝结果到grad_inputs
+  }
+  return grad_inputs; // 返回grad_inputs
+}
+
+我们印证一下，看看tools/autograd/derivatives.yaml 文件。
+这里是forward和backward的映射，可以理解为 autograd engine 在做反向链式求导时候查询的原子操作，
+我们依据如下因此可以知道，加法和减法的求导函数都利用了 handle_r_to_c。
+
+    - name: add.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
+      self: handle_r_to_c(self.scalar_type(), grad)
+      other: handle_r_to_c(other.scalar_type(), maybe_multiply(grad, alpha.conj()))
+      result: self_t + maybe_multiply(other_t, alpha)
+
+    - name: sub.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor
+      self: handle_r_to_c(self.scalar_type(), grad)
+      other: handle_r_to_c(other.scalar_type(), -grad * alpha.conj())
+
+handle_r_to_c 定义如下，就是进行转换。
+
+    Tensor handle_r_to_c(ScalarType self_st, Tensor gradient_result) {
+      if (!at::isComplexType(self_st) && gradient_result.is_complex()) {
+        // R -> C
+        return at::real(gradient_result);
+      }
+      return gradient_result;
+    }
+
+用代码来印证一下：
+
+a = torch.tensor(2., requires_grad=True)
+b = torch.tensor(6., requires_grad=True)
+Q = a - b
+external_grad = torch.tensor(1.)
+Q.backward(gradient=external_grad)
+
+这时候运行时如下：
+
+a = {Tensor} tensor(2., requires_grad=True)
+ T = {Tensor} tensor(2., grad_fn=<PermuteBackward>)
+ data = {Tensor} tensor(2.)
+ device = {device} cpu
+ dtype = {dtype} torch.float32
+ grad = {Tensor} tensor(1.)
+ grad_fn = {NoneType} None
+
+b = {Tensor} tensor(6., requires_grad=True)
+ T = {Tensor} tensor(6., grad_fn=<PermuteBackward>)
+ data = {Tensor} tensor(6.)
+ device = {device} cpu
+ dtype = {dtype} torch.float32
+ grad = {Tensor} tensor(-1.)
+ grad_fn = {NoneType} None
+
+Q = {Tensor} tensor(-4., grad_fn=<SubBackward0>)
+ T = {Tensor} tensor(-4., grad_fn=<PermuteBackward>)
+ data = {Tensor} tensor(-4.)
+ device = {device} cpu
+ dtype = {dtype} torch.float32
+ grad = {NoneType} None
+ grad_fn = {SubBackward0} <SubBackward0 object at 0x7fb76e365438>
+    metadata = {dict: 0} {}
+    next_functions = {tuple: 2}
+     0 = {tuple: 2} (<AccumulateGrad object at 0x7fb76e344978>, 0)
+     1 = {tuple: 2} (<AccumulateGrad object at 0x7fb76e3447b8>, 0)
+     __len__ = {int} 2
+    requires_grad = {bool} True
+ is_cuda = {bool} False
+ is_leaf = {bool} False
+ is_meta = {bool} False
+ is_mkldnn = {bool} False
+ is_mlc = {bool} False
+ is_quantized = {bool} False
+ is_sparse = {bool} False
+ is_sparse_csr = {bool} False
+ is_vulkan = {bool} False
+ is_xpu = {bool} False
+ layout = {layout} torch.strided
+ name = {NoneType} None
+ names = {tuple: 0} ()
+ ndim = {int} 0
+ output_nr = {int} 0
+ requires_grad = {bool} True
+ shape = {Size: 0} torch.Size([])
+
+我们接着看看其他几个节点。
+
+3.4 PowBackward0
+PowBackward0 定义如下。
+
+struct TORCH_API PowBackward0 : public TraceableFunction {
+  using TraceableFunction::TraceableFunction;
+  variable_list apply(variable_list&& grads) override;
+  std::string name() const override { return "PowBackward0"; }
+  void release_variables() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    self_.reset_data();
+  }
+  SavedVariable self_;
+  at::Scalar exponent;
+};
+
+variable_list PowBackward0::apply(variable_list&& grads) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  IndexRangeGenerator gen;
+  auto self_ix = gen.range(1);
+  variable_list grad_inputs(gen.size());
+  auto& grad = grads[0];
+  auto self = self_.unpack();
+  bool any_grad_defined = any_variable_defined(grads);
+  if (should_compute_output({ self_ix })) {
+    auto grad_result = any_grad_defined ? (pow_backward(grad, self, exponent)) : Tensor();
+    copy_range(grad_inputs, self_ix, grad_result);
+  }
+  return grad_inputs;
+}
+
+我们去 tools/autograd/derivatives.yaml 中看看，看到就是使用了 pow_backward。
+
+    - name: pow.Tensor_Scalar(Tensor self, Scalar exponent) -> Tensor
+      self: pow_backward(grad, self, exponent)
+      result: auto_element_wise
+
+最终也用到了handle_r_to_c。
+
+    Tensor pow_backward(Tensor grad, const Tensor & self, const Scalar & exponent) {
+      if (exponent.equal(0.0)) {
+        return at::zeros_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
+      } else {
+        auto grad_lambda = [&](auto exp) { return grad * (exp * self.pow(exp - 1)).conj(); };
+        Tensor out = (exponent.isComplex()) ? grad_lambda(exponent.toComplexDouble()) : grad_lambda(exponent.toDouble());
+        return handle_r_to_c(self, out);
+      }
+    }
+
+3.5 MulBackward0
+MulBackward0 定义如下。
+
+struct TORCH_API MulBackward0 : public TraceableFunction {
+  using TraceableFunction::TraceableFunction;
+  variable_list apply(variable_list&& grads) override;
+  std::string name() const override { return "MulBackward0"; }
+  void release_variables() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    self_.reset_data();
+    other_.reset_data();
+  }
+
+  SavedVariable self_;
+  at::ScalarType other_scalar_type;
+  at::ScalarType self_scalar_type;
+  SavedVariable other_;
+};
+
+variable_list MulBackward0::apply(variable_list&& grads) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  IndexRangeGenerator gen;
+  auto self_ix = gen.range(1);
+  auto other_ix = gen.range(1);
+  variable_list grad_inputs(gen.size());
+  auto& grad = grads[0];
+  auto self = self_.unpack();
+  auto other = other_.unpack();
+  bool any_grad_defined = any_variable_defined(grads);
+  if (should_compute_output({ other_ix })) {
+    auto grad_result = any_grad_defined ? (mul_tensor_backward(grad, self, other_scalar_type)) : Tensor();
+    copy_range(grad_inputs, other_ix, grad_result);
+  }
+  if (should_compute_output({ self_ix })) {
+    auto grad_result = any_grad_defined ? (mul_tensor_backward(grad, other, self_scalar_type)) : Tensor();
+    copy_range(grad_inputs, self_ix, grad_result);
+  }
+  return grad_inputs;
+}
+
+我们去 tools/autograd/derivatives.yaml 中看看，看到就是使用了 mul_tensor_backward。
+
+- name: mul.Tensor(Tensor self, Tensor other) -> Tensor
+  self: mul_tensor_backward(grad, other, self.scalar_type())
+  other: mul_tensor_backward(grad, self, other.scalar_type())
+  result: other_t * self_p + self_t * other_p
+其最后也使用了 handle_r_to_c。
+
+Tensor mul_tensor_backward(Tensor grad, Tensor other, ScalarType self_st) {
+  auto out = grad * other.conj();
+  return handle_r_to_c(self_st, out);
+}
+
+3.6 PermuteBackward
+PermuteBackward 虽然没有在上图中体现，但是实际上存在，就是赋值操作。PermuteBackward 定义如下：
+
+struct TORCH_API PermuteBackward : public Node {
+  using Node::Node;
+  variable_list apply(variable_list&& grads) override;
+  std::string name() const override { return "PermuteBackward"; }
+  void release_variables() override {
+  }
+  std::vector<int64_t> dims;
+};
+
+variable_list PermuteBackward::apply(variable_list&& grads) {
+  IndexRangeGenerator gen;
+  auto self_ix = gen.range(1);
+  variable_list grad_inputs(gen.size());
+  auto& grad = grads[0];
+  bool any_grad_defined = any_variable_defined(grads);
+  if (should_compute_output({ self_ix })) {
+    auto grad_result = any_grad_defined ? (permute_backwards(grad, dims)) : Tensor();
+    copy_range(grad_inputs, self_ix, grad_result);
+  }
+  return grad_inputs;
+}
+我们去 tools/autograd/derivatives.yaml 中看看，看到就是使用了 permute_backwards。
+
+- name: permute(Tensor(a) self, int[] dims) -> Tensor(a)
+  self: permute_backwards(grad, dims)
+  result: auto_linear
+permute_backwards 定义在 torch/csrc/autograd/FunctionsManual.cpp。
+
+Tensor permute_backwards(const Tensor & grad, IntArrayRef fwd_dims) {
+  // invert the permutation
+  auto ndims = fwd_dims.size();
+  std::vector<int64_t> dims(ndims);
+  for(const auto i : c10::irange(ndims)) {
+    dims[at::maybe_wrap_dim(fwd_dims[i], ndims)] = i;
+  }
+  return grad.permute(dims);
+}
+我们接下来具体分析前向计算，看看其如何搭建依赖关系。
+
+0x04 前向计算
+因为篇幅所限，我们直接跳到 C++世界的核心之处。
+
+4.1 减法实现
+经过层层分发，减法最终调用到 torch/csrc/autograd/generated/VariableTypeEverything.cpp，
+PyTorch将会在这个函数中构建autograd的信息，其总体逻辑是：
+
+1）减法操作会派发到某一个device之上，其中会进行前向计算结果Variable的构建。
+2）派发到VariableType上时，会进行autograd信息的构建；
+    构建一个减法的反向计算函数 SubBackward0 实例，实例名字为 grad_fn。
+    设置反向计算时候使用的函数。
+    初始化SubBackward0实例的next_edges_和其它相关成员，next_edges__成员的值来自前向传播的输入参数。
+        如果输入Variable是leaf节点，则next_edges__ 来自输入Variable的 grad_accumulator_
+        如果 Varaible是非leaf节点，则next_edges_来自Variable的 grad_fn_。
+    使用步骤3中的Variable实例来初始化 SubBackward0 实例的 input_metadata_，
+3）前向运算后得到新的Variable result，使用Variable::Impl进行构建。
+4）设置计算历史，使用步骤2) 中的 SubBackward0 实例 grad_fn 初始化该Variable实例的 autograd_meta_->grad_fn_ 成员。
+5）返回 result。这里的 result 就是前向计算的结果，也就是我们示例之中的 Q。
+
+具体代码如下：   yknote---找不到代码
+
+m.impl("sub.Tensor",
+       TORCH_FN(VariableType::sub_Tensor)
+);
+
+at::Tensor sub_Tensor(c10::DispatchKeySet ks, const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
+  auto& self_ = unpack(self, "self", 0);
+  auto& other_ = unpack(other, "other", 1);
+  auto _any_requires_grad = compute_requires_grad( self, other );
+
+  (void)_any_requires_grad;
+  auto _any_has_forward_grad_result = isFwGradDefined(self) || isFwGradDefined(other);
+  (void)_any_has_forward_grad_result;
+  std::shared_ptr<SubBackward0> grad_fn; // 构建SubBackward0
+  if (_any_requires_grad) {
+    // 设置反向计算时候使用的函数
+    grad_fn = std::shared_ptr<SubBackward0>(new SubBackward0(), deleteNode);
+    // 设置下一条边的所有输入变量
+    grad_fn->set_next_edges(collect_next_edges( self, other ));
+    // 设置下一条边的类型
+    grad_fn->other_scalar_type = other.scalar_type();
+    grad_fn->alpha = alpha;
+    grad_fn->self_scalar_type = self.scalar_type();
+  }
+  #ifndef NDEBUG
+  c10::optional<Storage> self__storage_saved =
+    self_.has_storage() ? c10::optional<Storage>(self_.storage()) : c10::nullopt;
+  c10::intrusive_ptr<TensorImpl> self__impl_saved;
+  if (self_.defined()) self__impl_saved = self_.getIntrusivePtr();
+  c10::optional<Storage> other__storage_saved =
+    other_.has_storage() ? c10::optional<Storage>(other_.storage()) : c10::nullopt;
+  c10::intrusive_ptr<TensorImpl> other__impl_saved;
+  if (other_.defined()) other__impl_saved = other_.getIntrusivePtr();
+  #endif
+  auto _tmp = ([&]() {
+    at::AutoDispatchBelowADInplaceOrView guard;
+    // 前向计算
+    return at::redispatch::sub(ks & c10::after_autograd_keyset, self_, other_, alpha);
+  })();
+  // 得到前向计算的输出
+  auto result = std::move(_tmp);
+  if (grad_fn) {
+      // 将输出variable与grad_fn绑定，grad_fn之中包含了计算梯度的function
+      // 设置计算历史
+      set_history(flatten_tensor_args( result ), grad_fn);
+  }
+  if (_any_has_forward_grad_result) {
+      auto self_t_raw = toNonOptFwGrad(self);
+      auto self_t = self_t_raw.defined() ? self_t_raw : at::zeros_like(toNonOptTensor(self));
+      auto other_t_raw = toNonOptFwGrad(other);
+      auto other_t = other_t_raw.defined() ? other_t_raw : at::zeros_like(toNonOptTensor(other));
+      auto result_new_fw_grad = self_t - maybe_multiply(other_t, alpha);
+      if (result_new_fw_grad.defined()) {
+        // The hardcoded 0 here will need to be updated once we support multiple levels.
+        result._set_fw_grad(result_new_fw_grad, /* level */ 0, /* is_inplace_op */ false);
+      }
+  }
+  return result;
+}
+我们接下来逐一分析。首先要分析基础函数，然后再回来分析 sub_Tensor。
+
+4.3 边基础函数
+我们首先介绍两个构建边相关的函数。
+
+4.3.1 create_gradient_edge
+create_gradient_edge代码位于 torch/csrc/autograd/function.h。其作用是：
+
+    在给定的"变量"和"函数"之间创建一个"边"，该函数是该变量的梯度函数（即，在后向传播过程中计算该变量梯度的函数）。
+    此函数将设置"variable"的"grad_fn"属性。
+
+create_gradient_edge 方法假定'Variable'是梯度函数的新输入，因此其'input_nr'等于function->num_inputs()。
+此外，它还将"节点"的输入数增加一。
+
+如果不希望增加"节点"的"num_inputs"，请直接使用"set_gradient_edge"。
+从功能上来说，create_gradient_edge 大约相当于
+variable.set_gradient_edge(function, function->add_input_metadata(variable.dispatch_type(), variable.sizes()))。
+
+/// Create an `Edge` between the given `variable` and the `function`, which is
+/// assumed to be the gradient function of this variable (i.e. the function
+/// through which this variable is backpropagated during the backward pass).
+/// This sets the `grad_fn` property of the `variable`. This function assumes
+/// that the `Variable` is a new input to the gradient function and its
+/// `input_nr` thus equal to `function->num_inputs()`. Additionally, it
+/// increments the `Node`'s number of inputs by one. Approximately
+/// equivalent to `variable.set_gradient_edge(function,
+/// function->add_input_metadata(variable.dispatch_type(), variable.sizes()))`.
+/// If you don't want the `Node`'s `num_inputs` to be incremented, use
+/// `set_gradient_edge` directly.
+inline void create_gradient_edge(
+    Variable& variable,
+    std::shared_ptr<Node> function) {
+  // Copy before move.
+  const auto input_nr = function->add_input_metadata(variable);
+  impl::set_gradient_edge(variable, {std::move(function), input_nr});
+}
+4.3.2 set_gradient_edge
+set_gradient_edge 代码位于 torch/csrc/autograd/variable.cpp。
+
+配置历史的操作会最终调用到这里，这是使用 edge 来真正配置了本张量如何计算梯度，而且是配置到了 Variable 类之上的 autograd_meta_。
+即获取 Tensor 的 autograd_meta_，配置其 grad_fn_ 和 output_nr_。
+
+void set_gradient_edge(const Variable& self, Edge edge) {
+  auto* meta = materialize_autograd_meta(self);
+  meta->grad_fn_ = std::move(edge.function); // 配置梯度函数
+  meta->output_nr_ = edge.input_nr; // 配置梯度函数的第几个输出
+  // For views, make sure this new grad_fn_ is not overwritten unless it is necessary
+  // in the VariableHooks::grad_fn below.
+  // This logic is only relevant for custom autograd Functions for which multiple
+  // operations can happen on a given Tensor before its gradient edge is set when
+  // exiting the custom Function.
+  auto diff_view_meta = get_view_autograd_meta(self);
+  if (diff_view_meta && diff_view_meta->has_bw_view()) {
+    diff_view_meta->set_attr_version(self._version());
+  }
+}
+
+其中，materialize_autograd_meta 代码如下，其作用就是从 Tensor 之中获取 autograd_meta_。
+
+  AutogradMeta* materialize_autograd_meta(const Variable& self) {
+    TORCH_CHECK(self.defined(), "cannot call materialize_autograd_meta() on undefined tensor");
+    auto p = self.unsafeGetTensorImpl();
+    if (!p->autograd_meta()) {
+      p->set_autograd_meta(std::make_unique<AutogradMeta>());
+    }
+    return get_autograd_meta(self);
+  }
+
+get_view_autograd_meta 代码如下，返回了 DifferentiableViewMeta。
+
+  DifferentiableViewMeta* get_view_autograd_meta(const Variable& self) {
+    // NB: return nullptr if self is not a view
+    AutogradMeta* meta = get_autograd_meta(self);
+    if (meta && meta->is_view_) {
+      return static_cast<DifferentiableViewMeta*>(meta);
+    } else {
+      return nullptr;
+    }
+  }
+
+4.4 构建网络
+我们已经分析了 SubBackward0 和 基础函数，接下返回来分析 sub_Tensor 的实现。首先是构建后向传播网络。
+
+    首先，构建一个 SubBackward0 grad_fn。
+
+    其次，对 grad_fn 进行设置，主要是 使用collect_next_edges()搜集 sub 操作两个变量的，然后进行set_next_edges。
+
+    然后，进行前向计算，得到前向计算的输出。
+
+    最后，将输出variable加入到history之中，将输出variable与grad_fn绑定。
+
+下面代码只是保留 sub_Tensor 关键部分。
+===yknote 可能是tools/autograd/gen_variable_type.py生成的代码
+
+  std::shared_ptr<SubBackward0> grad_fn;
+  if (_any_requires_grad) {
+    // 反向计算时候使用的函数
+    grad_fn = std::shared_ptr<SubBackward0>(new SubBackward0(), deleteNode);
+    // 设置下一条边的所有输入变量
+    grad_fn->set_next_edges(collect_next_edges( self, other ));
+    grad_fn->other_scalar_type = other.scalar_type();
+    grad_fn->alpha = alpha;
+    grad_fn->self_scalar_type = self.scalar_type();
+  }
+  auto _tmp = ([&]() {
+    at::AutoDispatchBelowADInplaceOrView guard;
+    // 前向计算
+    return at::redispatch::sub(ks & c10::after_autograd_keyset, self_, other_, alpha);
+  })();
+  // 得到前向计算的输出
+  auto result = std::move(_tmp);
+  if (grad_fn) {
+      // 将输出variable与grad_fn绑定，grad_fn之中包含了计算梯度的function
+      // 将本身计算加入到计算历史之中
+      set_history(flatten_tensor_args( result ), grad_fn);
+  }
+
+4.5 构建边
+构建网络的关键部分就是构建边，这里是配置反向传播的输出边（输出边对应了SubBackward0的两个输入），其中有两步骤:
+
+    使用 collect_next_edges 来收集输入参数（张量）的边，
+    得到了后续边，后续边就是两个输入参数 self和other的gradient_edge()。
+
+    使用 set_next_edges 把边配置到张量上。
+    当set_next_edges调用完成后，一个 Node 的 next_edges_成员（类型为std::vector）就会初始化完成。
+
+4.5.1 获取边
+collect_next_edges 函数就是用来根据输入变量来获取边。其实，collect_next_edges 就是得到 self 和 other 的gradient_edge。
+
+4.5.1.1 gradient_edge
+gradient_edge方法作用是返回通过Variable的 grad_fn_构建的Edge实例，逻辑如下：
+
+    就是如果一个节点有 grad_fn：
+
+        说明节点是内部节点（通过运算内部创建的）。
+        grad_fn_就是这个Variable的gradient function，
+        那么就使用 grad_fn来构建一个 Edge返回。
+
+    如果一个节点没有 grad_fn：
+        说明是叶子节点（用户创建的）。
+
+        grad_fn_ 是这个Variable的gradient accumulator，也就是一个AccumulateGrad类（Function子类）的实例。
+        PyTorch 使用grad_accumulator来累加输出给这个Variable的梯度。
+
+        使用grad_accumulator来构建一个 Edge返回。
+
+代码如下，需要注意的是，output_nr是当前variable在前向计算时是第几个输出，
+对于单输出的算子比如add或者mul来说，output_nr一般都是0，但对于多输出的算子比如split，则output_nr可能是0,1,2...。
+
+Edge gradient_edge(const Variable& self) {
+  // If grad_fn is null (as is the case for a leaf node), we instead
+  // interpret the gradient function to be a gradient accumulator, which will
+  // accumulate its inputs into the grad property of the variable. These
+  // nodes get suppressed in some situations, see "suppress gradient
+  // accumulation" below. Note that only variables which have `requires_grad =
+  // True` can have gradient accumulators.
+
+  // self.grad_fn() 这里触发了一个调用，得到了一个SubBackward0实例
+  if (const auto& gradient = self.grad_fn()) { // 这是一个中间节点，gradient 是一个Function
+    return Edge(gradient, self.output_nr()); // self.output_nr() 表示本Edge是function的第n个输入。前向传播时候的第 n 个输出在反向传播时候就是第 n 个输入。
+  } else {
+    return Edge(grad_accumulator(self), 0); // 这是一个叶子节点，所以生成一个AccumulateGrad，0表示本Edge是function的第一个输入
+  }
+}
+
+4.5.1.2 gradient accumulator
+这里有一步需要注意，就是 gradient_edge 方法中，有这样一个语句 return Edge(grad_accumulator(self), 0)，
+这个代码实际是触发Variable::grad_accumulator()调用。
+
+在一个Variable第一次调用这个API的时候，会生成一个AccumulateGrad 来初始化它的 grad_accumulator_成员，代码如下：
+
+  std::shared_ptr<Node> grad_accumulator(const Variable& self) {
+    auto autograd_meta = get_autograd_meta(self);
+    if (!autograd_meta) {
+      return nullptr;
+    }
+    if (autograd_meta->grad_fn_) {
+      throw std::logic_error(
+          "grad_accumulator() should be only called on leaf Variables");
+    }
+    if (!autograd_meta->requires_grad_) {
+      return nullptr;
+    }
+
+    std::lock_guard<std::mutex> lock(autograd_meta->mutex_);
+
+    auto result = autograd_meta->grad_accumulator_.lock();
+    if (result)
+      return result;
+
+    c10::raw::intrusive_ptr::incref(self.unsafeGetTensorImpl());
+    auto intrusive_from_this = c10::intrusive_ptr<at::TensorImpl>::reclaim(self.unsafeGetTensorImpl());
+    // 这里会初始化一个AccumulateGrad，配置给grad_accumulator_
+    result = std::make_shared<AccumulateGrad>(Variable(std::move(intrusive_from_this)));
+    autograd_meta->grad_accumulator_ = result;
+    return result;
+  }
+4.5.1.3 AccumulateGrad
+AccumulateGrad 定义位于 torch/csrc/autograd/functions/accumulate_grad.h
+
+struct TORCH_API AccumulateGrad : public Node {
+  explicit AccumulateGrad(Variable variable_); // 必须用一个Variable构建
+  variable_list apply(variable_list&& grads) override; // 接收一个list的Variable的实例
+  Variable variable;
+};
+
+其构造函数在 torch/csrc/autograd/functions/accumulate_grad.cpp。
+
+这会new一个AccumulateGrad对象，使用UINT64_MAX 来初始化Function的sequence_nr_成员。
+
+AccumulateGrad::AccumulateGrad(Variable variable_)
+   : Node(/*sequence_nr=*/UINT64_MAX),
+   variable(std::move(variable_)) {
+  add_input_metadata(variable);
+}
+
+4.5.1.4 收集边
+collect_next_edges 这里建立了边。收集了所有输入的边。
+
+/// Return the next edges of all the given variables, or tuples of variables.
+template <typename... Variables>
+edge_list collect_next_edges(Variables&&... variables) {
+  detail::MakeNextFunctionList make; // 这里将调用gradient_edge
+  // next_edges_成员的值来自前向时候的输入参数
+  make.apply(std::forward<Variables>(variables)...);
+  return std::move(make.next_edges);
+}
+MakeNextFunctionList 的定义如下，apply 时候会构建 gradient_edge，这就对应了前面所说的 gradient_edge 等小节。
+
+struct MakeNextFunctionList : IterArgs<MakeNextFunctionList> {
+  edge_list next_edges;
+  using IterArgs<MakeNextFunctionList>::operator();
+  void operator()(const Variable& variable) {
+    if (variable.defined()) {
+      next_edges.push_back(impl::gradient_edge(variable)); // 调用gradient_edge
+    } else {
+      next_edges.emplace_back();
+    }
+  }
+  void operator()(const c10::optional<Variable>& variable) {
+    if (variable.has_value() && variable->defined()) {
+      next_edges.push_back(impl::gradient_edge(*variable)); // 调用gradient_edge
+    } else {
+      next_edges.emplace_back();
+    }
+  }
+};
+此时得到了 edge_list，但是没有和 SubBackward0 建立联系。
+
++------------------------+      +----------------------+
+| SubBackward0           |      |                      |
+|                        |      | Compute the gradient |
+|    apply  +-----------------> |                      |
+|                        |      +----------------------+
+|                        |
+|                        |
+|    next_edges_         |
+|                        |
+|    other_scalar_type   |
+|                        |
+|    alpha               |
+|                        |
+|    self_scalar_type    |
+|                        |
+|    input_metadata_     |
+|                        |
++------------------------+
+
+
++-----------------------------------------------------+
+| edge_list                                           |
+|                                                     |
+| [(MulBackward0(self), 0), (PowBackward0(other), 0)] |
+|                                                     |
++-----------------------------------------------------+
+4.5.2 配置边
+获取到了所有输出边之后，接下来就要设置到 SubBackward0 的 next_edges_ 之上，
+一定要注意，next_edges_成员的值来自前向传播时候的输入参数。
+
+void set_next_edges(edge_list&& next_edges) {
+  next_edges_ = std::move(next_edges); // 这里设置了边
+  for(const auto& next_edge : next_edges_) {
+    update_topological_nr(next_edge);
+  }
+}
+update_topological_nr 会依据输出边来设置 topological_nr
+
+  void update_topological_nr(const Edge& edge) {
+    Node* node = edge.function.get();
+    if (node) {
+      auto topo_nr = node->topological_nr();
+      if (topological_nr_ <= topo_nr) {
+        topological_nr_ = topo_nr + 1;
+      }
+    }
+  }
+结合我们的例子，此时应该如下图，下图中 0 的意义举例如下：(PowBackward0(other), 0) 中的 0 表示SubBackward0 的计算输出是 PowBackward0 的第一个输入（原始幂运算只有一个输出）。
+
++------------------------+      +----------------------+
+| SubBackward0           |      |                      |
+|                        |      | Compute the gradient |
+|    apply  +-----------------> |                      |
+|                        |      +----------------------+
+|                        |
+|                        |      +-----------------------------------------------------+
+|    next_edges_  +-----------> | edge_list                                           |
+|                        |      |                                                     |
+|    other_scalar_type   |      | [(MulBackward0(self), 0), (PowBackward0(other), 0)] |
+|                        |      |                                                     |
+|    alpha               |      +-----------------------------------------------------+
+|                        |
+|    self_scalar_type    |
+|                        |
+|    input_metadata_     |
+|                        |
++------------------------+
+
+4.6 配置历史
+接下来是配置历史，result 是之前代码计算出来的前向传播输出，这里其实是配置反向传播的输入参数 和 输入如何计算。
+
+  if (grad_fn) { // grad_fn 就是 std::shared_ptr<SubBackward0>
+      // 将输出variable与grad_fn绑定，grad_fn之中包含了计算梯度的function
+      set_history(flatten_tensor_args( result ), grad_fn);
+  }
+
+set_history 会把前向传播结果加入到history之中，具体就是遍历结果中的张量，然后把每一个张量加入到history。
+其中关键一点是调用了前面提到的 set_gradient_edge，
+把 grad_fn（就是 SubBackward0）配置给了result.autograd_meta_ 的 grad_fn_。
+
+回忆一下 Tensor 的成员变量 grad_fn 定义。
+
+grad_fn：指向一个Function对象。
+
+    这个Function对象用来在反向传播时候计算输入的梯度。
+
+    若本张量是非叶节点，则 Function 是向叶节点方向操作的反向传播函数，
+    比如例子里 O 节点对应的函数就是MulBackward，即乘法操作的反向函数；
+
+经过对比，就可以知道，前向操作的输入 result 在反向传播计算梯度时候，就会使用 grad_fn_ 来计算梯度，
+就是我们这里的 SubBackward0。这样就设置了反向传播如何针对输入来计算梯度。
+
+具体 set_history 代码如下：
+
+inline void set_history(
+    at::Tensor& variable,
+    const std::shared_ptr<Node>& grad_fn) {
+  if (variable.defined()) {
+    // grad_fn 的 input_metadata 之中添加了输出实例，输出实例在反向传播时候就是输入
+    auto output_nr = grad_fn->add_input_metadata(variable);
+    // 输出实例 result 中设置上了grad_fn，这里配置了边，边就是 {grad_fn, output_nr}。
+    // output_nr_被赋值成了"当前Variable信息在input_metadata_中的index"。
+    impl::set_gradient_edge(variable, {grad_fn, output_nr});
+  } else {
+    // 设置成未定义
+    grad_fn->add_input_metadata(Node::undefined_input());
+  }
+}
+
+inline void set_history(
+    std::vector<Variable>&& variables,
+    const std::shared_ptr<Node>& grad_fn) {
+  for (auto& variable : variables) {
+    set_history(variable, grad_fn); // 调用到上面的函数
+  }
+}
+4.6.1 配置meta
+配置历史中，首先是配置input_metadata。将 input_metadata 之中添加了输出实例 result，输出实例 result 在反向传播时候就是输入。
+
+4.6.1.1 input_metadata_
+Node 类之中，input_metadata_ 的类型如下：
+
+at::SmallVector<InputMetadata, 2> input_metadata_;
+具体 InputMetadata 定义如下：
+
+struct InputMetadata {
+
+  InputMetadata(const at::TensorOptions options, at::IntArrayRef shape, at::Device device)
+  : options_{options}, shape_{shape}, device_{device} {
+    stream_ = c10::impl::getDeviceGuardImpl(device_.type())->getStream(device_);
+  }
+
+  InputMetadata(const at::Tensor& t)
+  : InputMetadata(t.options(), t.sizes(), t.device()) { }
+
+private:
+  const at::TensorOptions options_;
+  at::DimVector shape_;
+  at::Device device_ = at::kCPU;
+  c10::Stream stream_ = c10::Stream(c10::Stream::Default::DEFAULT, device_);
+};
+
+4.6.1.2 配置meta
+add_input_metadata 方法之中 将meta 信息配置如下：
+
+/// Adds the type and shape metadata for a new input. Returns the index of
+/// of the new input.
+uint32_t add_input_metadata (
+  const at::TensorOptions& options
+, at::IntArrayRef shape
+, at::Device device) noexcept {
+  uint32_t input_nr = input_metadata_.size();
+  input_metadata_.emplace_back(options, shape, device);
+  return input_nr;
+}
+配置之后，input_metadata_ 里面就增加了一个新 InputMetadata，
+InputMetadata 内容就是 输出变量 result 的部分信息 (type, shape, device)，
+input_metadata_ 中的 index 就是 AutogradMeta 之中的 output_nr_。
+
+所以，此时内存大致如下：
+
+               +-------------------------------------------------------------------------------------------------------------+
+ self +--+     | sub_Tensor                                                                                                  |
+         |     |                  +--------------------------+      +----------------------+                                 |
+         +---->+                  |SubBackward0              |      |                      |                                 |
+         |     |                  |                          |      | Compute the gradient |                                 |
+other +--+     | +--> grad_fn---> |      apply  +-----------------> |                      |                                 |
+               | |                |                          |      +----------------------+                                 |
+               | |                |                          |                                                               |
+               | |                |                          |      +-----------------------------------------------------+  |
+               | |                |      next_edges_  +-----------> | edge_list                                           |  |
+               | |                |                          |      |                                                     |  |
+               | |                |      other_scalar_type   |      | [(PowBackward0(self), 0), (PowBackward0(other), 0)] |  |
+               | |                |                          |      |                                                     |  |
+               | |                |      alpha               |      +-----------------------------------------------------+  |
+               | |                |                          |                                                               |
+               | |                |      self_scalar_type    |      +------------------------------------------------------+ |
+               | |                |                          |      |                                                      | |
+               | |                |      input_metadata_  +-------> | [(type of result, shape of result, device of result)]| |
+               | |                |                          |      |                                                      | |
+               | |                +--------------------------+      +------------------------------------------------------+ |
+               | |                                                                                                           |
+               | |                                                                                                           |
+               | |                +-----------------------+         +---------------------------------------+                |
+               | |                |result                 |         | DifferentiableViewMeta                |                |
+               | |                |                       |         |                                       |                |
+               | |                |    autograd_meta_ +-----------> |       grad_        grad_accumulator_  |                |
+               | |                |                       |         |                                       |                |
+               | |                +-----------------------+         |                                       |                |
+               | +--------------------------------------------------------- grad_fn_     output_nr_         |                |
+               |                                                    |                                       |                |
+               |                                                    +---------------------------------------+                |
+               +-------------------------------------------------------------------------------------------------------------+
+
+手机如下：14.png
+
+4.7 印证
+我们和之前示例对照印证，把示例代码继续细化，得到：
+
+a = torch.tensor(2., requires_grad=True)
+b = torch.tensor(6., requires_grad=True)
+X = a ** 3
+Y = 3 * X
+Z = b ** 2
+Q = X - Z
+external_grad = torch.tensor(1.)
+Q.backward(gradient=external_grad)
+print(a.grad)
+print(b.grad)
+
+看看运行时变量如下，因为 Q = X - Z 是减法，所以对应的反向操作就是 SubBackward0：
+
+Q = {Tensor} tensor(-28., grad_fn=<SubBackward0>)
+X = {Tensor} tensor(8., grad_fn=<PowBackward0>)
+Y = {Tensor} tensor(24., grad_fn=<MulBackward0>)
+Z = {Tensor} tensor(36., grad_fn=<PowBackward0>)
+a = {Tensor} tensor(2., requires_grad=True)
+b = {Tensor} tensor(6., requires_grad=True)
+
+我们再具体看看，注意，(<PowBackward0 object at 0x00000177300F4688>, 0) 这里的 0 表示本Node是PowBackward0的第0的输出，也就是唯一输出。
+
+Q = {Tensor}
+ grad_fn = {SubBackward0}
+  next_functions = {tuple: 2}
+   0 = {tuple: 2} (<PowBackward0 object at 0x00000177300F4688>, 0)
+   1 = {tuple: 2} (<PowBackward0 object at 0x00000177300F46C8>, 0)
+
+
+X = {Tensor}
+ grad_fn = {PowBackward0}
+  next_functions = {tuple: 1}
+   0 = {tuple: 2} (<AccumulateGrad object at 0x00000177300F49C8>, 0)
+
+Z = {Tensor}
+ grad_fn = {PowBackward0}
+  next_functions = {tuple: 1}
+   0 = {tuple: 2} (<AccumulateGrad object at 0x00000177301003C8>, 0)
+
+Y = {Tensor}
+ grad_fn = {MulBackward0}
+  next_functions = {tuple: 2}
+   0 = {tuple: 2} (<PowBackward0 object at 0x0000017730100CC8>, 0)
+   1 = {tuple: 2} (None, 0)
+对应简要图是：15.png
+
+对应逻辑：
+
+    以 self 和 other 两个张量为参数，调用 sub_Tensor
+
+    使用 grad_fn = std::shared_ptr(new SubBackward0(), deleteNode); 构建一个SubBackward0。
+    其中，grad_fn 的 next_edges_成员的值来自前向传播的输入参数，就是self 和 other。
+
+    使用 at::redispatch::sub 进行前向计算，得到 result。
+
+    使用 set_history 设置计算历史。set_history 这里包含两个部分
+
+    使用 output_nr = grad_fn->add_input_metadata(variable) 为 grad_fn 的 input_metadata 之中添加了输出实例。
+
+    使用 impl::set_gradient_edge(variable, {grad_fn, output_nr}) 给 输出实例 result 的属性 autograd_meta_->grad_fn_ 中设置上了grad_fn。
+
+    最后返回了 result。
+
+可以看到，sub_Tensor 针对 result 做了如下配置：
+
+    如何知道调用反向计算 ：
+    result 就是前向计算的结果，result 之中有 autograd_meta_，其是一个 DifferentiableViewMeta 类型，
+    DifferentiableViewMeta 的 grad_ 和 grad_fn_ 就是反向计算的梯度函数。
+    grad_fn_ 指向了 SubBackward0。
+
+    反向传播如何计算 ：调用 SubBackward0 计算。
+
+    SubBackward0 的输入 ：
+    得到了前向计算的输出 result（其会在反向传播时候作为输入变量，就是设定到了 SubBackward0.input_metadata_ 之上）。
+
+    SubBackward0 的输出 ：
+    构建了 next_edges_ 作为其反向传播时候的输出边。根据 next_edges_ 就能得到反向传导图了。
+
+其逻辑图如下：
+
+               +---------------------------------------------------------------------------------------------------------------+
+ self +--+     | sub_Tensor                  +--------------------------+      +----------------------+                        |
+         |     |                             |SubBackward0              |      |                      |                        |
+         +---->+                2            |                          |      | Compute the gradient |                        |
+         |  1  |     +-----> grad_fn +-----> |      apply  +-----------------> |                      |                        |
+other +--+     |     |                       |                          |      +----------------------+                        |
+               |     |                       |                          |                                                      |
+               |     |                       |                          |      +----------------------+                        |
+               |     |                       |      next_edges_  +-----------> | edge_list            |                        |
+               |     |                       |                          |      |                      |                        |
+               |     |                       |      other_scalar_type   |      |      self, other     |                        |
+               |     |                       |                          |      |                      |                        |
+               |     |                       |      alpha               |      +----------------------+                        |
+               |     |                       |                          |                                                      |
+               |     |                       |      self_scalar_type    |                                                      |
+               |     |                       |                          |                                                      |
+               |     |                       |      input_metadata_  +------> [result]                                         |
+               |     |                       |                          |     ^                                                |
+               |     |                       +--------------------------+     |                                                |
+               |     |                                                        | 5                                              |
+               |     |                                                        |                                                |
+               |     |     3 result = at::redispatch::sub           +--------------------------------------------------------+ |
+               |     |                                              |         |                                              | |
+               |     |                                              |         +                                              | |
+               |     |                                              | output_nr = grad_fn+>add_input_metadata(variable)      | |
+               |     |     4 set_history(result, grad_fn) +-------> |                                                        | |
+               |     |                                              | impl::set_gradient_edge(variable,a{grad_fn, output_nr})| |
+               |     |                                              |                             +                          | |
+               |     +----------------------------+                 |                             |                          | |
+               |                             6    |                 +--------------------------------------------------------+ |
+               |                                  |                                               |                            |
+               |  +-----------------------+       |     +-----------------------------------+     | 7                          |
+               |  |result                 |       |     | DifferentiableViewMeta            |     |                            |
+               |  |                       |       |     |                                   | <---+                            |
+               |  |    autograd_meta_ +---------------->+                                   |                                  |
+               |  |                       |       |     |   grad_        grad_accumulator_  |                                  |
+               |  |                       |       |     |                                   |                                  |
+               |  |                       |       +--------+grad_fn_     output_nr_         |                                  |
+               |  |                       |             |                                   |                                  |
+               |  +------------+----------+             +-----------------------------------+                                  |
+               |               |                                                                                               |
+               +---------------------------------------------------------------------------------------------------------------+
+                               |
+                        result | 7
+                               v
+
+手机如下：16.png
+
+至此，前向计算分析完成，我们下一篇开始介绍后向传播。
+
+0xFF 参考
+https://github.com/KeithYin/read-pytorch-source-code/
+
+pytorch学习笔记（十三）：backward过程的底层实现解析
+
+PyTorch的初始化
+
+pytorch的自动求导机制 - 计算图的建立
+
+How autograd encodes the history
+
+https://pytorch.org/tutorials/beginner/blitz/autograd_tutorial.html
+
+pytorch笔记(计算图+autograd)-Node(1)
+
+详解Pytorch中的网络构造
+
+PyTorch的优化器
+
+PyTorch的分布式
+
+PyTorch的Tensor（下）
+
+PyTorch的Tensor(中)
+
+PyTorch的Tensor（上）
+
+PyTorch的动态图(下)
+
+PyTorch的动态图(上)
+
+计算图——用Pytorch解释李宏毅老师PPT中的实例
+
+如何使用pytorch自动求梯度
+
+PyTorch自动求导（Autograd）原理解析
+
+pytorch自动求导Autograd系列教程（一）
+
+PyTorch核心开发者亲自揭秘其内部机制
+
+PyTorch自动微分基本原理
+
+https://towardsdatascience.com/pytorch-autograd-understanding-the-heart-of-pytorchs-magic-2686cd94ec95
