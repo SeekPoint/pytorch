@@ -392,7 +392,7 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
       // block and can be deallocated (release any references to grad tensors
       // as part of inputs_).
       // 工作线程之中如何消费 NodeTask
-      NodeTask task = local_ready_queue->pop();
+      NodeTask task = local_ready_queue->pop();  // 阻塞等待
       // This will only work if the worker is running a non backward task
       // TODO Needs to be fixed this to work in all cases
       if (task.isShutdownTask_) {
@@ -407,6 +407,7 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
       }
 
       if (task.fn_ && !local_graph_task->has_error_.load()) {
+        // 利用grad_mode_来配置AutoGradMode，整个反向计算期间的代码都靠GradMode::is_enabled()来判断当前是否是要计算grad
         AutoGradMode grad_mode(local_graph_task->grad_mode_);
         try {
           // The guard sets the thread_local current_graph_task on construction
@@ -415,7 +416,7 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
           // callbacks.
           GraphTaskGuard guard(local_graph_task);
           NodeGuard ndguard(task.fn_);
-          // 运行 NodeTask  // 后向计算
+          // 运行 NodeTask  // 后向计算  // 执行后向计算
           evaluate_function(local_graph_task, task.fn_.get(), task.inputs_, local_graph_task->cpu_ready_queue_);
         } catch (std::exception& e) {
           thread_on_exception(local_graph_task, task.fn_, e);
@@ -427,11 +428,11 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
     --local_graph_task->outstanding_tasks_; // 运行 NodeTask完毕，这里减一
 
     // Check if we've completed execution.
-    if (local_graph_task->completed()) {   // 判断 GraphTask是否结束。
-      // 做相关处理工作
+    if (local_graph_task->completed()) {   // 判断 GraphTask是否结束。  // 已经结束了，进行后续处理 // 判断是否结束
+      // 做相关处理工作  // 如果结束了，就进行后续操作
       local_graph_task->mark_as_completed_and_run_post_processing();
 
-      auto base_owner = local_graph_task->owner_;
+      auto base_owner = local_graph_task->owner_; // 后续是需要在 GraphTask 的 owner_ 处理  // 当前设备
       // The current worker thread finish the graph_task, but the owning thread
       // of the graph_task might be sleeping on pop() if it does not have work.
       // So we need to send a dummy function task to the owning thread just to
@@ -441,8 +442,12 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
       //
       // NB: This is not necessary if the current thread is the owning thread.
       if (worker_device != base_owner) {
+
+          // 不是同一个设备
+
         // Synchronize outstanding_tasks_ with queue mutex
         std::atomic_thread_fence(std::memory_order_release);
+        // 获取后续工作的queue
         ready_queue_by_index(local_graph_task->cpu_ready_queue_, base_owner)
             ->push(NodeTask(local_graph_task, nullptr, InputBuffer(0)));
       }
@@ -487,6 +492,7 @@ void Engine::thread_on_exception(
 }
 
 bool GraphTask::completed() {
+  // outstanding_tasks在evaluate_function中可能会被改变
   return outstanding_tasks_.load() == 0 ||
       (exit_on_error_ && has_error_.load());
 }
@@ -506,14 +512,14 @@ void GraphTask::mark_as_completed_and_run_post_processing() {
     // Drop lock prior to completing, to avoid holding across callbacks.
     std::unique_lock<std::mutex> lock(mutex_);
 
-    exec_post_processing();
+    exec_post_processing();  // 进行后续操作
     std::vector<Variable> vars = std::move(captured_vars_); //最后返回的输出
 
     // Need to unlock before we call markCompleted to avoid holding locks
     // when the callbacks are called.
     lock.unlock();
     // NOLINTNEXTLINE(performance-move-const-arg)
-    future_result_->markCompleted(std::move(vars)); // 反向传播最后的返回输出
+    future_result_->markCompleted(std::move(vars)); // 反向传播最后的返回输出   // 通知主线程
   } catch (std::exception& e) {
     future_result_->setErrorIfNeeded(std::current_exception());
   }
@@ -730,22 +736,32 @@ static variable_list call_function(
 
 void Engine::evaluate_function(
     std::shared_ptr<GraphTask>& graph_task,
-    Node* func,
-    InputBuffer& inputs,
+    Node* func, // 导数计算方法
+    InputBuffer& inputs, // 当前Node的输入梯度
     const std::shared_ptr<ReadyQueue>& cpu_ready_queue) {
+
+  // 进行准备工作
   // If exec_info_ is not empty, we have to instrument the execution
   auto& exec_info_ = graph_task->exec_info_;
   if (!exec_info_.empty()) {
     // 省略了梯度累积部分代码，具体可以参见上面章节
     auto& fn_info = exec_info_.at(func);
-    if (auto* capture_vec = fn_info.captures_.get()) {
+    if (auto* capture_vec = fn_info.captures_.get()) {   // 取出当前的进行处理
       // Lock mutex for writing to graph_task->captured_vars_.
       std::lock_guard<std::mutex> lock(graph_task->mutex_);
       for (const auto& capture : *capture_vec) {
+        // captured_grad 就是临时存储下，每次node计算都会更新，最终输出给调用者，相当于引用
+        // 1. captured_grad 引用了captured_vars_[capture.output_idx_]，
+
         // 获取到 captured_vars_，然后对其进行后置操作
         auto& captured_grad = graph_task->captured_vars_[capture.output_idx_];
+
+        // 2. 给 captured_vars_[capture.output_idx_] 赋值 inputs[capture.input_idx_]
         // 这里是引用操作，所以 captured_grad 的赋值实际就是往 graph_task->captured_vars_ 赋值
         captured_grad = inputs[capture.input_idx_];
+
+        // 遍历hooks，链式调用hook进行计算，captured_grad 不停的作为输入和输出在流水线中流淌
+        // 就是针对 captured_vars_[capture.output_idx_]不停的计算，最终结果还是在 captured_vars_[capture.output_idx_] 之中。
         for (auto& hook : capture.hooks_) {
         //这里调用 hook，就是 DistAccumulateGradCaptureHook 的 operator()，captured_grad 就是累积的梯度
           captured_grad = (*hook)(captured_grad);  // 这里使用了 hook 进行后置操作
@@ -767,14 +783,17 @@ void Engine::evaluate_function(
   const auto opt_parent_stream = (*func).stream(c10::DeviceType::CUDA);
   c10::OptionalStreamGuard parent_stream_guard{opt_parent_stream};
 
-// 这里就是调用 recvBackward.apply 函数  // 执行后向计算
+  // 进行反向计算
+  // 这里就是调用 recvBackward.apply 函数  // 执行后向计算
   auto outputs = call_function(graph_task, func, inputs);
 
+  // 如果不需要保持计算图，则本节点释放变量
   auto& fn = *func;
   if (!graph_task->keep_graph_) {
     fn.release_variables();
   }
 
+  // 得到 num_outputs的元素数量（该数量等同于当前fn的next_edge()返回的list中的元素数量），后续遍历本节点输出时候会用到
   int num_outputs = outputs.size();
   if (num_outputs == 0) { // Note: doesn't acquire the mutex
     // Records leaf stream (if applicable)
@@ -799,33 +818,48 @@ void Engine::evaluate_function(
     }
   }
 
+  // 准备下一步工作
   // Lock mutex for the accesses to GraphTask dependencies_, not_ready_ and cpu_ready_queue_ below
   std::lock_guard<std::mutex> lock(graph_task->mutex_);
+  // 遍历输出节点，逐一衡量
   for (int i = 0; i < num_outputs; ++i) {  // 遍历自己的输出  // 遍历输入节点
     auto& output = outputs[i];
-    const auto& next = fn.next_edge(i);   // 找到第i个输出   // 查找下一个可以计算的节点
+
+    // next_edge是该node在前向传播图中的输入，在反向传播时候就是本节点的输出，所以next就是下一个可能运算的节点
+    const auto& next = fn.next_edge(i);   // 找到第i个输出   // 查找下一个可以计算的节点  // 获得一个输出节点
 
     if (!next.is_valid()) continue;
 
     // Check if the next function is ready to be computed
     bool is_ready = false;
 
-    // 得到依赖关系
+    // 得到依赖关系   // 拿到GraphTask的依赖关系
     auto& dependencies = graph_task->dependencies_;
+
+     // 找到下一个节点的依赖   // 找到输出节点的依赖项
     auto it = dependencies.find(next.function.get()); // 找到第i个输出的依赖关系
 
     if (it == dependencies.end()) {
-      auto name = next.function->name();
+      auto name = next.function->name();  // 没找到
       throw std::runtime_error(std::string("dependency not found for ") + name);
     } else if (--it->second == 0) { // 因为本节点的后向计算已经完成，所以第i个输出的依赖数目减一
+
+      // 找到了，并且已经计算完毕
       dependencies.erase(it); // 如果为0，说明没有依赖了，就从依赖关系之中删除
+
+      // 下一个节点没有入度了，那么说明计算该节点梯度依赖的其他节点梯度都已经计算完成
       is_ready = true; // true 代表没有依赖关系，可以构建一个 NodeTask 进行下一步反向计算了
     }
 
+    // 要去 not_ready里面看看，是否已经存储了
     auto& not_ready = graph_task->not_ready_;
+
+    // 找到输入buffer
     auto not_ready_it = not_ready.find(next.function.get());
     if (not_ready_it == not_ready.end()) { // 如果未就绪队列之中没有next节点
+      // 下一个节点的梯度还没有进行计算
       // Skip functions that aren't supposed to be executed
+      // 跳过不需要计算的节点
       if (!exec_info_.empty()) {
         auto it = exec_info_.find(next.function.get());
         if (it == exec_info_.end() || !it->second.should_execute()) {
@@ -833,9 +867,11 @@ void Engine::evaluate_function(
         }
       }
       // No buffers have been allocated for the function
+      // 下一个节点前置梯度的buffer，就是下一个节点的输入梯度
       InputBuffer input_buffer(next.function->num_inputs());  // 整理 next 节点的输入参数信息
 
       // Accumulates into buffer
+      // 下一个节点的输入梯度就是当前节点的输出，所以要拷贝过去
       const auto opt_next_stream = next.function->stream(c10::DeviceType::CUDA);
       input_buffer.add(next.input_nr,  // 插入 next 节点的输入参数信息
                        std::move(output),
@@ -843,15 +879,21 @@ void Engine::evaluate_function(
                        opt_next_stream);
 
       if (is_ready) { // is_ready 是前面小节之中，通过依赖关系计算出来的，true表示可以进行反向计算了
+
+        //// 找出了下一个Node的queue
         auto queue = ready_queue(cpu_ready_queue, input_buffer.device());
+
+        // 既然依赖全部完成，就插入到ReadyQueue 之中
         // 插入下一个需要计算的NodeTask
         queue->push(
             NodeTask(graph_task, next.function, std::move(input_buffer)));
       } else {
+        // 下一个节点的输入依赖还没有完成，就放到not_ready之中。
         // 还有依赖关系，不能进行反向计算，只能放入未就绪队列 not_ready_
         not_ready.emplace(next.function.get(), std::move(input_buffer));
       }
     } else {  // 如果未就绪队列之中已经有next节点
+      // 如果下一个节点已经开始计算，但是没有完成（就是依赖梯度还有），此时应该在not_ready之中
       // The function already has a buffer
       auto &input_buffer = not_ready_it->second;
 
@@ -861,11 +903,17 @@ void Engine::evaluate_function(
                        std::move(output),
                        opt_parent_stream,
                        opt_next_stream);
+
+      // Graph中每一个node（fn）的输出是下一个node（fn）的输入，下面4句代码来将前一个fn的输出转化为下一个fn的输入
       if (is_ready) {  // 如果可以计算，就放入ready 队列
+        // 如果此时已经没有输入依赖，就放入新的NodeTask，就是下一个需要计算梯度的NodeTask
+        // 找出了下一个Node的queue
         auto queue = ready_queue(cpu_ready_queue, input_buffer.device());
         // 插入下一个需要计算的NodeTask
         queue->push(
             NodeTask(graph_task, next.function, std::move(input_buffer)));
+
+        //已经完成下一个节点前置梯度计算，从not_ready中移除相应的buffer
         not_ready.erase(not_ready_it); // 同时从未就绪队列之中移除
       }
     }
