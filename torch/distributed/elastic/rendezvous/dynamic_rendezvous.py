@@ -273,8 +273,8 @@ class _RendezvousState:
     complete: bool
     deadline: Optional[datetime]
     closed: bool
-    participants: Dict[_NodeDesc, int]
-    wait_list: Set[_NodeDesc]
+    participants: Dict[_NodeDesc, int] # 参与者，未来会用到的成员变量
+    wait_list: Set[_NodeDesc]  # 等待者，这里用到的成员变量
     last_heartbeats: Dict[_NodeDesc, datetime]
 
     def __init__(self) -> None:
@@ -283,7 +283,7 @@ class _RendezvousState:
         self.deadline = None
         self.closed = False
         self.participants = {}
-        self.wait_list = set()
+        self.wait_list = set() # 这里用到的成员变量
         self.last_heartbeats = {}
 
 
@@ -560,12 +560,13 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                     )
 
             self._state = self._state_holder.state # 得到最新的状态
-
+            # 利用最新状态构建了 ctx
             ctx = _RendezvousContext(self._node, self._state, self._settings)
 
             # Determine the next action to take based on the current state of
             # the rendezvous.
-            action = state_handler(ctx, deadline) # 决定下一个操作，state_handler 就是算子
+            # 调用_RendezvousJoinOp，决定下一个操作，这里得到了 _Action.ADD_TO_WAIT_LIST
+            action = state_handler(ctx, deadline) # 决定下一个操作，state_handler 就是算子  # 调用_RendezvousJoinOp，决定下一个操作
 
             if action == _Action.FINISH:
                 continue
@@ -585,8 +586,8 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
                     self._keep_alive()
                 elif action == _Action.ADD_TO_PARTICIPANTS:
                     self._add_to_participants()
-                elif action == _Action.ADD_TO_WAIT_LIST: # 发现当前Action
-                    self._add_to_wait_list() # 然后执行
+                elif action == _Action.ADD_TO_WAIT_LIST: # 发现当前Action # 从 Join 算子得到了_Action.ADD_TO_WAIT_LIST
+                    self._add_to_wait_list() # 然后执行  # 进行业务逻辑
                 elif action == _Action.REMOVE_FROM_PARTICIPANTS:
                     self._remove_from_participants()
                 elif action == _Action.REMOVE_FROM_WAIT_LIST:
@@ -616,13 +617,13 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         state = self._state
 
         try:
-            state.wait_list.remove(self._node)
+            state.wait_list.remove(self._node)  # 移除节点
         except KeyError:
             pass
 
         # The ranks of the participants will be set once the rendezvous is
         # complete.
-        state.participants[self._node] = 0
+        state.participants[self._node] = 0 # 重新插入
 
         self._keep_alive()
 
@@ -746,7 +747,7 @@ class _RendezvousJoinOp:
             if now <= deadline + rollback_period: # 如果还有时间来 rollback
                 # If we are part of the rendezvous, it means we couldn't find
                 # enough participants to complete it on time.
-                if is_participant: # 此时尚未达到min，虽然已经是参与者，但是需要移除
+                if is_participant: # 此时尚未达到min，虽然已经是参与者，但是需要移除   # 已经是参与者了
                     return _Action.REMOVE_FROM_PARTICIPANTS # 需要从参与者列表移除
                 # If we are in the wait list, it means we couldn't wait till the
                 # next round of the rendezvous.
@@ -758,7 +759,7 @@ class _RendezvousJoinOp:
             # If we are here, it means we are not part of the rendezvous. In
             # case the rendezvous has capacity for additional participants add
             # ourself to the wait list for the next round.
-            if len(state.participants) < ctx.settings.max_nodes: # 如果还没有达到最大节点数
+            if len(state.participants) < ctx.settings.max_nodes: # 如果还没有达到最大节点数  # 如果当前节点数目小于最大配置
                 if ctx.node not in state.wait_list: # 如果当前node不在等待列表之中
                     return _Action.ADD_TO_WAIT_LIST # 就加入到等待列表，发送一个等待action
         elif is_participant: # 如果已经在参与者列表
