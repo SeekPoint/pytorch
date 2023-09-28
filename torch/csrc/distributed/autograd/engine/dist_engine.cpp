@@ -307,7 +307,7 @@ void DistEngine::computeDependencies(
       if (auto accumulateGradFn = dynamic_cast<AccumulateGrad*>(fn)) {
         // 如果是叶子节点
         for (auto& capture : *execInfo.captures_) { // 遍历张量路径上的节点
-          capture.hooks_.push_back(  // 这里会生成
+          capture.hooks_.push_back(  // 这里会生成 // 在这里添加 hook
               std::make_unique<DistAccumulateGradCaptureHook>( // 给张量插入Hook
                   std::dynamic_pointer_cast<AccumulateGrad>( // 会保存 AccumulateGrad
                       accumulateGradFn->shared_from_this()),

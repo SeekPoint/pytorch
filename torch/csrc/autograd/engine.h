@@ -193,12 +193,12 @@ class GraphTaskGuard {
 };
 
 struct NodeTask {
-  std::weak_ptr<GraphTask> base_;
-  std::shared_ptr<Node> fn_;
+  std::weak_ptr<GraphTask> base_; // 所属的GraphTask
+  std::shared_ptr<Node> fn_; // 需要执行的Node，比如 PowBackward0
   // This buffer serves as an implicit "addition" node for all of the
   // gradients flowing here.  Once all the dependencies are finished, we
   // use the contents of this buffer to run the function.
-  InputBuffer inputs_;
+  InputBuffer inputs_; // fn_的输入
   // When worker receives a task with isShutdownTask = true, it will immediately
   // exit. The engine sends a shutdown task to every queue upon its destruction.
   bool isShutdownTask_;

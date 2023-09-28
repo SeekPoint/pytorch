@@ -192,7 +192,7 @@ auto ReadyQueue::push(NodeTask item, bool incrementOutstandingTasks) -> void {
     if (incrementOutstandingTasks) {
       std::shared_ptr<GraphTask> graph_task = item.base_.lock();
       TORCH_INTERNAL_ASSERT(graph_task, "GraphTask is no longer valid!");
-      ++graph_task->outstanding_tasks_;
+      ++graph_task->outstanding_tasks_; // 增加
     }
     heap_.push(std::move(item));
   }
@@ -382,7 +382,7 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
 
   // local_ready_queue should already been initialized when we get into thread_main
   TORCH_INTERNAL_ASSERT(local_ready_queue != nullptr);
-  while (graph_task == nullptr || !graph_task->future_result_->completed()) {
+  while (graph_task == nullptr || !graph_task->future_result_->completed()) { //运行 GraphTask
     // local_graph_task represents the graph_task we retrieve from the queue.
     // The outer graph_task represents the overall graph_task we need to execute
     // for reentrant execution.
@@ -391,6 +391,7 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
       // Scope this block of execution since NodeTask is not needed after this
       // block and can be deallocated (release any references to grad tensors
       // as part of inputs_).
+      // 工作线程之中如何消费 NodeTask
       NodeTask task = local_ready_queue->pop();
       // This will only work if the worker is running a non backward task
       // TODO Needs to be fixed this to work in all cases
@@ -414,6 +415,7 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
           // callbacks.
           GraphTaskGuard guard(local_graph_task);
           NodeGuard ndguard(task.fn_);
+          // 运行 NodeTask  // 后向计算
           evaluate_function(local_graph_task, task.fn_.get(), task.inputs_, local_graph_task->cpu_ready_queue_);
         } catch (std::exception& e) {
           thread_on_exception(local_graph_task, task.fn_, e);
@@ -422,10 +424,11 @@ auto Engine::thread_main(const std::shared_ptr<GraphTask>& graph_task) -> void {
     }
 
     // Decrement the outstanding tasks.
-    --local_graph_task->outstanding_tasks_;
+    --local_graph_task->outstanding_tasks_; // 运行 NodeTask完毕，这里减一
 
     // Check if we've completed execution.
-    if (local_graph_task->completed()) {
+    if (local_graph_task->completed()) {   // 判断 GraphTask是否结束。
+      // 做相关处理工作
       local_graph_task->mark_as_completed_and_run_post_processing();
 
       auto base_owner = local_graph_task->owner_;
@@ -504,13 +507,13 @@ void GraphTask::mark_as_completed_and_run_post_processing() {
     std::unique_lock<std::mutex> lock(mutex_);
 
     exec_post_processing();
-    std::vector<Variable> vars = std::move(captured_vars_);
+    std::vector<Variable> vars = std::move(captured_vars_); //最后返回的输出
 
     // Need to unlock before we call markCompleted to avoid holding locks
     // when the callbacks are called.
     lock.unlock();
     // NOLINTNEXTLINE(performance-move-const-arg)
-    future_result_->markCompleted(std::move(vars));
+    future_result_->markCompleted(std::move(vars)); // 反向传播最后的返回输出
   } catch (std::exception& e) {
     future_result_->setErrorIfNeeded(std::current_exception());
   }
@@ -684,7 +687,7 @@ static variable_list call_function(
       call_pre_hooks(fn, InputBuffer::variables(std::move(inputBuffer)));
 
   if (!graph_task->keep_graph_) {
-    fn.will_release_variables();
+    fn.will_release_variables();  // 如果不需要保持图，就调用释放。
   }
 
   const auto has_post_hooks = !fn.post_hooks().empty();
@@ -739,11 +742,13 @@ void Engine::evaluate_function(
       // Lock mutex for writing to graph_task->captured_vars_.
       std::lock_guard<std::mutex> lock(graph_task->mutex_);
       for (const auto& capture : *capture_vec) {
+        // 获取到 captured_vars_，然后对其进行后置操作
         auto& captured_grad = graph_task->captured_vars_[capture.output_idx_];
+        // 这里是引用操作，所以 captured_grad 的赋值实际就是往 graph_task->captured_vars_ 赋值
         captured_grad = inputs[capture.input_idx_];
         for (auto& hook : capture.hooks_) {
         //这里调用 hook，就是 DistAccumulateGradCaptureHook 的 operator()，captured_grad 就是累积的梯度
-          captured_grad = (*hook)(captured_grad);
+          captured_grad = (*hook)(captured_grad);  // 这里使用了 hook 进行后置操作
         }
       }
     }
@@ -762,7 +767,7 @@ void Engine::evaluate_function(
   const auto opt_parent_stream = (*func).stream(c10::DeviceType::CUDA);
   c10::OptionalStreamGuard parent_stream_guard{opt_parent_stream};
 
-// 这里就是调用 recvBackward.apply 函数
+// 这里就是调用 recvBackward.apply 函数  // 执行后向计算
   auto outputs = call_function(graph_task, func, inputs);
 
   auto& fn = *func;
@@ -796,28 +801,30 @@ void Engine::evaluate_function(
 
   // Lock mutex for the accesses to GraphTask dependencies_, not_ready_ and cpu_ready_queue_ below
   std::lock_guard<std::mutex> lock(graph_task->mutex_);
-  for (int i = 0; i < num_outputs; ++i) {
+  for (int i = 0; i < num_outputs; ++i) {  // 遍历自己的输出  // 遍历输入节点
     auto& output = outputs[i];
-    const auto& next = fn.next_edge(i);
+    const auto& next = fn.next_edge(i);   // 找到第i个输出   // 查找下一个可以计算的节点
 
     if (!next.is_valid()) continue;
 
     // Check if the next function is ready to be computed
     bool is_ready = false;
+
+    // 得到依赖关系
     auto& dependencies = graph_task->dependencies_;
-    auto it = dependencies.find(next.function.get());
+    auto it = dependencies.find(next.function.get()); // 找到第i个输出的依赖关系
 
     if (it == dependencies.end()) {
       auto name = next.function->name();
       throw std::runtime_error(std::string("dependency not found for ") + name);
-    } else if (--it->second == 0) {
-      dependencies.erase(it);
-      is_ready = true;
+    } else if (--it->second == 0) { // 因为本节点的后向计算已经完成，所以第i个输出的依赖数目减一
+      dependencies.erase(it); // 如果为0，说明没有依赖了，就从依赖关系之中删除
+      is_ready = true; // true 代表没有依赖关系，可以构建一个 NodeTask 进行下一步反向计算了
     }
 
     auto& not_ready = graph_task->not_ready_;
     auto not_ready_it = not_ready.find(next.function.get());
-    if (not_ready_it == not_ready.end()) {
+    if (not_ready_it == not_ready.end()) { // 如果未就绪队列之中没有next节点
       // Skip functions that aren't supposed to be executed
       if (!exec_info_.empty()) {
         auto it = exec_info_.find(next.function.get());
@@ -826,37 +833,40 @@ void Engine::evaluate_function(
         }
       }
       // No buffers have been allocated for the function
-      InputBuffer input_buffer(next.function->num_inputs());
+      InputBuffer input_buffer(next.function->num_inputs());  // 整理 next 节点的输入参数信息
 
       // Accumulates into buffer
       const auto opt_next_stream = next.function->stream(c10::DeviceType::CUDA);
-      input_buffer.add(next.input_nr,
+      input_buffer.add(next.input_nr,  // 插入 next 节点的输入参数信息
                        std::move(output),
                        opt_parent_stream,
                        opt_next_stream);
 
-      if (is_ready) {
+      if (is_ready) { // is_ready 是前面小节之中，通过依赖关系计算出来的，true表示可以进行反向计算了
         auto queue = ready_queue(cpu_ready_queue, input_buffer.device());
+        // 插入下一个需要计算的NodeTask
         queue->push(
             NodeTask(graph_task, next.function, std::move(input_buffer)));
       } else {
+        // 还有依赖关系，不能进行反向计算，只能放入未就绪队列 not_ready_
         not_ready.emplace(next.function.get(), std::move(input_buffer));
       }
-    } else {
+    } else {  // 如果未就绪队列之中已经有next节点
       // The function already has a buffer
       auto &input_buffer = not_ready_it->second;
 
       // Accumulates into buffer
       const auto opt_next_stream = next.function->stream(c10::DeviceType::CUDA);
-      input_buffer.add(next.input_nr,
+      input_buffer.add(next.input_nr,  // 把最新完成反向计算的输入插入输入buffer input_buffer
                        std::move(output),
                        opt_parent_stream,
                        opt_next_stream);
-      if (is_ready) {
+      if (is_ready) {  // 如果可以计算，就放入ready 队列
         auto queue = ready_queue(cpu_ready_queue, input_buffer.device());
+        // 插入下一个需要计算的NodeTask
         queue->push(
             NodeTask(graph_task, next.function, std::move(input_buffer)));
-        not_ready.erase(not_ready_it);
+        not_ready.erase(not_ready_it); // 同时从未就绪队列之中移除
       }
     }
   }
@@ -897,13 +907,13 @@ auto Engine::compute_dependencies(Node* root, GraphTask& task, uint64_t min_topo
     }
   }
 }
-
-auto Engine::execute(const edge_list& roots,
-                     const variable_list& inputs,
-                     bool keep_graph,
-                     bool create_graph,
+auto Engine::execute(const edge_list& roots, // 反向传播的根节点
+                     const variable_list& inputs, // 根节点的梯度
+                     bool keep_graph, // 计算图是否需要保留
+                     bool create_graph, // 是否需要构建微分图以进行高阶求导
                      bool accumulate_grad,
-                     const edge_list& outputs) -> variable_list {
+                     const edge_list& outputs // 需要输出梯度的节点
+                    ) -> variable_list {
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
   validate_outputs(roots, const_cast<variable_list&>(inputs), [](const std::string& msg) {
     return msg;
@@ -925,9 +935,8 @@ auto Engine::execute(const edge_list& roots,
   // If we receive a single root, skip creating extra root node
   bool skip_dummy_node = roots.size() == 1;
   auto graph_root = skip_dummy_node ?
-    roots.at(0).function :
-    std::make_shared<GraphRoot>(roots, inputs);
-
+    roots.at(0).function : // 如果只有一个root，就直接使用root作为 GraphRoot
+    std::make_shared<GraphRoot>(roots, inputs); // 如果多个root，就构造一个GraphRoot
   auto min_topo_nr = compute_min_topological_nr(outputs);
   // Now compute the dependencies for all executable functions
   compute_dependencies(graph_root.get(), *graph_task, min_topo_nr);
@@ -991,6 +1000,7 @@ std::shared_ptr<at::ivalue::Future> Engine::execute_with_graph_task(
 
     // Now that all the non-thread safe fields of the graph_task have been populated,
     // we can enqueue it.
+    // 主线程之中
     queue->push(NodeTask(graph_task, std::move(graph_root), std::move(input_buffer)));
 
     // The owning thread start to drive the engine execution for any CPU task that
@@ -1010,6 +1020,7 @@ std::shared_ptr<at::ivalue::Future> Engine::execute_with_graph_task(
 
     // Now that all the non-thread safe fields of the graph_task have been populated,
     // we can enqueue it.
+    // 主线程之中
     queue->push(NodeTask(graph_task, std::move(graph_root), std::move(input_buffer)));
 
     if (current_depth >= max_recursion_depth_) {
@@ -1125,6 +1136,7 @@ auto Engine::ready_queue_by_index(std::shared_ptr<ReadyQueue> cpu_ready_queue, i
 auto Engine::start_device_threads() -> void {
   // See Note [Allocating GPUs to autograd threads]
   c10::DeviceIndex num_devices = 0;
+  // 得到设备数量
   for (const auto& impl_atomic : c10::impl::device_guard_impl_registry) {
     auto* impl = impl_atomic.load();
     if (impl) {
@@ -1132,6 +1144,7 @@ auto Engine::start_device_threads() -> void {
     }
   }
 
+  // 确定queue数量，并且生成queue
   // allocate one thread for every GPU device (but colocate GPUs of different
   // types), and pre-allocate the device_ready_queues_ to ensure safe reading on it.
   device_ready_queues_ = std::vector<std::shared_ptr<ReadyQueue>>(num_devices);
@@ -1140,6 +1153,7 @@ auto Engine::start_device_threads() -> void {
     queue.reset(new ReadyQueue());
   }
 
+  // 生成线程
   thread_pool_shared_ = std::make_shared<ThreadPoolShared>();
 
   for (int i = 0; i < num_devices; ++i) {
@@ -1200,8 +1214,10 @@ void GraphTask::init_to_execute(Node& graph_root, const edge_list& outputs, bool
   // NB: you might be wondering why we don't populate `seen` with outputs. We cannot
   // because in the case where two outputs lie on the same path, we still need to explore past
   // the first output or we would miss the nodes that are required to compute the second output.
+
+  // 这一段就是针对 grad() API 进行处理，只有在所求梯度的张量路径上的其他张量才会被计算梯度
   int output_idx = 0;
-  for (auto & output_edge : outputs) {
+  for (auto & output_edge : outputs) { // 遍历输出边
     // (0) `is_needed` above corresponds to `exec_info_[fn].needed_`
     Node *output = output_edge.function.get();
     auto & info = exec_info_[output];
@@ -1215,6 +1231,7 @@ void GraphTask::init_to_execute(Node& graph_root, const edge_list& outputs, bool
       if (!info.captures_) {
         info.captures_ = make_unique<std::vector<ExecInfo::Capture>>();
       }
+      // 第 i 个输入对应的输出
       info.captures_->emplace_back(output_edge.input_nr, output_idx++);
     }
   }
@@ -1244,7 +1261,7 @@ void GraphTask::init_to_execute(Node& graph_root, const edge_list& outputs, bool
   std::vector<Frame> stack;
   std::unordered_set<Node*> seen;
   stack.emplace_back(&graph_root);
-  exec_info_.emplace(stack.back().fn_, ExecInfo());
+  exec_info_.emplace(stack.back().fn_, ExecInfo()); // 这里会初始化 exec_info_，有多个 exec_info
 
   while (!stack.empty()) {
     auto &frame = stack.back();

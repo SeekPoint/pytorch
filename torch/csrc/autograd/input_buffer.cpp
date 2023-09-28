@@ -123,6 +123,7 @@ auto InputBuffer::device() const -> at::Device {
   // mixed device-type operations (e.g., an op that is both CUDA
   // and XLA).  This is *incredibly* unlikely, so we don't worry
   // about it.
+  // 遍历buffer，获取第一个非CPU张量，然后得到他的device
   for (auto& var : buffer) {
     if (var.defined()) {
       auto device = var.device();
