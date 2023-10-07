@@ -794,7 +794,7 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
          const py::args& args,
          const py::kwargs& kwargs) {
         return std::make_shared<jit::PythonFutureWrapper>(
-            pyRpcBuiltin(dst, opName, args, kwargs, rpcTimeoutSeconds));  # 内置函数
+            pyRpcBuiltin(dst, opName, args, kwargs, rpcTimeoutSeconds));  // 内置函数
       },
       py::call_guard<py::gil_scoped_acquire>());
 
@@ -807,7 +807,7 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
          const bool isAsyncExecution) {
         return std::make_shared<jit::PythonFutureWrapper>(pyRpcPythonUdf(
             dst,
-            pickledPythonUDF,   # 对应了udf
+            pickledPythonUDF,   // 对应了udf
             tensors,
             rpcTimeoutSeconds,
             isAsyncExecution));

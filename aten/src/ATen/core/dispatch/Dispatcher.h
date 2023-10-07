@@ -521,7 +521,7 @@ inline Return Dispatcher::callWithDispatchKeySlowPath(const TypedOperatorHandle<
   // keeping the guard alive while executing the kernel
   return kernel.template call<Return, Args...>(op, dispatchKeySet, std::forward<Args>(args)...);
 }
-其次，Dispatcher::call 定义如下：
+//其次，Dispatcher::call 定义如下：
 // See [Note: Argument forwarding in the dispatcher] for why Args doesn't use &&
 template<class Return, class... Args>
 C10_DISPATCHER_INLINE_UNLESS_MOBILE Return Dispatcher::call(const TypedOperatorHandle<Return(Args...)>& op, Args... args) const {

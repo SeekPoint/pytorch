@@ -1,0 +1,93 @@
+v1.9不能使用gcc8以上的，且cuda版本不能太高，官方是11.0
+
+amd00@MZ32-00:~/$ conda create -n yk_py38_cu110 python=3.8 Anaconda
+
+amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$ conda activate yk_py38_cu110
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$
+
+
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$
+conda install astunparse numpy ninja pyyaml mkl mkl-include setuptools cmake cffi typing_extensions future six requests dataclasses
+
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$ conda install -c pytorch magma-cuda110  ==yknote这一步并没有安装cuda！！！
+
+
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$ conda install -c conda-forge -c cudatoolkit=11.0
+实际上是
+    ---------------------------|-----------------
+    cudatoolkit-11.0.3         |      h88f8997_10       952.4 MB  conda-forge
+
+查找cuda的路径！！！
+
+===sudo find / -name nvcc 找不到！！！并且
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$ which nvcc
+/usr/local/cuda-11.7/bin/nvcc  ===这是系统的！！
+
+
+安装！！
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$
+conda install -c conda-forge  cudatoolkit-dev=11.0
+
+    package                    |            build
+    ---------------------------|-----------------
+    cudatoolkit-dev-11.0.3     |   py38h497a2fe_2           8 KB  conda-forge
+    python_abi-3.8             |           2_cp38           4 KB  conda-forge
+    ------------------------------------------------------------
+                                           Total:          12 KB
+
+此时才看到！！！
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$ sudo find / -name nvcc
+/home/amd00/anaconda3/pkgs/cuda-nvcc-11.7.64-0/bin/nvcc  ===估计是base的
+/home/amd00/anaconda3/envs/yk_py39/bin/nvcc
+/usr/local/cuda-11.7/bin/nvcc   ===系统的
+/home/amd00/anaconda3/envs/yk_py38_cu110/pkgs/cuda-toolkit/bin/nvcc
+/home/amd00/anaconda3/envs/yk_py38_cu110/bin/nvcc
+
+
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$ which nvcc
+/home/amd00/anaconda3/envs/yk_py38_cu110/bin/nvcc
+
+
+使用 /home/amd00/anaconda3/envs/yk_py38_cu110 作为cuda目录！
+export PATH=/home/amd00/anaconda3/envs/yk_py38_cu110/bin:${PATH:+:${PATH}}
+export CUDA_HOME=/home/amd00/anaconda3/envs/yk_py38_cu110
+export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${CUDNN_HOME}/lib64:$LD_LIBRARY_PATH
+export CPLUS_INCLUDE_PATH=${CUDA_HOME}/include:${CUDNN_HOME}/include:$CPLUS_INCLUDE_PATH
+
+
+(yk_py37_cu101) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$
+
+
+AttributeError: module 'distutils' has no attribute 'version'
+可以用
+pip install setuptools==59.5.0
+解决！！！
+
+gcc/g++必须小于8：
+
+使用
+which gcc
+ll /usr/bin/gcc
+查看版本
+安装更多版本：
+sudo apt install gcc-7
+sudo apt install g++-7
+和指定特定版本
+sudo rm /usr/bin/gcc
+sudo ln -s /usr/bin/gcc-7 /usr/bin/gcc
+sudo rm /usr/bin/g++
+sudo ln -s /usr/bin/g++-7 /usr/bin/g++
+
+clean最好做一次！！！！
+(yk_py37_cu101) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$ python setup.py clean
+Building wheel torch-1.9.0a0+git63b85e5
+running clean
+
+
+修正代码错误
+https://github.com/pytorch/pytorch/issues/13061
+@TianDekuan @HenryJia
+I got the same error, and solved it by replacing #include "caffe2/core/macros.h"
+with #include "build/caffe2/core/macros.h" in caffe2/core/common.h and caffe2/utils/cblas.h.
+====可能并不需要，改了也无妨，
+反正一定要

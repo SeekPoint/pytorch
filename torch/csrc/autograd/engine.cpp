@@ -1218,15 +1218,16 @@ auto Engine::start_device_threads() -> void {
   // See Note [Allocating GPUs to autograd threads]
   // 使用deviceCount得到 设备数量 num_devices。
   c10::DeviceIndex num_devices = 0;
-  // 得到设备数量
-      num_devices = std::max(num_devices, impl->deviceCount());
-    }
-  }
-
+  
   // 确定queue数量，并且生成queue
   for (const auto& impl_atomic : c10::impl::device_guard_impl_registry) {
     auto* impl = impl_atomic.load();
     if (impl) {
+      // 得到设备数量
+      num_devices = std::max(num_devices, impl->deviceCount());
+    }
+  }
+
   // allocate one thread for every GPU device (but colocate GPUs of different
   // types), and pre-allocate the device_ready_queues_ to ensure safe reading on it.
   // 创建多个ReadyQueue，ReadyQueue数目和工作线程数目一样

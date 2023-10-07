@@ -10,7 +10,7 @@
 namespace torch {
 namespace data {
 namespace samplers {
-'''
+/*
 3.4.2 实现
 类的具体实现位于：torch\csrc\api\src\data\samplers\distributed.cpp
 
@@ -34,7 +34,7 @@ namespace samplers {
     //test结果:5 6 7 8 9 10 11 12 13 14
 
 具体代码如下：
-'''
+*/
 DistributedRandomSampler::DistributedRandomSampler(
     size_t size,
     size_t num_replicas,
