@@ -1161,7 +1161,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         self._worker_pids_set = True
         self._reset(loader, first_iter=True)   # 继续完善业务
 
-'''
+    '''
 2.4.3 业务重置
 __init__ 函数最后会调用 _reset 函数，这是进一步完善业务初始化，也用来重置环境。
 上小节函数中，已经启动了worker子进程，但是没有分配任务，所以_reset函数会进行任务分配，预取。
@@ -1192,7 +1192,7 @@ _MultiProcessingDataLoaderIter有如下 flag 参数来协调各个 worker （包
 所以 reset 函数会把 _send_idx，_rcvd_idx 都恢复成0，这样下次迭代就可以重新处理。
 
 在 reset 方法最后，有一个预取数据操作。我们会在后面结合乱序处理进行讲解。
-'''
+    '''
     def _reset(self, loader, first_iter=False):
         super()._reset(loader, first_iter)
         self._send_idx = 0  # idx of the next task to be sent to workers
@@ -1372,13 +1372,13 @@ _MultiProcessingDataLoaderIter有如下 flag 参数来协调各个 worker （包
 #
 # 3. Run the script with the `send` option in the second shell:
 # (shell2) ./test_socket.py sock_tmp 1017 send
-'''
+    '''
 其次，我们看看 _get_data 如何从 self._data_queue 中取数据。具体是使用 _try_get_data 来提取。
 
     如果有超时配置，就按照超时读取。
     如果设置了pin memory，则从pin 线程处理之后的数据读取。
     否则循环读取worker处理的数据，直至获取到数据为止。
-'''
+    '''
     def _get_data(self):
         # Fetches data from `self._data_queue`.
         #

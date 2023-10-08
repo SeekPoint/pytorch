@@ -91,3 +91,14 @@ I got the same error, and solved it by replacing #include "caffe2/core/macros.h"
 with #include "build/caffe2/core/macros.h" in caffe2/core/common.h and caffe2/utils/cblas.h.
 ====可能并不需要，改了也无妨，
 反正一定要
+export USE_NINJA=OFF
+才能编译过去
+
+注意
+
+python setup.py install 无法正确安装！
+需要
+(yk_py38_cu110) amd00@MZ32-00:~/yk_repo/pytorch-repo/tag_v1.9.1$ python setup.py develop
+
+但是，python setup.py develop、install 编译成功无法保证python文件正确
+在import torch时候可能看到很多py文件错误

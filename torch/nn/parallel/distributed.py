@@ -537,13 +537,12 @@ class DistributedDataParallel(Module):
         # Builds reducer.
         self._ddp_init_helper(parameters, expect_sparse_gradient, param_to_name_mapping)
 
-'''
+    '''
+    2.4.2 _sync_params_and_buffers
+    _sync_params_and_buffers 是依据 module的state_dict 来收集可以训练的参数，然后把这些参数广播出去。
 
-2.4.2 _sync_params_and_buffers
-_sync_params_and_buffers 是依据 module的state_dict 来收集可以训练的参数，然后把这些参数广播出去。
-
-具体代码是：
-'''
+    具体代码是：
+    '''
     def _sync_params_and_buffers(self, authoritative_rank=0):
         module_states = []
         for name, param in self.module.state_dict().items():
