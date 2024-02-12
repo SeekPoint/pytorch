@@ -1190,7 +1190,7 @@ if(USE_CUDA)
 endif()
 
 # ---[ HIP
-if(USE_ROCM)
+if(USE_ROCM)  # AMD的特殊处理
   include(${CMAKE_CURRENT_LIST_DIR}/public/LoadHIP.cmake)
   if(PYTORCH_FOUND_HIP)
     message(INFO "Compiling with HIP for AMD.")
@@ -1274,9 +1274,9 @@ if(USE_ROCM)
   include_directories(SYSTEM ${THRUST_PATH})
 endif()
 
-# ---[ NCCL
+# ---[ NCCL  # NCCL的总体引入
 if(USE_NCCL)
-  if(NOT (USE_CUDA OR USE_ROCM))
+  if(NOT (USE_CUDA OR USE_ROCM)) # 使用NCCL必须先启动CUDA
     message(WARNING
         "Not using CUDA/ROCM, so disabling USE_NCCL. Suppress this warning with "
         "-DUSE_NCCL=OFF.")
@@ -1285,11 +1285,11 @@ if(USE_NCCL)
     message(WARNING "NCCL is currently only supported under Linux.")
     caffe2_update_option(USE_NCCL OFF)
   elseif(USE_CUDA)
-    include(${CMAKE_CURRENT_LIST_DIR}/External/nccl.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/External/nccl.cmake)  # <------ CUDA的NCLL
     list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS __caffe2_nccl)
   elseif(USE_ROCM)
     include(${CMAKE_CURRENT_LIST_DIR}/External/rccl.cmake)
-    list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS __caffe2_nccl)
+    list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS __caffe2_nccl) # <------ AMD的nccl ---> rccl
   endif()
 endif()
 
@@ -1303,6 +1303,7 @@ if(USE_CUDA)
   endif()
 endif()
 
+# 分布式场景下，使用gloo时对nccl的特殊处理
 if(USE_GLOO)
   if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(WARNING "Gloo can only be used on 64-bit systems.")

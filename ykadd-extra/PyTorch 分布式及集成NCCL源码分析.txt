@@ -1,0 +1,325 @@
+PyTorch 分布式及集成NCCL源码分析
+https://zhuanlan.zhihu.com/p/647667785
+
+yknote===https://discuss.pytorch.org/t/how-to-link-a-custom-nccl-version/107464
+
+
+PyTorch 分布式及集成NCCL源码分析
+单单野草
+单单野草
+AI全栈:框架、高性能计算、模型部署、算法、芯片架构
+已关注
+4 人赞同了该文章
+一：综述
+1.1 DDP使用样例
+DDP支持混合精度训练
+
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+ddp_model = DDP(model, device_ids=[rank]) # 直接将module封装到DDP中，然后像普通module一样直接使用
+outputs = ddp_model(torch.randn(20, 10))
+1.2 NCCL
+NCCL:
+1. 支持集合通信和P2P通信
+   1.1 集合通信原语
+       AllReduce
+       Broadcast
+       Reduce
+       AllGather
+       ReduceScatter
+   1.2 P2P通信原语
+       send/recv:使用gather/scatter/all-to-all 算子来实现
+2. 支持单机多卡（GPU之间通过PCIE或者NVLink或者GPU Direct P2P来通信）
+   支持多机多卡（机器之间通过Sockets (Ethernet)或者InfiniBand with GPU Direct RDMA来通信）
+   CPU和CPU之间& CPU和GPU之间通过PCIE来连接
+3. C API简单实用，符合MPI（消息传递接口）接口定义
+4. 支持各种互联技术来完成通信：PCIe, NVLINK, InfiniBand Verbs, and IP sockets.
+5. 支持多种模式：如单线程控制多个GPU、支持多个线程控制多个GPU（即每个线程控制一个GPU）、支持多进程控制多个GPU
+6. 通过cuda kernel来实现通信原语，实用最少的资源和带宽
+7. 同步通信是核心
+
+
+
+
+二：NCCL编译分析
+pytorch源码下载（含第三方库）
+
+git clone --recursive https://github.com/pytorch/pytorch   #必须加上--recursive, 这样项目里面依赖的很多子模块项目(submodule)才会一起克隆下来
+cd pytorch
+git submodule sync
+git submodule update --init --recursive
+
+//使用镜像
+git clone --recursive https://github.com.cnpmjs.org/pytorch/pytorch
+//或者
+git clone --recursive https://git.sdut.me/pytorch/pytorch
+编译入口脚本分析：
+pytorch\setup.py
+
+# USE_NCCL --- 启用NCCL 在 pytorch\CMakeLists.txt 中设置，默认关闭
+
+#   USE_SYSTEM_NCCL=0  使用环境上安装的nccl，还是pytorch 在 third_party/nccl 下放的nccl，默认使用
+#     disables use of system-wide nccl (we will use our submoduled
+#     copy in third_party/nccl)
+//  系统安装的NCCL的路径信息，需要在USE_SYSTEM_NCCL=1时生效
+#   NCCL_ROOT
+#   NCCL_LIB_DIR
+#   NCCL_INCLUDE_DIR
+#     specify where nccl is installed
+2. cmake分析
+
+、/pytorch\cmake\Dependencies.cmake
+
+if(USE_ROCM) # AMD的特殊处理
+    if(PYTORCH_FOUND_HIP) :
+        if(USE_NCCL AND NOT USE_SYSTEM_NCCL)
+            message(INFO "Forcing USE_SYSTEM_NCCL to ON since it's required by using RCCL")
+            caffe2_update_option(USE_SYSTEM_NCCL ON)
+        endif()
+
+# NCCL的总体引入
+if(USE_NCCL)
+  if(NOT (USE_CUDA OR USE_ROCM)) # 使用NCCL必须先启动CUDA
+    message(WARNING
+        "Not using CUDA/ROCM, so disabling USE_NCCL. Suppress this warning with "
+        "-DUSE_NCCL=OFF.")
+    caffe2_update_option(USE_NCCL OFF)
+  elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux") # 仅支持
+    message(WARNING "NCCL is currently only supported under Linux.")
+    caffe2_update_option(USE_NCCL OFF)
+  elseif(USE_CUDA)
+    include(${CMAKE_CURRENT_LIST_DIR}/External/nccl.cmake)  <------ CUDA的NCLL
+    list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS __caffe2_nccl)
+  elseif(USE_ROCM)
+    include(${CMAKE_CURRENT_LIST_DIR}/External/rccl.cmake)
+    list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS __caffe2_nccl) <------ AMD的nccl ---> rccl
+  endif()
+endif()
+
+# 分布式场景下，使用gloo时对nccl的特殊处理
+if(USE_GLOO)
+    if(NOT USE_SYSTEM_GLOO)
+        if(USE_NCCL AND NOT USE_SYSTEM_NCCL)
+            # Tell Gloo build system to use bundled NCCL, see
+            # https://github.com/facebookincubator/gloo/blob/950c0e23819779a9e0c70b861db4c52b31d1d1b2/cmake/	Dependencies.cmake#L123
+            set(NCCL_EXTERNAL ON)  ------> NCCL_EXTERNAL 是个什么
+        endif()
+        if(NOT USE_SYSTEM_NCCL AND USE_NCCL AND NOT USE_ROCM)
+            add_dependencies(gloo_cuda nccl_external)
+        endif()
+// third_party/gloo/gloo/cuda_collectives_device.h:20:#if GLOO_USE_NCCL
+3. nccl.cmake分析
+
+pytorch\cmake\External\nccl.cmake
+if(USE_SYSTEM_NCCL)
+    # NCCL_ROOT, NCCL_LIB_DIR, NCCL_INCLUDE_DIR will be accounted in the following line.
+    // 直接使用系统安装好的NCCL的lib库来编译链接
+else
+   // 将pytorch/thrid_party下面的nccl编译为lib，添加到依赖中
+endif
+AMD的nccl（rccl）仅支持系统库的方式，一般nccl库不开源的话，就采用lib的方式集成
+
+pytorch\cmake\External\rccl.cmake
+  if(USE_SYSTEM_NCCL)
+    # NCCL_ROOT, NCCL_LIB_DIR, NCCL_INCLUDE_DIR will be accounted in the following line.
+    find_package(rccl REQUIRED)
+    if(rccl_FOUND)
+      message(STATUS "RCCL Found!")
+      add_library(__caffe2_nccl INTERFACE)
+      target_link_libraries(__caffe2_nccl INTERFACE ${PYTORCH_RCCL_LIBRARIES})
+      target_include_directories(__caffe2_nccl INTERFACE ${RCCL_INCLUDE_DIRS})
+    else()
+      message(STATUS "RCCL NOT Found!")
+    endif()
+  else()
+    message(STATUS "USE_SYSTEM_NCCL=OFF is not supported yet when using RCCL")
+  endif()
+4. 代码中的编译宏使用
+
+------ NCCL
+
+torch/csrc/cuda/Module.cpp:29:#ifdef USE_NCCL
+torch/csrc/cuda/comm.cpp:6:#ifdef USE_NCCL
+torch/csrc/cuda/nccl.cpp:454:#ifdef USE_NCCL
+
+------ USE_NCCL_WITH_UCC
+torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:688:#ifdef USE_NCCL_WITH_UCC
+
+------ GLOO_USE_NCCL
+third_party/gloo/gloo/cuda_collectives_device.h:20:#if GLOO_USE_NCCL
+
+------ NCCL_EXTERNAL
+
+cmake/Dependencies.cmake:1424:        set(NCCL_EXTERNAL ON)
+third_party/gloo/cmake/Dependencies.cmake:123:  # NCCL_EXTERNAL is set if using the Caffe2 bundled version of NCCL
+third_party/gloo/cmake/Dependencies.cmake:124:  if(NCCL_EXTERNAL)
+5. 源码编译样例
+
+export NCCL_ROOT=xxx
+export NCCL_LIB_DIR=xxx
+export NCCL_INCLUDE_DIR=xxx
+
+CMAKE_BUILD_TYPE=Debug  \
+USE_MKLDNN=0 BUILD_TEST=0 USE_DISTRIBUTED=0 DEBUG=1 \
+USE_CUDA=1 USE_CUDNN=1 \
+USE_FBGEMM=0 BUILD_CAFFE2=0 \
+USE_NCCL=1 \
+USE_SYSTEM_NCCL=1\
+python setup.py bdist_wheel
+
+
+三：NCCL API使用
+关于ncclUniqueId的理解
+ncclUniqueId Id;
+ncclGetUniqueId(&Id);
+
+// 在nccl源码中，ncclUniqueId实际上是个字符串，长度为128，实际返回值是当前的ip+端口号
+#define NCCL_UNIQUE_ID_BYTES 128
+typedef struct { char internal[NCCL_UNIQUE_ID_BYTES]; } ncclUniqueId;
+在nccl中，存在在host侧，通过一个线程或者一个进程来管理device侧的所有GPU卡的场景（比如单机8卡）
+
+也存在host侧，通过一个线程或者一个进程来管理一个GPU卡的场景
+
+因此，进程间通信（单机或者多机），需要一个唯一的标识符，这样能够表示全局下的线程或者进程，便于nccl做分布式数据通信，这个表示符就是：ncclUniqueId
+
+2. 关于communicator
+
+nccl通过comm对象来管理不同device之间的通信原语，因此一个GPU就有一个communicator对象，而在一个节点上（及一台机器上），gpu的id使用rank来表示，rank属于[0,n-1]，因此一个rank就需要一个communicator对象，NCCL在创建communicator对象时，提供了两种方式
+
+方式一：host单线程管理8个GPU
+  //each process is using 8 GPUs
+  int nDev = 8;
+  ncclUniqueId id;
+  ncclComm_t comms[nDev]; // 8个comm对象，对应8个GPU
+  ncclGetUniqueId(&id); // 对应当前线程或者进程的唯一标识
+  NCCLCHECK(ncclGroupStart());
+  for (int i=0; i<nDev; i++) {
+     CUDACHECK(cudaSetDevice(localRank*nDev + i));
+     NCCLCHECK(ncclCommInitRank(comms+i, nRanks*nDev, id, myRank*nDev + i)); // 8个GPU，8个comm，绑定到一个ncclUniqueId
+  }
+  NCCLCHECK(ncclGroupEnd());
+
+
+  // 方式二：通过 ncclCommInitAll 来完成所有的comm的创建
+  ncclComm_t comms[4];
+  int nDev = 4; // 4个GPU
+  int devs[4] = { 0, 1, 2, 3 }; // rank编号
+  NCCLCHECK(ncclCommInitAll(comms, nDev, devs));
+3. 集合通信
+
+3.1 AllReduce
+
+该源语表示将4个GPU上的数据，reduce到一起后，然后在copy到每个GPU上
+
+
+
+
+四：PyTorch NCCL相关源码分析
+
+
+python侧
+pytorch\torch\cuda\nccl.py
+
+pytorch\torch\distributed\distributed_c10d.py
+
+pytorch\torch\nn\parallel\comm.py
+
+nn\parallel\distributed.py
+
+
+2. c++侧
+
+pytorch\torch\csrc\cuda\Module.cpp
+
+
+pytorch\torch\csrc\cuda\comm.cpp
+
+pytorch\torch\csrc\cuda\nccl.cpp
+
+pytorch\torch\csrc\cuda\python_nccl.cpp
+
+
+pytorch\torch\csrc\cuda\python_nccl.cpp
+
+pytorch\torch\csrc\distributed\c10d\NCCLUtils.cpp
+
+pytorch\torch\csrc\distributed\c10d\ProcessGroup.cpp
+
+pytorch\torch\csrc\distributed\c10d\ProcessGroupNCCL.cpp
+
+pytorch\torch\csrc\distributed\c10d\init.cpp
+
+
+pytorch\torch\csrc\distributed\c10d\logger.cpp
+
+
+五：DDP分析
+5.1 python侧
+pytorch\torch\nn\parallel\distributed.py
+5.1.1 环境变量获取
+DDP的一些使用配置可以通过环境变量来配置：
+
+ef _dump_DDP_relevant_env_vars():
+    relevant_env_vars = [
+        "RANK",
+        "LOCAL_RANK",
+        "WORLD_SIZE", # DDP进程数量,一台机器上有N个GPU，一般就要启动N个进程
+        "MASTER_PORT", # 主节点 ip 端口
+        "MASTER_ADDR", # 主节点 IP
+        "CUDA_VISIBLE_DEVICES",
+        "GLOO_SOCKET_IFNAME",
+        "GLOO_DEVICE_TRANSPORT",
+        "NCCL_SOCKET_IFNAME",
+        "NCCL_BLOCKING_WAIT",
+        "NCCL_DEBUG",
+        "NCCL_DEBUG_SUBSYS",
+        "NCCL_IB_DISABLE",
+        # More NCCL env vars:
+        "NCCL_P2P_DISABLE",
+        "NCCL_P2P_LEVEL",
+        "NCCL_SHM_DISABLE",
+        "NCCL_SOCKET_NTHREADS",
+        "NCCL_NSOCKS_PERTHREAD",
+        "NCCL_BUFFSIZE",
+        "NCCL_NTHREADS",
+        "NCCL_RINGS",
+        "NCCL_MAX_NCHANNELS",
+        "NCCL_MIN_NCHANNELS",
+        "NCCL_CHECKS_DISABLE",
+        "NCCL_CHECK_POINTERS",
+        "NCCL_LAUNCH_MODE",
+        "NCCL_IB_HCA",
+        "NCCL_IB_TIMEOUT",
+        "NCCL_IB_RETRY_CNT",
+        "NCCL_IB_GID_INDEX",
+        "NCCL_IB_SL",
+        "NCCL_IB_TC",
+        "NCCL_IB_AR_THRESHOLD",
+        "NCCL_IB_CUDA_SUPPORT",
+        "NCCL_NET_GDR_LEVEL",
+        "NCCL_NET_GDR_READ",
+        "NCCL_SINGLE_RING_THRESHOLD",
+        "NCCL_LL_THRESHOLD",
+        "NCCL_TREE_THRESHOLD",
+        "NCCL_ALGO",
+        "NCCL_PROTO",
+        "NCCL_IGNORE_CPU_AFFINITY",
+        "NCCL_DEBUG_FILE",
+        "NCCL_COLLNET_ENABLE",
+        "NCCL_TOPO_FILE",
+        "NCCL_TOPO_DUMP_FILE",
+        "NCCL_ASYNC_ERROR_HANDLING",
+    ]
+    formatted_output = ""
+    for var in relevant_env_vars:
+        value = os.environ[var] if var in os.environ else "N/A"
+        formatted_output += "env:%s=%s\n" % (var, value)
+    print(formatted_output)
+5.1.2 DDP类分析
+class DistributedDataParallel(Module, Joinable): # 继承自 nn.Module
+
+
+六：总结
+编辑于 2023-08-23 14:07・IP 属地陕西

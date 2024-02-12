@@ -68,10 +68,11 @@
 #   USE_MPI=0
 #     disables distributed MPI backend build
 #
-#   USE_SYSTEM_NCCL=0
+#   USE_SYSTEM_NCCL=0  # 使用环境上安装的nccl，还是pytorch 在 third_party/nccl 下放的nccl，默认使用
 #     disables use of system-wide nccl (we will use our submoduled
 #     copy in third_party/nccl)
-#
+#   系统安装的NCCL的路径信息，需要在USE_SYSTEM_NCCL=1时生效
+
 #   BUILD_CAFFE2_OPS=0
 #     disable Caffe2 operators build
 #
