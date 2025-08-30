@@ -154,9 +154,3 @@
 [submodule "third_party/cutlass"]
 	path = third_party/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
-[submodule "extension-cpp"]
-	path = extension-cpp
-	url = https://github.com/pytorch/extension-cpp
-[submodule "ext_prj/pytorch-custom-cuda-tutorial"]
-	path = ext_prj/pytorch-custom-cuda-tutorial
-	url = https://github.com/chrischoy/pytorch-custom-cuda-tutorial
