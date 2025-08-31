@@ -31,6 +31,7 @@ class CodeTemplate:
     @staticmethod
     def from_file(filename: str) -> 'CodeTemplate':
         with open(filename, 'r') as f:
+            print(filename)
             return CodeTemplate(f.read(), filename)
 
     def __init__(self, pattern: str, filename: str = "") -> None:
