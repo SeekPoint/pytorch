@@ -368,7 +368,7 @@ std::vector<at::Tensor>& scatter_out(
   return out_tensors;
 }
 
-'''
+/*
 在 scatter 之中可以看到，scatter就是把数据分布到各个GPU之上，逻辑如下：
 
     首先调用 split_with_sizes 或者chunk 把tensor分割成 chunks。
@@ -422,9 +422,7 @@ scatter 的作用就是把tensor进行split，然后分发给各个设备的流�
 |                                                                                      |
 |                                                                                      |
 +--------------------------------------------------------------------------------------+
-
-
-'''
+*/
 std::vector<at::Tensor> scatter(
     const at::Tensor& tensor,
     at::IntArrayRef devices,

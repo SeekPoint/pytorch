@@ -25,12 +25,11 @@ namespace c10d {
 
 constexpr const char* MPI_BACKEND_NAME = "mpi";
 
-'''
-4.2.3.1 执行封装
-这里有两个封装，WorkEntry 封装计算执行，WorkMPI封装计算执行结果（因为计算是异步的）。具体如下：
 
-WorkEntry 是执行方法的封装，或者说每次需要执行的集合通信操作，都要封装在这里。
-'''
+//4.2.3.1 执行封装
+//这里有两个封装，WorkEntry 封装计算执行，WorkMPI封装计算执行结果（因为计算是异步的）。具体如下：
+//WorkEntry 是执行方法的封装，或者说每次需要执行的集合通信操作，都要封装在这里。
+
 // WorkEntry is the state associated with a single MPI run instance.
 // It include the source Tensor list and destination Tensor list, as well as
 // The actual run function that will operate either on src or dst or both.

@@ -139,7 +139,7 @@ DistEngine::DistEngine()
           global_cpu_ready_queue_) {
   // Note [GPU to CPU continuations]
   // ~~~~~~~~~~~~~~~~~~~~~~~~~~
-  以下是 GPU to CPU continuations 的翻译和理解。
+//以下是 GPU to CPU continuations 的翻译和理解。
 //
 //Continuations 最初应该是在schema语言里面接触过的，后来也看过不少语言用到，这个概念没有找到一个很好的延续概念，暂时使用"延续"这个翻译。
 //

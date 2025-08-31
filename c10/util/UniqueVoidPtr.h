@@ -38,7 +38,7 @@ C10_API void deleteNothing(void*);
 // to reflect this.
 //
 //这个类位于最底层，用来直接维护tensor所需的内存。
-*/
+
 class UniqueVoidPtr {
  private:
   // Lifetime tied to ctx_

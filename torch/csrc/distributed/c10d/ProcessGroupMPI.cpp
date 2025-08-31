@@ -16,7 +16,7 @@
 namespace c10d {
 
 
-'''
+/*
                                                                         +
                                                              Worker 1   |   Worker 2
                                                                         |
@@ -55,7 +55,7 @@ namespace c10d {
                                                                         +
 
 
-'''
+*/
 #define MPI_CHECK(cmd)                                                   \
   do {                                                                   \
     int mpiStatus = cmd;                                                 \

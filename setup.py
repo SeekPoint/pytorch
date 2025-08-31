@@ -1,3 +1,4 @@
+from __future__ import print_function
 # Welcome to the PyTorch setup.py.
 #
 # Environment variables you are probably interested in:
@@ -235,7 +236,7 @@ setup.py与setuptools
 
 10，setuptools之install_lib。
 '''
-from __future__ import print_function
+
 import sys
 from pydebug import debuginfo
 if sys.version_info < (3,):
@@ -386,7 +387,7 @@ def check_submodules():
     if bool(os.getenv("USE_SYSTEM_LIBS", False)):
         return
     folders = get_submodule_folders()
-    debuginfo("yk==folders:", folders)
+    debuginfo("yk==folders:{folders}")
     # If none of the submodule folders exists, try to initialize them
     if all(not_exists_or_empty(folder) for folder in folders):
         try:

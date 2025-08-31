@@ -54,7 +54,7 @@ struct Block2D {
 //   - The size of each block should be a multiple of `C10_WARP_SIZE`
 //   - `shared` should be a pointer to shared memory with size of, at least,
 //     `sizeof(T) * number_of_warps`
-'''
+/*
 Pytorch CUDA源码解析 - BlockReduceSum
 https://zhuanlan.zhihu.com/p/584936904
 
@@ -127,7 +127,7 @@ width表示求和的宽度（个数）
 至此，便完成了Pytorch中BlockReduceSum函数的解析，第一次写文章，如有不对之处还请指出。
 
 
-'''
+*/
 template <typename T, typename B = Block1D>
 __inline__ __device__ T BlockReduceSum(T val, T* shared) {
   const int tid = B::Tid();

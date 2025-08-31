@@ -6,7 +6,7 @@ from typing import List, Optional
 from torch.utils._foreach_utils import _group_tensors_by_device_and_dtype
 
 __all__ = ['SGD', 'sgd']
-\'''
+'''
 我们用 SGD 来进一步看看优化器。SGD（stochastic gradient descent）是随机梯度下降，即梯度下降的batch版本。
 对于训练数据集，将其分成n个batch，每个batch包含m个样本。每次更新都利用一个batch的数据，而非整个训练集。
 
